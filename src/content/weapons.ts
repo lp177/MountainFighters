@@ -20,6 +20,7 @@ import type { WeaponDef, WeaponKind } from '@/core/types';
 export const WEAPONS: Record<WeaponKind, WeaponDef> = {
   chain: {
     kind: 'chain',
+    sfx: { reveal: 'chain_whip', swing: 'chain_whip', impact: 'hit_metal' },
     name: 'Bike Chain',
     // Long, cheap, wraps round guards. Poor per-hit damage, superb reach.
     durability: 28,
@@ -39,6 +40,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
 
   bat: {
     kind: 'bat',
+    sfx: { reveal: 'bat_crack', swing: 'weapon_swing', impact: 'bat_crack' },
     name: 'Aluminium Bat',
     // The crowd-pleaser. Big damage, dents fast.
     durability: 18,
@@ -57,6 +59,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
 
   ironbar: {
     kind: 'ironbar',
+    sfx: { reveal: 'hit_metal', swing: 'weapon_swing', impact: 'hit_metal', pitch: 0.82 },
     name: 'Length of Rebar',
     // Nearly indestructible, slow, and it goes straight through a suit.
     durability: 46,
@@ -76,6 +79,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
 
   pipe: {
     kind: 'pipe',
+    sfx: { reveal: 'hit_metal', swing: 'weapon_swing', impact: 'hit_metal', pitch: 1.15 },
     name: 'Lead Pipe',
     // Short, dense, honest. The starter weapon of every wet alley in the game.
     durability: 24,
@@ -94,6 +98,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
 
   taser: {
     kind: 'taser',
+    sfx: { reveal: 'taser', swing: 'taser', impact: 'taser' },
     name: 'Compliance Taser',
     // Low damage, enormous stun. Eight cartridges of workplace culture.
     durability: -1,
@@ -113,6 +118,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
 
   pistol: {
     kind: 'pistol',
+    sfx: { reveal: 'gunshot', swing: 'weapon_swing', impact: 'gunshot' },
     name: 'Executive Sidearm',
     // Six rounds, no reload, wildly out of proportion to the situation.
     durability: -1,
@@ -132,6 +138,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
 
   riotshield: {
     kind: 'riotshield',
+    sfx: { reveal: 'block', swing: 'weapon_swing', impact: 'block', pitch: 0.9 },
     name: 'Riot Shield',
     // Barely a weapon. Absolutely a wall. Slows you to a shuffle.
     durability: 40,
@@ -150,6 +157,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
 
   cybertruck_door: {
     kind: 'cybertruck_door',
+    sfx: { reveal: 'glass', swing: 'weapon_swing', impact: 'hit_metal', pitch: 0.7 },
     name: 'Cybertruck Door',
     // Eighty kilos of unpainted stainless despair. Two hits, one funeral.
     durability: 12,
@@ -172,6 +180,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
 
   keyboard: {
     kind: 'keyboard',
+    sfx: { reveal: 'drop', swing: 'weapon_swing', impact: 'glass', pitch: 1.35 },
     name: 'Mechanical Keyboard',
     // Fast, light, extremely loud, does almost nothing. Ninety-eight percent
     // of the damage is emotional.
@@ -191,6 +200,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
 
   gpu: {
     kind: 'gpu',
+    sfx: { reveal: 'robot_death', swing: 'weapon_swing', impact: 'hit_metal', pitch: 1.2 },
     name: 'Flagship GPU',
     // A brick of silicon worth more than the flat you grew up in. Swing it.
     durability: 15,

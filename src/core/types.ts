@@ -304,6 +304,23 @@ export interface WeaponDef {
   art: WeaponArt;
   /** True if it is a ranged weapon that spends ammo. */
   ammo?: number;
+  /**
+   * How the weapon sounds. `art` says what it looks like; this says what it is.
+   * Used for the select-screen reveal and anywhere a weapon needs a voice of
+   * its own — without it every weapon reveal played the same generic cue.
+   */
+  sfx: WeaponSfx;
+}
+
+export interface WeaponSfx {
+  /** Played when the weapon is first produced or picked up. */
+  reveal: SfxCue;
+  /** Played as it moves through the air. */
+  swing: SfxCue;
+  /** Played when it connects with something solid. */
+  impact: SfxCue;
+  /** Multiplies the playback rate, so a crowbar reads heavier than a pipe. */
+  pitch?: number;
 }
 
 export interface WeaponArt {

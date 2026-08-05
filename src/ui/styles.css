@@ -159,6 +159,18 @@ body {
   scrollbar-color: var(--outline-strong) transparent;
 }
 
+/*
+ * Children keep their natural height instead of being squeezed to fit.
+ *
+ * Without this a flex column at max-height shrinks its children, and since
+ * .panel clips its overflow the result is a panel sliced through the middle of
+ * a row rather than a view that scrolls. The Controls page, being the tallest
+ * thing in the game, showed about one and a half of its twelve rows.
+ */
+.ui-view > * {
+  flex: 0 0 auto;
+}
+
 .ui-view::-webkit-scrollbar {
   width: 10px;
 }
@@ -782,6 +794,256 @@ body {
   font-style: italic;
 }
 
+/* ── Key binding editor ───────────────────────────────────────────────────── *
+ * Bindings are stored by physical key POSITION, so every label printed in here
+ * is whatever is actually engraved on the player's own keyboard — Z Q S D on an
+ * AZERTY board, W A S D on a QWERTY one, same four keys either way.
+ *
+ * Rows are a grid rather than a table because they have to survive a phone-width
+ * pause menu, where the action name wraps and everything else holds its ground.
+ */
+
+.kbe {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.kbe__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+
+/* Segmented control: one pill, one lit segment. */
+.kbe__tabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  background: var(--surface-0);
+  border: 1px solid var(--outline);
+  border-radius: var(--r-pill);
+}
+
+.kbe__tab {
+  min-height: 32px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--on-surface-dim);
+  font-family: var(--font-display);
+  font-size: var(--fs-sm);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    background-color var(--dur-2) var(--ease-std),
+    color var(--dur-2) var(--ease-std);
+}
+
+.kbe__tab:hover {
+  color: var(--on-surface);
+}
+
+.kbe__tab[aria-selected="true"] {
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: var(--elev-1);
+}
+
+.kbe__tab:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
+}
+
+.kbe__layout {
+  margin: 0;
+  font-size: var(--fs-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--on-surface-faint);
+}
+
+.kbe__layout b {
+  font-family: var(--font-mono);
+  color: var(--on-surface-dim);
+}
+
+.kbe__hint {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--on-surface-faint);
+}
+
+.kbe__panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.kbe__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.kbe__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px 4px 12px;
+  background: var(--surface-0);
+  border: 1px solid var(--outline);
+  border-left: 3px solid var(--outline-strong);
+  border-radius: var(--r-sm);
+  transition:
+    background-color var(--dur-2) var(--ease-std),
+    border-color var(--dur-2) var(--ease-std);
+}
+
+.kbe__action {
+  min-width: 0;
+  font-size: var(--fs-sm);
+  color: var(--on-surface);
+  overflow-wrap: anywhere;
+}
+
+/* The key button quotes the engraving, so it is monospaced and never shouted in
+   caps — "Num ." is not "NUM .". */
+.kbe__key {
+  min-width: 11ch;
+  min-height: 34px;
+  padding: 0 10px;
+}
+
+.kbe__key .btn__label {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--accent-2);
+}
+
+.kbe__clear {
+  min-width: 38px;
+  min-height: 34px;
+  padding: 0 8px;
+  font-family: var(--font);
+  color: var(--on-surface-faint);
+}
+
+.kbe__clear .btn__label {
+  font-size: var(--fs-lg);
+  line-height: 1;
+}
+
+.kbe__clear:hover:not([disabled]) {
+  color: var(--danger);
+}
+
+/* Unbound is a state worth seeing from across the room, not a quiet dash. */
+.kbe__row.is-unbound {
+  border-left-color: var(--warn);
+}
+
+.kbe__row.is-unbound .kbe__key .btn__label {
+  color: var(--on-surface-faint);
+}
+
+/* Awaiting a key. Colour is the least of it — the label changes to "press a
+   key", the border goes dashed and a caret blinks, so the state still reads on
+   a monochrome screen or through any flavour of colour blindness. */
+.kbe__row.is-capturing {
+  border-left-color: var(--accent-2);
+  background: color-mix(in srgb, var(--accent-2) 8%, var(--surface-0));
+}
+
+.kbe__key.is-capturing {
+  border-style: dashed;
+  border-color: var(--accent-2);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-2) 22%, transparent);
+}
+
+.kbe__key.is-capturing .btn__label {
+  color: var(--accent-2);
+}
+
+/* Kept in the layout even when idle, so entering capture mode does not make the
+   row twitch sideways. */
+.kbe__cue {
+  position: relative;
+  z-index: 1;
+  order: -1;
+  width: 0.5em;
+  height: 1.1em;
+  background: var(--accent-2);
+  border-radius: 1px;
+  visibility: hidden;
+}
+
+.kbe__key.is-capturing .kbe__cue {
+  visibility: visible;
+  animation: kbe-caret 1s steps(1, end) infinite;
+}
+
+@keyframes kbe-caret {
+  50% {
+    opacity: 0.1;
+  }
+}
+
+.kbe__foot {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* The line is reserved: a message arriving must not shove the rows upward under
+   the pointer that is about to click one. */
+.kbe__status {
+  min-height: calc(var(--fs-sm) * var(--lh));
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--on-surface-dim);
+}
+
+.kbe__status--ok {
+  color: var(--ok);
+}
+
+.kbe__status--warn {
+  color: var(--warn);
+}
+
+@media (max-width: 480px) {
+  .kbe__row {
+    padding-left: 8px;
+  }
+
+  .kbe__action {
+    font-size: var(--fs-xs);
+  }
+
+  .kbe__key {
+    min-width: 9ch;
+    padding: 0 6px;
+  }
+
+  .kbe__tab {
+    padding: 0 10px;
+  }
+}
+
 /* ── Feedback ─────────────────────────────────────────────────────────────── */
 
 .notice {
@@ -863,6 +1125,13 @@ body {
     opacity: 1;
   }
 
+  /* The caret stops blinking but stays put: it is what marks the key button as
+     armed, so it is information, not decoration. */
+  .kbe__key.is-capturing .kbe__cue {
+    animation: none;
+    opacity: 1;
+  }
+
   .btn__spinner {
     animation-duration: 2.4s !important;
     animation-iteration-count: infinite !important;
@@ -883,6 +1152,11 @@ html.reduced-motion .ripple {
 }
 
 html.reduced-motion .waiting__dot {
+  animation: none;
+  opacity: 1;
+}
+
+html.reduced-motion .kbe__key.is-capturing .kbe__cue {
   animation: none;
   opacity: 1;
 }

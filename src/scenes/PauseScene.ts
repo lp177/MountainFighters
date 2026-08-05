@@ -23,8 +23,11 @@ import { DEFAULT_INPUT_DELAY, VIEW_H, VIEW_W } from '@/core/constants';
 import { clamp } from '@/core/math';
 import { saveSave } from '@/engine/Save';
 import { GamepadSource, connectedGamepads, pollGamepads } from '@/engine/input/GamepadSource';
+import { KeyboardSource, isCapturing, refreshOwnedKeys } from '@/engine/input/KeyboardSource';
+import { defaultBindingsFor } from '@/engine/input/Bindings';
 
 import { Ui, setReducedMotion } from '@/ui/Ui';
+import { keyBindingEditor } from '@/ui/KeyBindingEditor';
 import { button, panel, slider, toggle } from '@/ui/Widgets';
 
 import { NetSession } from '@/net/NetSession';
@@ -200,6 +203,12 @@ export class MenuInput {
     const move = (pressed & dirs) | (repeat & this.prev & dirs);
     this.prev = mask;
 
+    // The binding editor is waiting for a key. Everything is still sampled so a
+    // button held across the wait does not read as a fresh press afterwards,
+    // but nothing acts on it: walking focus now would move the menu out from
+    // under the row being rebound.
+    if (isCapturing()) return;
+
     if (move & Btn.Up) this.moveFocus(-1);
     else if (move & Btn.Down) this.moveFocus(1);
     else if (move & Btn.Left) this.adjust(-1);
@@ -213,6 +222,11 @@ export class MenuInput {
   /** Also exposed so a Game that routes DOM keys can call it directly. */
   readonly onKey = (e: KeyboardEvent): void => {
     if (!this.attached) return;
+    // This handler is registered before the binding editor's own, so it would
+    // otherwise get first refusal on the very keypress the editor is waiting
+    // for: Escape would close the page instead of cancelling the capture, and
+    // Space would re-click the button rather than becoming the new Jump key.
+    if (isCapturing()) return;
     if (e.altKey || e.ctrlKey || e.metaKey) return;
 
     if (e.code === 'Escape') {
@@ -377,16 +391,25 @@ type View = 'root' | 'settings' | 'controls' | 'invite';
 
 const DISPLAY = 'Impact, "Arial Black", "Helvetica Neue", system-ui, sans-serif';
 
-const CONTROL_ROWS: readonly [string, string, string, string][] = [
-  ['Move', 'W A S D', 'Arrow keys', 'Left stick / d-pad'],
-  ['Light attack', 'F', 'Numpad 1', 'A / ✕'],
-  ['Heavy attack', 'G', 'Numpad 2', 'B / ○'],
-  ['Jump', 'Space', 'Numpad 0', 'X / □'],
-  ['Special', 'H', 'Numpad 3', 'Y / △'],
-  ['Block / parry', 'Left Shift', 'Numpad .', 'RB / R1'],
-  ['Grab', 'R', 'Numpad 5', 'LB / L1'],
-  ['Super (1 bar)', 'T', 'Numpad +', 'RT / R2'],
-  ['Pause', 'Esc', 'Esc', 'Start'],
+/**
+ * The pad half of the controls page.
+ *
+ * The keyboard half used to be a hard-coded table that said W A S D to
+ * everybody, including the people whose W is two rows away. It is now the
+ * shared binding editor, which reads the live bindings and names every key the
+ * way the player's own keyboard names it. The pad cannot be remapped here, so
+ * it stays a table.
+ */
+const PAD_ROWS: readonly (readonly [string, string])[] = [
+  ['Move', 'Left stick / d-pad'],
+  ['Light attack', 'A / ✕'],
+  ['Heavy attack', 'B / ○'],
+  ['Jump', 'X / □'],
+  ['Special', 'Y / △'],
+  ['Block / parry', 'RB / R1'],
+  ['Grab', 'LB / L1'],
+  ['Super (1 bar)', 'RT / R2'],
+  ['Pause', 'Start'],
 ];
 
 export class PauseScene implements Scene {
@@ -657,25 +680,30 @@ export class PauseScene implements Scene {
   }
 
   private controlsView(): HTMLElement {
-    const list = document.createElement('ul');
-    list.className = 'list';
+    const intro = document.createElement('p');
+    intro.className = 'hint';
+    intro.textContent =
+      'Keys are stored by position on the board rather than by the letter on the cap, so the ' +
+      'movement diamond is ZQSD on an AZERTY keyboard and WASD on a QWERTY one on its own. ' +
+      'Change anything you like: it lands on the fight you are standing in, not on the next one.';
 
-    const head = document.createElement('li');
-    head.className = 'list__item';
-    head.appendChild(cell('Action', 'grow'));
-    head.appendChild(cell('Player 1'));
-    head.appendChild(cell('Player 2'));
-    head.appendChild(cell('Gamepad'));
-    list.appendChild(head);
+    const editor = keyBindingEditor({
+      bindings: this.settings.bindings,
+      slots: [0, 1],
+      onChange: (next) => {
+        this.applyBindings(next);
+        this.host.audio.play('ui_select', { gain: 0.5 });
+      },
+    });
 
-    for (const [action, p1, p2, pad] of CONTROL_ROWS) {
+    const pads = document.createElement('ul');
+    pads.className = 'list';
+    for (const [action, pad] of PAD_ROWS) {
       const li = document.createElement('li');
       li.className = 'list__item';
       li.appendChild(cell(action, 'grow'));
-      li.appendChild(chip(p1));
-      li.appendChild(chip(p2));
       li.appendChild(chip(pad));
-      list.appendChild(li);
+      pads.appendChild(li);
     }
 
     const notes = document.createElement('p');
@@ -685,10 +713,11 @@ export class PauseScene implements Scene {
       'A full bar buys the ultimate, and the ultimate does not care where anybody is standing.';
 
     const foot = div('row row--end');
-    foot.appendChild(button('Back', () => this.back(), { variant: 'filled', autofocus: true }));
+    foot.appendChild(button('Back', () => this.back(), { variant: 'filled' }));
 
     const stack = div('stack');
-    stack.appendChild(panel('Controls', list, notes));
+    stack.appendChild(panel('Controls', intro, editor, notes));
+    stack.appendChild(panel('Gamepad', pads));
     stack.appendChild(foot);
     return stack;
   }
@@ -920,6 +949,38 @@ export class PauseScene implements Scene {
       return;
     }
     saveSave(this.host.save);
+  }
+
+  /**
+   * A rebind, applied to the fight that is frozen underneath this menu.
+   *
+   * The Game knows how to do this properly — save, suppression set, every live
+   * input source — so it is asked first. The fallback is the same three steps
+   * done by hand, because a host that is not Game still has a player sitting in
+   * front of a keyboard that has just changed meaning.
+   */
+  private applyBindings(next: Record<number, Record<string, number>>): void {
+    const fn = (this.host as unknown as Record<string, unknown>).applyBindings;
+    if (typeof fn === 'function') {
+      (fn as (b: Record<number, Record<string, number>>) => void).call(this.host, next);
+      return;
+    }
+
+    const merged: Record<number, Record<string, number>> = { ...this.settings.bindings };
+    for (const key of Object.keys(next)) {
+      const slot = Number(key);
+      const map = next[slot];
+      if (!Number.isInteger(slot) || slot < 0 || !map || typeof map !== 'object') continue;
+      merged[slot] = { ...map };
+    }
+    this.settings.bindings = merged;
+
+    refreshOwnedKeys(merged);
+    for (const slot of this.host.input.slots) {
+      const src = this.host.input.source(slot);
+      if (src instanceof KeyboardSource) src.setBindings(merged[slot] ?? defaultBindingsFor(slot));
+    }
+    this.persist();
   }
 }
 

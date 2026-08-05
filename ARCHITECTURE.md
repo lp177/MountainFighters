@@ -113,11 +113,51 @@ export function defaultSave(): SaveData;
 export function defaultSettings(): Settings;
 ```
 
-### `src/engine/input/Bindings.ts`
+### `src/engine/input/Layout.ts`
+
+Which keyboard is actually under the player's hands — for LABELS only. Bindings
+are by physical position and never consult this. Detection is asynchronous
+(`navigator.keyboard.getLayoutMap()`, Chromium only) with a language-tag guess
+as the fallback, so anything that prints a key name subscribes to
+`onLayoutChange` and repaints when the truth lands.
 
 ```ts
-/** Default keyboard layouts. Slot 0 = WASD + FGH/space, slot 1 = arrows + numpad. */
+export type LayoutId = 'qwerty' | 'azerty' | 'qwertz' | 'dvorak' | 'colemak' | 'other';
+/** Start detection. Never awaited by the game; labels improve when it resolves. */
+export function initKeyboardLayout(): Promise<void>;
+export function layoutId(): LayoutId;
+export function layoutIsGuess(): boolean;
+/** 'AZERTY', 'Dvorak', 'QWERTY (assumed)'. */
+export function layoutName(): string;
+/** The glyph engraved on the key at a physical position: keyLabel('KeyW') = 'Z' on AZERTY. */
+export function keyLabel(code: string): string;
+export function movementLabelForCodes(codes: readonly string[]): string;
+/** 'WASD' on a US board, 'ZQSD' on a French one, 'Arrows' for player two. */
+export function movementKeysLabel(slot: number): string;
+export function onLayoutChange(fn: () => void): () => void;
+```
+
+### `src/engine/input/Bindings.ts`
+
+Keyed by `KeyboardEvent.code` — physical key POSITION, not the printed letter.
+This is what makes the movement diamond correct on every keyboard on earth
+without a per-layout default table, and adding one would break exactly the
+people it claims to help.
+
+```ts
+/** Default bindings by slot. Slot 0 = the WASD diamond + FGH/space, slot 1 = arrows + numpad. */
 export const DEFAULT_BINDINGS: Record<number, Record<string, number>>;
+export interface ActionDef { bit: number; id: string; name: string }
+/** Every rebindable action, in the order a rebinding screen lists them. */
+export const ACTIONS: ActionDef[];
+/** A fresh copy, so "Reset to defaults" cannot redefine the defaults. */
+export function defaultBindingsFor(slot: number): Record<string, number>;
+/** The action already on this key, for a rebinder that refuses to steal silently. */
+export function conflictFor(bindings: Record<string, number>, code: string): number | null;
+export function codeForBit(bindings: Record<string, number>, bit: number): string | null;
+export function actionForBit(bit: number): ActionDef | null;
+/** 'Keyboard (ZQSD)' — built from what is bound now and from what the keys say. */
+export function labelForBindings(bindings: Record<string, number>, slot: number): string;
 export function bindingLabel(slot: number): string;
 ```
 
@@ -126,11 +166,18 @@ export function bindingLabel(slot: number): string;
 ```ts
 export class KeyboardSource implements InputSource {
   constructor(slot: number, bindings: Record<string, number>);
+  /** Swap the key map live, so a rebind lands on the fight already in progress. */
+  setBindings(bindings: Record<string, number>): void;
   // Listens on window; call dispose() to detach.
 }
 /** Installed once at boot; all KeyboardSources read from this shared key state. */
 export function installKeyboard(): void;
 export function isKeyDown(code: string): boolean;
+/** Recompute which keys get preventDefault, from every slot's CURRENT bindings. */
+export function refreshOwnedKeys(all: Record<number, Record<string, number>>): void;
+/** Hand the keyboard to the rebinding editor: no preventDefault, no held state. */
+export function setCaptureMode(on: boolean): void;
+export function isCapturing(): boolean;
 ```
 
 ### `src/engine/input/GamepadSource.ts`
@@ -499,6 +546,17 @@ export function panel(title: string, ...children: HTMLElement[]): HTMLElement;
 export function slider(label, min, max, value, onChange): HTMLElement;
 export function toggle(label, value, onChange): HTMLElement;
 export function attachRipple(el: HTMLElement): void;
+// KeyBindingEditor.ts — ONE editor, mounted by both the title screen's Controls
+// page and the pause menu. No key name in it is hard-coded; every one comes
+// from Layout.keyLabel() and repaints through onLayoutChange().
+export interface KeyBindingEditorOpts {
+  bindings: Record<number, Record<string, number>>;
+  slots: number[];
+  onChange(next: Record<number, Record<string, number>>): void;
+}
+export function keyBindingEditor(opts: KeyBindingEditorOpts): HTMLElement;
+/** Only for a caller that drops the editor without detaching it; removal self-cleans. */
+export function disposeKeyBindingEditor(host: HTMLElement): void;
 // Hud.ts
 export function drawHud(ctx: C2D, players: Fighter[], level: Level, frame: number): void;
 ```

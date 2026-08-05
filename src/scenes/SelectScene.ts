@@ -702,7 +702,12 @@ export class SelectScene implements Scene {
         });
       }
     } else if (f === T_POSE + F_WEAPON) {
-      this.game.audio.play('pickup', { gain: 0.7 });
+      // Every dwarf produces a different weapon, so this must not always be the
+      // same generic pickup blip. A bike chain rattles, a bat cracks, a taser
+      // buzzes, a Cybertruck door is a sheet of broken glass.
+      const w = WEAPONS[d.signatureWeapon];
+      this.game.audio.play('pickup', { gain: 0.32, pitch: 1.15 });
+      this.game.audio.play(w.sfx.reveal, { gain: 0.85, pitch: w.sfx.pitch ?? 1 });
       this.kick(0.02, 2, 0.12, GOLD);
     }
   }

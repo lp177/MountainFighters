@@ -120,6 +120,34 @@ export class Camera {
     return (VIEW_W - VIEW_W / z) * 0.5;
   }
 
+  /**
+   * The zoom the scene asked for, ignoring the hit-kick riding on top of it.
+   *
+   * An external write is adopted immediately rather than on the next update(),
+   * so the play area is correct on the very first frame of a scene instead of
+   * being a frame late and letting a fighter start out of bounds.
+   */
+  get baseZoom(): number {
+    const z = this.zoom !== this._lastZoom ? this.zoom : this._zoomBase;
+    return z > 0.05 ? z : 1;
+  }
+
+  /**
+   * World x of the left and right edges of what is ACTUALLY on screen.
+   *
+   * Deliberately measured off baseZoom, not zoom: the camera punch would
+   * otherwise breathe the play area in and out on every heavy hit, and a
+   * boundary that moves while you are being knocked into it is worse than no
+   * boundary at all.
+   */
+  get playLeft(): number {
+    return this.x + (VIEW_W - VIEW_W / this.baseZoom) * 0.5;
+  }
+
+  get playRight(): number {
+    return this.x + VIEW_W - (VIEW_W - VIEW_W / this.baseZoom) * 0.5;
+  }
+
   addShake(spec: ShakeSpec): void {
     const mag = spec.magnitude * SHAKE_SCALE;
     if (!(mag > 0)) return;

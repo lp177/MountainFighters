@@ -26,8 +26,10 @@ import type { LobbyParams } from '@/scenes/LobbyScene';
 
 import { MAX_LOCAL_PLAYERS, VIEW_H, VIEW_W } from '@/core/constants';
 import { TAU, clamp, lerp } from '@/core/math';
-import { DEFAULT_BINDINGS } from '@/engine/input/Bindings';
-import { installKeyboard } from '@/engine/input/KeyboardSource';
+import { codeForBit, defaultBindingsFor } from '@/engine/input/Bindings';
+import { keyLabel, movementKeysLabel, movementLabelForCodes, onLayoutChange } from '@/engine/input/Layout';
+import { installKeyboard, isCapturing } from '@/engine/input/KeyboardSource';
+import { keyBindingEditor } from '@/ui/KeyBindingEditor';
 import { DWARFS } from '@/content/dwarfs';
 import { CLIPS, sampleClip } from '@/render/rig/Anim';
 import { DWARF_SKELETON } from '@/render/rig/Skeleton';
@@ -146,66 +148,23 @@ function drawTracked(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Key labels for the controls page
+// The gamepad half of the controls page
+//
+// Keyboard bindings are printed by the shared editor, which reads them off the
+// live save and names each key the way the player's own keyboard names it. The
+// pad is not rebindable, so it is the one table left worth writing down.
 // ─────────────────────────────────────────────────────────────────────────────
 
-function keyLabel(code: string): string {
-  if (code.startsWith('Key')) return code.slice(3);
-  if (code.startsWith('Digit')) return code.slice(5);
-  if (code.startsWith('Numpad')) {
-    const rest = code.slice(6);
-    if (rest === 'Decimal') return 'Num .';
-    if (rest === 'Add') return 'Num +';
-    if (rest === 'Subtract') return 'Num −';
-    if (rest === 'Enter') return 'Num ⏎';
-    return `Num ${rest}`;
-  }
-  switch (code) {
-    case 'ArrowUp':
-      return '↑';
-    case 'ArrowDown':
-      return '↓';
-    case 'ArrowLeft':
-      return '←';
-    case 'ArrowRight':
-      return '→';
-    case 'ShiftLeft':
-      return 'L Shift';
-    case 'ShiftRight':
-      return 'R Shift';
-    case 'Space':
-      return 'Space';
-    case 'Escape':
-      return 'Esc';
-    default:
-      return code;
-  }
-}
-
-/** Reverse a bindings map so the controls page can print it back to the player. */
-function codeForBit(bindings: Record<string, number>, bit: number): string {
-  for (const code of Object.keys(bindings)) {
-    if (bindings[code] === bit) return keyLabel(code);
-  }
-  return '—';
-}
-
-interface ControlRow {
-  action: string;
-  bit: number;
-  pad: string;
-}
-
-const CONTROL_ROWS: ControlRow[] = [
-  { action: 'Move', bit: Btn.Left, pad: 'Stick / D-pad' },
-  { action: 'Light attack', bit: Btn.Light, pad: 'A / ✕' },
-  { action: 'Heavy attack', bit: Btn.Heavy, pad: 'B / ○' },
-  { action: 'Jump', bit: Btn.Jump, pad: 'X / □' },
-  { action: 'Special', bit: Btn.Special, pad: 'Y / △' },
-  { action: 'Block', bit: Btn.Block, pad: 'RB / R1' },
-  { action: 'Grab', bit: Btn.Grab, pad: 'LB / L1' },
-  { action: 'Super', bit: Btn.Super, pad: 'RT / R2' },
-  { action: 'Pause', bit: Btn.Pause, pad: 'Start' },
+const PAD_ROWS: readonly (readonly [string, string])[] = [
+  ['Move', 'Left stick / d-pad'],
+  ['Light attack', 'A / ✕'],
+  ['Heavy attack', 'B / ○'],
+  ['Jump', 'X / □'],
+  ['Special', 'Y / △'],
+  ['Block', 'RB / R1'],
+  ['Grab', 'LB / L1'],
+  ['Super', 'RT / R2'],
+  ['Pause', 'Start'],
 ];
 
 interface Ember {
@@ -235,6 +194,9 @@ export class HomeScene implements Scene {
   private notice = '';
 
   private root: HTMLElement | null = null;
+
+  /** Unsubscribe for the keyboard-layout watch. See onLayoutSettled(). */
+  private layoutOff: (() => void) | null = null;
 
   private navHeld = 0;
   private navTimer = 0;
@@ -283,6 +245,7 @@ export class HomeScene implements Scene {
     this.cancelled = false;
     this.navHeld = 0;
     this.navTimer = 0;
+    this.layoutOff = onLayoutChange(() => this.onLayoutSettled());
 
     const p = (params ?? {}) as HomeParams;
     this.notice = typeof p.error === 'string' ? p.error : '';
@@ -305,6 +268,8 @@ export class HomeScene implements Scene {
 
   exit(): void {
     this.cancelled = true;
+    this.layoutOff?.();
+    this.layoutOff = null;
     this.detachRoot();
     // A session still mid-handshake when the scene dies is a leak with a WebRTC
     // connection attached to it.
@@ -683,7 +648,12 @@ export class HomeScene implements Scene {
     label.className = 'hint';
     label.style.textAlign = 'center';
     label.style.margin = '4px 0 0';
-    label.textContent = 'Or share this keyboard and a few gamepads:';
+    // Whatever is bound right now, named the way this keyboard names it. A
+    // French player is told ZQSD because that is what is under their fingers.
+    label.textContent =
+      `Or share this keyboard and a few gamepads — player one on ${this.moveKeys(0)} ` +
+      `and ${this.keyFor(0, Btn.Light)}/${this.keyFor(0, Btn.Heavy)}, player two on ` +
+      `${this.moveKeys(1)} and the numpad:`;
     col.appendChild(label);
 
     for (let n = 2; n <= MAX_LOCAL_PLAYERS; n++) {
@@ -772,48 +742,22 @@ export class HomeScene implements Scene {
   }
 
   private buildControls(): HTMLElement {
-    const bindings = this.game.save.settings.bindings;
-    const p1 = bindings[0] ?? DEFAULT_BINDINGS[0];
-    const p2 = bindings[1] ?? DEFAULT_BINDINGS[1];
+    const intro = document.createElement('p');
+    intro.className = 'hint';
+    intro.textContent =
+      'Keys are stored by where they sit on the board, not by the letter stamped on them, so the ' +
+      'movement diamond comes out as ZQSD on an AZERTY keyboard and WASD on a QWERTY one without ' +
+      'anybody configuring anything. The names below are read off your own keyboard. Rebind ' +
+      'whatever you like — it takes effect immediately, mid-fight included.';
 
-    const grid = document.createElement('div');
-    grid.style.display = 'grid';
-    grid.style.gridTemplateColumns = 'minmax(96px, 1.2fr) 1fr 1fr 1fr';
-    grid.style.gap = '4px 12px';
-    grid.style.fontSize = 'var(--fs-sm)';
-
-    const head = (txt: string): HTMLElement => {
-      const el = document.createElement('div');
-      el.className = 'field__label';
-      el.textContent = txt;
-      return el;
-    };
-    grid.append(head('Action'), head('Player 1'), head('Player 2'), head('Gamepad'));
-
-    for (const rowDef of CONTROL_ROWS) {
-      const a = document.createElement('div');
-      a.textContent = rowDef.action;
-      a.style.color = 'var(--on-surface)';
-
-      const mk = (txt: string): HTMLElement => {
-        const el = document.createElement('div');
-        el.textContent = txt;
-        el.style.fontFamily = 'var(--font-mono)';
-        el.style.color = 'var(--accent-2)';
-        return el;
-      };
-
-      const one =
-        rowDef.bit === Btn.Left
-          ? `${codeForBit(p1, Btn.Up)}${codeForBit(p1, Btn.Left)}${codeForBit(p1, Btn.Down)}${codeForBit(p1, Btn.Right)}`
-          : codeForBit(p1, rowDef.bit);
-      const two =
-        rowDef.bit === Btn.Left
-          ? `${codeForBit(p2, Btn.Up)}${codeForBit(p2, Btn.Left)}${codeForBit(p2, Btn.Down)}${codeForBit(p2, Btn.Right)}`
-          : codeForBit(p2, rowDef.bit);
-
-      grid.append(a, mk(one), mk(two), mk(rowDef.pad));
-    }
+    const editor = keyBindingEditor({
+      bindings: this.game.save.settings.bindings,
+      slots: [0, 1],
+      onChange: (next) => {
+        this.game.applyBindings(next);
+        this.game.audio.play('ui_select', { gain: 0.5 });
+      },
+    });
 
     const notes = document.createElement('p');
     notes.className = 'hint';
@@ -823,11 +767,34 @@ export class HomeScene implements Scene {
 
     const view = document.createElement('div');
     view.className = 'stack';
-    view.appendChild(panel('Controls', grid, notes));
-    view.appendChild(
-      button('Back', () => this.go('menu'), { variant: 'tonal', wide: true, autofocus: true }),
-    );
+    view.appendChild(panel('Controls', intro, editor, notes));
+    view.appendChild(panel('Gamepad', this.padTable()));
+    // No autofocus here, unlike the other pages: the point of this one is the
+    // editor, so focus lands at the top of it rather than on the way out.
+    view.appendChild(button('Back', () => this.go('menu'), { variant: 'tonal', wide: true }));
     return view;
+  }
+
+  /** The pad, which nobody can remap here and which needs no key labels at all. */
+  private padTable(): HTMLElement {
+    const list = document.createElement('ul');
+    list.className = 'list';
+    for (const [action, pad] of PAD_ROWS) {
+      const li = document.createElement('li');
+      li.className = 'list__item';
+
+      const name = document.createElement('span');
+      name.className = 'grow';
+      name.textContent = action;
+
+      const value = document.createElement('span');
+      value.className = 'chip';
+      value.textContent = pad;
+
+      li.append(name, value);
+      list.appendChild(li);
+    }
+    return list;
   }
 
   private buildJoining(): HTMLElement {
@@ -863,6 +830,43 @@ export class HomeScene implements Scene {
     el.setAttribute('role', 'alert');
     el.textContent = message;
     return el;
+  }
+
+  // ── Key names ──────────────────────────────────────────────────────────────
+
+  private bindingsFor(slot: number): Record<string, number> {
+    return this.game.save.settings.bindings[slot] ?? defaultBindingsFor(slot);
+  }
+
+  /** What an action's key actually says, on this keyboard, as bound right now. */
+  private keyFor(slot: number, bit: number): string {
+    const code = codeForBit(this.bindingsFor(slot), bit);
+    return code ? keyLabel(code) : '—';
+  }
+
+  /** The movement diamond as one word: 'WASD', 'ZQSD', 'Arrows', 'I/J/K/L'. */
+  private moveKeys(slot: number): string {
+    const map = this.bindingsFor(slot);
+    const codes: string[] = [];
+    for (const bit of [Btn.Up, Btn.Left, Btn.Down, Btn.Right]) {
+      const code = codeForBit(map, bit);
+      // Somebody has unbound a direction. The stock label is the least wrong
+      // thing to print, and the Controls page is where they will find out.
+      if (!code) return movementKeysLabel(slot);
+      codes.push(code);
+    }
+    return movementLabelForCodes(codes) || movementKeysLabel(slot);
+  }
+
+  /**
+   * Detection landed, or the player switched keyboard mid-session. Only the
+   * multiplayer page prints key names of its own; the Controls page is the
+   * binding editor, which repaints itself and must not be rebuilt underneath a
+   * player who is halfway through pressing a key at it.
+   */
+  private onLayoutSettled(): void {
+    if (!this.root || this.view !== 'multiplayer') return;
+    this.show('multiplayer');
   }
 
   // ── Menu behaviour ─────────────────────────────────────────────────────────
@@ -1021,6 +1025,9 @@ export class HomeScene implements Scene {
    * DOM, and sampling it twice would move the focus two places per press.
    */
   private padNav(): void {
+    // The binding editor is waiting for a key. A pad press that walked the menu
+    // now would move focus out from under the row being rebound.
+    if (isCapturing()) return;
     const input = this.game.input;
     let held = 0;
     let pressed = 0;

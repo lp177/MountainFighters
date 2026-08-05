@@ -14,6 +14,7 @@ import './ui/styles.css';
 
 import { VIEW_H, VIEW_W } from '@/core/constants';
 import { Game } from '@/Game';
+import { initKeyboardLayout } from '@/engine/input/Layout';
 import { installKeyboard } from '@/engine/input/KeyboardSource';
 import { roomIdFromUrl } from '@/net/Room';
 
@@ -33,6 +34,12 @@ function boot(): void {
 
   // One listener pair for every KeyboardSource the game will ever make.
   installKeyboard();
+
+  // Ask the browser what is actually engraved on this keyboard. Deliberately
+  // NOT awaited: bindings are by physical key position and already correct on
+  // every layout, so this only decides whether the menus print W or Z. It lands
+  // when it lands, and everything that shows a key name repaints itself then.
+  void initKeyboardLayout();
 
   const game = new Game(canvas, uiRoot);
   game.onFatal = (err) => crash(err, canvas, uiRoot);

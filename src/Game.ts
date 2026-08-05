@@ -30,10 +30,10 @@ import type { NetConfig, Rng, SaveData, Scene, SceneName, Settings } from '@/cor
 import { GameLoop } from '@/engine/Loop';
 import { makeRng, randomSeed } from '@/engine/Rng';
 import { loadSave, saveSave } from '@/engine/Save';
-import { DEFAULT_BINDINGS } from '@/engine/input/Bindings';
+import { defaultBindingsFor } from '@/engine/input/Bindings';
 import { GamepadSource, connectedGamepads } from '@/engine/input/GamepadSource';
 import { InputManager } from '@/engine/input/InputManager';
-import { KeyboardSource } from '@/engine/input/KeyboardSource';
+import { KeyboardSource, refreshOwnedKeys } from '@/engine/input/KeyboardSource';
 import { Fx } from '@/juice/Fx';
 import { ParticleSystem } from '@/juice/Particles';
 import { Lockstep } from '@/net/Lockstep';
@@ -194,6 +194,10 @@ export class Game {
     this.rng = makeRng(this.run.seed);
 
     setReducedMotion(this.save.settings.reducedMotion);
+    // The keys whose default action gets suppressed must follow the SAVED
+    // bindings, not the shipped ones — somebody who moved Jump onto PageDown
+    // last week should not scroll the page the first time they jump today.
+    refreshOwnedKeys(this.save.settings.bindings);
     this.attachKeyboards(2);
     this.installListeners();
   }
@@ -629,17 +633,89 @@ export class Game {
     this.saveNow();
   }
 
+  /**
+   * Adopt a new set of keyboard bindings — saved, suppressed and live, in that
+   * order and without a reload.
+   *
+   * A rebind has to land on the fight that is running RIGHT NOW, not on the next
+   * launch: the pause menu sits on top of a frozen fight, and a player who
+   * remaps Heavy there expects to walk back into the fight and use it. So the
+   * new map is pushed into every KeyboardSource that is already attached rather
+   * than being left for the next one to read.
+   *
+   * `refreshOwnedKeys` is what keeps preventDefault honest: it claims whatever
+   * is bound now and releases whatever no longer is, so a freshly-bound PageDown
+   * stops scrolling the document and a freed one starts again.
+   */
+  applyBindings(next: Record<number, Record<string, number>>): void {
+    if (!next || typeof next !== 'object') return;
+
+    // Merge rather than replace: an editor showing two slots must not silently
+    // wipe a third that only a gamepad-less fourth player ever uses.
+    const merged: Record<number, Record<string, number>> = { ...this.save.settings.bindings };
+    for (const key of Object.keys(next)) {
+      const slot = Number(key);
+      const map = next[slot];
+      if (!Number.isInteger(slot) || slot < 0 || !map || typeof map !== 'object') continue;
+      merged[slot] = { ...map };
+    }
+    this.save.settings.bindings = merged;
+
+    refreshOwnedKeys(merged);
+
+    for (const slot of this.input.slots) {
+      const src = this.input.source(slot);
+      // Through keyboardMapFor, so a solo player rebinding mid-fight keeps both
+      // halves of the board rather than being quietly cut back to one.
+      if (src instanceof KeyboardSource) {
+        src.setBindings(this.keyboardMapFor(slot, this.localKeyboardCount));
+      }
+    }
+
+    this.saveNow();
+  }
+
   // ── Input ──────────────────────────────────────────────────────────────────
 
   /** Binds the saved keyboard layouts to the first `count` local slots. */
   attachKeyboards(count = 1): void {
     const n = clamp(Math.floor(count), 0, MAX_LOCAL_PLAYERS);
+    this.localKeyboardCount = n;
     for (let slot = 0; slot < n; slot++) {
-      const map =
-        this.save.settings.bindings[slot] ?? DEFAULT_BINDINGS[slot] ?? DEFAULT_BINDINGS[0];
       this.detachSlot(slot);
-      this.input.attach(slot, new KeyboardSource(slot, map));
+      this.input.attach(slot, new KeyboardSource(slot, this.keyboardMapFor(slot, n)));
     }
+    // Dropping from two local players back to one must also drop player two's
+    // keyboard, or their half of the board keeps driving a fighter nobody is
+    // playing. Gamepads on those slots are left alone.
+    for (let slot = n; slot < MAX_LOCAL_PLAYERS; slot++) {
+      if (this.input.source(slot) instanceof KeyboardSource) this.detachSlot(slot);
+    }
+  }
+
+  /**
+   * The key map a local slot should listen to.
+   *
+   * Playing alone, there is nobody to share the board with, so the lone player
+   * gets BOTH halves of it: the WASD diamond and the arrows, F/G/H and the
+   * numpad, whichever hand happens to be nearest. Slot 0 wins any key the two
+   * sets disagree on. As soon as a second local player exists the sets split
+   * back apart, because player two needs their half back.
+   */
+  /** How many local slots are currently driven by a keyboard. */
+  private localKeyboardCount = 0;
+
+  private keyboardMapFor(slot: number, localCount: number): Record<string, number> {
+    const own = this.save.settings.bindings[slot] ?? defaultBindingsFor(slot);
+    if (localCount > 1 || slot !== 0) return own;
+
+    const merged: Record<string, number> = {};
+    for (let s = MAX_LOCAL_PLAYERS - 1; s >= 1; s--) {
+      const other = this.save.settings.bindings[s] ?? defaultBindingsFor(s);
+      for (const code of Object.keys(other)) merged[code] = other[code];
+    }
+    for (const code of Object.keys(own)) merged[code] = own[code];
+    return merged;
   }
 
   /**

@@ -58,6 +58,7 @@ import {
   GROUND_Y,
   STARTING_LIVES,
   VIEW_W,
+  WALL_BOUNCE,
   Z_HIT_TOLERANCE,
   Z_SCALE,
 } from '@/core/constants';
@@ -68,6 +69,12 @@ const INK = '#141019';
 
 /** Enemies stream in a few at a time, like a corridor of bad decisions. */
 const SPAWN_INTERVAL = 34;
+
+/**
+ * How far inside the visible edge a fighter is held. Roughly a body's
+ * half-width, so nobody ends up sliced in half by the frame.
+ */
+const STAGE_EDGE_PAD = 14;
 const BASE_CONCURRENT = 3;
 /** Frames a corpse lies there before it is swept off the roster. */
 const CORPSE_FRAMES = 140;
@@ -894,20 +901,45 @@ export class Level {
     }
     this.cam.follow(this.camTargets, limit);
 
-    // The gate is only real if the players cannot stroll through it.
-    const left = this.cam.x + 10;
-    const right = this.cam.x + VIEW_W - 10;
-    for (const p of this.players) {
-      const min = this.gated ? left : 6;
-      const max = this.gated ? right : this.def.width - 6;
-      if (p.pos.x < min) p.pos.x = min;
-      else if (p.pos.x > max) p.pos.x = max;
-    }
+    // Nobody fights off-screen.
+    //
+    // Bounds come from cam.playLeft/playRight, which account for the zoom —
+    // cam.x is the left edge of the UNZOOMED frame, so at FIGHT_ZOOM the real
+    // picture is ~100 units narrower on each side. Clamping to cam.x + VIEW_W
+    // instead used to park a knocked-back fighter well outside the shot, where
+    // enemies happily carried on hitting them.
+    //
+    // This applies to enemies too, and always — not only while gated. An enemy
+    // standing off-screen landing hits is the same unfairness from the other
+    // side, and being knocked off the left edge between waves is no better than
+    // being knocked off it during one.
+    let min = Math.max(6, this.cam.playLeft + STAGE_EDGE_PAD);
+    let max = Math.min(this.def.width - 6, this.cam.playRight - STAGE_EDGE_PAD);
+    if (min > max) min = max = (min + max) * 0.5;
+
+    for (const p of this.players) this.confine(p, min, max);
     for (const u of this.units) {
       if (u.dead) continue;
-      const p = u.f.pos;
-      if (p.x < 2) p.x = 2;
-      else if (p.x > this.def.width - 2) p.x = this.def.width - 2;
+      this.confine(u.f, min, max);
+    }
+  }
+
+  /**
+   * Hold a fighter inside the visible stage.
+   *
+   * Anyone airborne or in hitstun rebounds off the edge with WALL_BOUNCE so it
+   * reads as hitting something solid and the combo can continue off the wall.
+   * Anyone on their feet simply stops dead: bouncing a walking player off thin
+   * air feels like a bug, not a wall.
+   */
+  private confine(f: Fighter, min: number, max: number): void {
+    const rebounds = !f.grounded || f.state === 'launched' || f.state === 'hurt';
+    if (f.pos.x < min) {
+      f.pos.x = min;
+      if (f.vel.x < 0) f.vel.x = rebounds ? -f.vel.x * WALL_BOUNCE : 0;
+    } else if (f.pos.x > max) {
+      f.pos.x = max;
+      if (f.vel.x > 0) f.vel.x = rebounds ? -f.vel.x * WALL_BOUNCE : 0;
     }
   }
 

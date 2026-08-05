@@ -103,11 +103,18 @@ const Z_SLACK = 30;
  * long-lived — but the ring is fixed, so the 145th splat quietly overwrites the
  * first and the cost per frame never moves.
  */
-const MAX_DECALS = 144;
+const MAX_DECALS = 44;
 /** ~25s at 60Hz: long enough to accumulate across a whole wave. */
-const DECAL_LIFE = 1500;
-/** Fraction of a decal's life spent fading out. */
-const DECAL_FADE = 0.45;
+/**
+ * Frames a stain survives. Deliberately SHORTER than the corpse it came from
+ * (CORPSE_FRAMES is 140): stains that outlive the body read as scenery rather
+ * than as damage, and at the old 1500 (25 seconds, 144 of them) the floor and
+ * the wall base silted up into one continuous red band that followed you
+ * through the level.
+ */
+const DECAL_LIFE = 260;
+/** Fraction of a decal's life spent fading out. Most of it, so none linger. */
+const DECAL_FADE = 0.8;
 /** The darker wet middle of a fresh stain, before it dries to the edge colour. */
 const DECAL_CORE = '#5c0a15';
 /** Vertices in a gib lump. Odd, so no chunk reads as symmetrical. */
@@ -307,7 +314,9 @@ export class ParticleSystem {
       if (p.y <= 0 && !isRing && p.shape !== SH_SMOKE && p.shape !== SH_BOLT) {
         // A droplet does not survive the floor: it becomes the floor.
         if (p.shape === SH_BLOOD) {
-          this.splat(p, false);
+          // Not every droplet stains. A spray is dozens of particles and one
+          // mark each carpeted the ground in a single exchange.
+          if (hash(p.seed + 91) < 0.28) this.splat(p, false);
           this.release(i);
           continue;
         }
@@ -315,7 +324,7 @@ export class ParticleSystem {
         p.y = 0;
         const bounce = p.vy < -REST_SPEED && p.bounces < (gib ? 1 : 4);
         // Chunks paint the floor where they land AND where they stop rolling.
-        if (gib && (bounce || !p.resting)) this.splat(p, true);
+        if (gib && bounce && hash(p.seed + 37) < 0.5) this.splat(p, true);
         if (bounce) {
           p.vy = -p.vy * (gib ? BOUNCE * 1.25 : BOUNCE);
           p.vx *= FLOOR_GRIP;
@@ -479,8 +488,8 @@ export class ParticleSystem {
     d.active = true;
     d.x = p.x;
     d.z = clamp(p.z, -Z_SLACK, Z_DEPTH + Z_SLACK);
-    d.r = clamp(p.size * (smear ? 1.15 : 1.5) + speed * 0.3, 1.2, smear ? 11 : 9);
-    d.stretch = clamp(1 + flat * (smear ? 0.5 : 0.34), 1, smear ? 4.2 : 3);
+    d.r = clamp(p.size * (smear ? 0.9 : 1.1) + speed * 0.18, 1, smear ? 6.5 : 5);
+    d.stretch = clamp(1 + flat * (smear ? 0.28 : 0.2), 1, smear ? 2.1 : 1.7);
     d.rot = flat > 0.08 ? Math.atan2(fz, fx) : hash(p.seed + 5) * TAU;
     d.color = p.color;
     d.smear = smear ? 1 : 0;
@@ -506,7 +515,7 @@ export class ParticleSystem {
         any = true;
       }
       const t = d.life / d.maxLife;
-      const a = (t > DECAL_FADE ? 1 : t / DECAL_FADE) * 0.72;
+      const a = (t > DECAL_FADE ? 1 : t / DECAL_FADE) * 0.42;
       const sx = d.x;
       const sy = GROUND_Y + d.z * Z_SCALE;
       const rx = d.r * d.stretch;

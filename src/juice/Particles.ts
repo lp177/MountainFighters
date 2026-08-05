@@ -1,0 +1,735 @@
+/**
+ * World-space particle system.
+ *
+ * Particles live in the same 2.5D space the fight happens in (x, y up, z into
+ * the screen) and project through the camera exactly like fighters do, so a
+ * spark thrown off a jaw at the back of the belt lands on the floor back there
+ * too. They collide with the ground plane and bounce.
+ *
+ * `render` is expected to run inside `Renderer.withCamera`, which already
+ * applies the scroll, zoom and shake; so x is drawn raw and only the depth
+ * fold (GROUND_Y + z * Z_SCALE - y) happens here. The camera is still needed
+ * for culling.
+ *
+ * The pool is fixed at MAX_PARTICLES and preallocated at construction. `emit`
+ * and `update` never allocate: they hand out indices from a free stack, and
+ * when the pool is exhausted they recycle the oldest live particle via a
+ * generation-tagged ring of spawn order.
+ *
+ * This is presentation-only code, so Math.random is fair game here.
+ */
+
+import type { ParticleSpec } from '@/core/types';
+import type { Camera } from '@/render/Camera';
+import { clamp, lerp, TAU } from '@/core/math';
+import {
+  GROUND_Y,
+  MAX_PARTICLES,
+  VIEW_H,
+  VIEW_W,
+  Z_DEPTH,
+  Z_PERSPECTIVE,
+  Z_SCALE,
+} from '@/core/constants';
+import { poly } from '@/render/Shapes';
+
+type C2D = CanvasRenderingContext2D;
+
+const SH_DOT = 0;
+const SH_SPARK = 1;
+const SH_SHARD = 2;
+const SH_RING = 3;
+const SH_STAR = 4;
+const SH_SMOKE = 5;
+const SH_BLOOD = 6;
+const SH_BOLT = 7;
+
+const SHAPE_CODE: Record<ParticleSpec['shape'], number> = {
+  dot: SH_DOT,
+  spark: SH_SPARK,
+  shard: SH_SHARD,
+  ring: SH_RING,
+  star: SH_STAR,
+  smoke: SH_SMOKE,
+  blood: SH_BLOOD,
+  bolt: SH_BOLT,
+};
+
+const FADE_LINEAR = 0;
+const FADE_EASE = 1;
+const FADE_FLICKER = 2;
+
+/** Floor restitution and the sideways bite a bounce takes out of a particle. */
+const BOUNCE = 0.36;
+const FLOOR_GRIP = 0.66;
+/** Below this downward speed a particle stops bouncing and settles. */
+const REST_SPEED = 0.4;
+/** Buoyancy added to smoke every frame; smoke ignores gravity entirely. */
+const SMOKE_LIFT = 0.035;
+/** How far outside the walkable band a particle may stray before rebounding. */
+const Z_SLACK = 30;
+
+const MAX_DECALS = 96;
+const DECAL_LIFE = 900;
+
+/** Depth buckets used for a cheap allocation-free back-to-front draw order. */
+const BUCKETS = 16;
+const BUCKET_SCALE = BUCKETS / (Z_DEPTH + Z_SLACK * 2);
+
+/** Cheap stable pseudo-random in 0..1 from an integer. Presentation only. */
+function hash(n: number): number {
+  let h = (n | 0) * 1103515245 + 12345;
+  h ^= h >>> 15;
+  h = Math.imul(h, 0x2c1b3c6d);
+  h ^= h >>> 12;
+  return ((h >>> 8) & 0xffff) / 65535;
+}
+
+class Particle {
+  active = false;
+  /** Bumped on every allocation so stale spawn-order entries can be detected. */
+  gen = 0;
+  x = 0;
+  y = 0;
+  z = 0;
+  px = 0;
+  py = 0;
+  pz = 0;
+  vx = 0;
+  vy = 0;
+  vz = 0;
+  life = 0;
+  maxLife = 1;
+  size = 1;
+  color = '#ffffff';
+  shape = SH_DOT;
+  additive = false;
+  fade = FADE_LINEAR;
+  gravity = 0;
+  drag = 1;
+  spin = 0;
+  rot = 0;
+  seed = 0;
+  bounces = 0;
+  resting = false;
+  flick = 1;
+}
+
+class Decal {
+  active = false;
+  x = 0;
+  z = 0;
+  r = 1;
+  rot = 0;
+  color = '#8e1220';
+  life = 0;
+  maxLife = 1;
+  seed = 0;
+}
+
+export class ParticleSystem {
+  private readonly pool: Particle[] = [];
+  private readonly free = new Int32Array(MAX_PARTICLES);
+  private freeCount = MAX_PARTICLES;
+  private live = 0;
+
+  /** Spawn-order ring, so an exhausted pool recycles oldest-first. */
+  private readonly ringIdx = new Int32Array(MAX_PARTICLES);
+  private readonly ringGen = new Int32Array(MAX_PARTICLES);
+  private ringHead = 0;
+  private ringLen = 0;
+
+  /** Intrusive per-bucket linked lists, rebuilt each render. */
+  private readonly bucketHead = new Int32Array(BUCKETS * 2);
+  private readonly nextIdx = new Int32Array(MAX_PARTICLES);
+
+  private readonly decals: Decal[] = [];
+  private decalCursor = 0;
+
+  /** Scratch polygon buffer for shard drawing. */
+  private readonly pts = [0, 0, 0, 0, 0, 0, 0, 0];
+
+  constructor() {
+    for (let i = 0; i < MAX_PARTICLES; i++) {
+      this.pool.push(new Particle());
+      this.free[i] = MAX_PARTICLES - 1 - i;
+      this.nextIdx[i] = -1;
+    }
+    for (let i = 0; i < MAX_DECALS; i++) this.decals.push(new Decal());
+  }
+
+  get count(): number {
+    return this.live;
+  }
+
+  emit(spec: ParticleSpec): void {
+    let n = spec.count | 0;
+    if (n <= 0) return;
+    if (n > 256) n = 256;
+
+    const shape = SHAPE_CODE[spec.shape] ?? SH_DOT;
+    const fade =
+      spec.fade === 'ease' ? FADE_EASE : spec.fade === 'flicker' ? FADE_FLICKER : FADE_LINEAR;
+    const additive = spec.additive === true;
+    const colors = spec.colors;
+    const nc = colors.length;
+    // `drag` is a per-frame velocity multiplier. 0 (or unset) means "none",
+    // which is what emitters that do not care about drag will pass.
+    const drag = spec.drag > 0 ? Math.min(spec.drag, 1) : 1;
+    // Rings and bolts are anchored effects; scattering them looks like a bug.
+    const jitter = shape === SH_RING || shape === SH_BOLT ? 0 : 1;
+    const spin = spec.spin ?? 0;
+
+    for (let k = 0; k < n; k++) {
+      const idx = this.alloc();
+      if (idx < 0) return;
+      const p = this.pool[idx];
+      const ang = spec.angle + (Math.random() - 0.5) * spec.spread;
+      const spd = lerp(spec.speed[0], spec.speed[1], Math.random());
+
+      p.shape = shape;
+      p.fade = fade;
+      p.additive = additive;
+      p.color = nc > 0 ? colors[(Math.random() * nc) | 0] : '#ffffff';
+      p.maxLife = Math.max(1, Math.round(lerp(spec.life[0], spec.life[1], Math.random())));
+      p.life = p.maxLife;
+      p.size = Math.max(0.25, lerp(spec.size[0], spec.size[1], Math.random()));
+
+      p.x = spec.x + (Math.random() - 0.5) * 2.4 * jitter;
+      p.y = spec.y + (Math.random() - 0.5) * 2.4 * jitter;
+      p.z = spec.z + (Math.random() - 0.5) * 2.0 * jitter;
+      p.px = p.x;
+      p.py = p.y;
+      p.pz = p.z;
+
+      // Angles are world-space: 0 = +x, PI/2 = straight up.
+      p.vx = Math.cos(ang) * spd;
+      p.vy = Math.sin(ang) * spd;
+      p.vz = (Math.random() - 0.5) * spd * 0.45;
+
+      p.gravity = spec.gravity;
+      p.drag = drag;
+      p.spin = spin !== 0 ? spin * (Math.random() < 0.5 ? -1 : 1) : 0;
+      p.rot = Math.random() * TAU;
+      p.seed = (Math.random() * 65536) | 0;
+      p.bounces = 0;
+      p.resting = false;
+      p.flick = 1;
+    }
+  }
+
+  update(): void {
+    for (let i = 0; i < MAX_PARTICLES; i++) {
+      const p = this.pool[i];
+      if (!p.active) continue;
+
+      p.life--;
+      if (p.life <= 0) {
+        this.release(i);
+        continue;
+      }
+
+      p.px = p.x;
+      p.py = p.y;
+      p.pz = p.z;
+
+      const isRing = p.shape === SH_RING;
+      if (p.shape === SH_SMOKE) p.vy += SMOKE_LIFT;
+      else if (!isRing) p.vy -= p.gravity;
+
+      if (p.drag !== 1) {
+        p.vx *= p.drag;
+        p.vy *= p.drag;
+        p.vz *= p.drag;
+      }
+
+      p.x += p.vx;
+      p.y += p.vy;
+      p.z += p.vz;
+      p.rot += p.spin;
+
+      if (p.fade === FADE_FLICKER) p.flick = 0.35 + Math.random() * 0.65;
+
+      if (p.y <= 0 && !isRing && p.shape !== SH_SMOKE && p.shape !== SH_BOLT) {
+        if (p.shape === SH_BLOOD) {
+          this.splat(p);
+          this.release(i);
+          continue;
+        }
+        p.y = 0;
+        if (p.vy < -REST_SPEED && p.bounces < 4) {
+          p.vy = -p.vy * BOUNCE;
+          p.vx *= FLOOR_GRIP;
+          p.vz *= FLOOR_GRIP;
+          p.spin *= -0.55;
+          p.bounces++;
+        } else {
+          p.vy = 0;
+          p.vx *= 0.8;
+          p.vz *= 0.8;
+          p.spin *= 0.7;
+          if (!p.resting) {
+            p.resting = true;
+            // Sparks die on the floor; debris is allowed to lie there.
+            if (p.shape === SH_SPARK || p.shape === SH_STAR) {
+              p.life = Math.min(p.life, 8);
+              p.maxLife = Math.min(p.maxLife, Math.max(p.life, 1));
+            }
+          }
+        }
+      }
+
+      if (p.z < -Z_SLACK) {
+        p.z = -Z_SLACK;
+        p.vz = -p.vz * 0.4;
+      } else if (p.z > Z_DEPTH + Z_SLACK) {
+        p.z = Z_DEPTH + Z_SLACK;
+        p.vz = -p.vz * 0.4;
+      }
+    }
+
+    for (let i = 0; i < MAX_DECALS; i++) {
+      const d = this.decals[i];
+      if (!d.active) continue;
+      d.life--;
+      if (d.life <= 0) d.active = false;
+    }
+  }
+
+  render(ctx: C2D, cam: Camera): void {
+    this.renderDecals(ctx, cam);
+    if (this.live === 0) return;
+
+    this.bucketHead.fill(-1);
+    for (let i = 0; i < MAX_PARTICLES; i++) {
+      const p = this.pool[i];
+      if (!p.active) continue;
+      const b = clamp(((p.z + Z_SLACK) * BUCKET_SCALE) | 0, 0, BUCKETS - 1);
+      const key = b * 2 + (p.additive ? 1 : 0);
+      this.nextIdx[i] = this.bucketHead[key];
+      this.bucketHead[key] = i;
+    }
+
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    let additive = false;
+    for (let b = BUCKETS - 1; b >= 0; b--) {
+      for (let s = 0; s < 2; s++) {
+        let i = this.bucketHead[b * 2 + s];
+        if (i < 0) continue;
+        const wantAdditive = s === 1;
+        if (wantAdditive !== additive) {
+          ctx.globalCompositeOperation = wantAdditive ? 'lighter' : 'source-over';
+          additive = wantAdditive;
+        }
+        while (i >= 0) {
+          this.drawOne(ctx, this.pool[i], cam);
+          i = this.nextIdx[i];
+        }
+      }
+    }
+    ctx.restore();
+  }
+
+  clear(): void {
+    for (let i = 0; i < MAX_PARTICLES; i++) {
+      this.pool[i].active = false;
+      this.free[i] = MAX_PARTICLES - 1 - i;
+    }
+    this.freeCount = MAX_PARTICLES;
+    this.live = 0;
+    this.ringHead = 0;
+    this.ringLen = 0;
+    for (let i = 0; i < MAX_DECALS; i++) this.decals[i].active = false;
+    this.decalCursor = 0;
+  }
+
+  // ── pool ───────────────────────────────────────────────────────────────────
+
+  private alloc(): number {
+    let idx: number;
+    if (this.freeCount > 0) {
+      idx = this.free[--this.freeCount];
+    } else {
+      idx = this.recycleOldest();
+      if (idx < 0) return -1;
+    }
+    const p = this.pool[idx];
+    p.active = true;
+    p.gen = (p.gen + 1) & 0x3fffffff;
+    this.live++;
+    this.ringPush(idx, p.gen);
+    return idx;
+  }
+
+  private release(i: number): void {
+    const p = this.pool[i];
+    if (!p.active) return;
+    p.active = false;
+    this.live--;
+    this.free[this.freeCount++] = i;
+  }
+
+  private ringPush(idx: number, gen: number): void {
+    if (this.ringLen === MAX_PARTICLES) {
+      this.ringHead = (this.ringHead + 1) % MAX_PARTICLES;
+      this.ringLen--;
+    }
+    const pos = (this.ringHead + this.ringLen) % MAX_PARTICLES;
+    this.ringIdx[pos] = idx;
+    this.ringGen[pos] = gen;
+    this.ringLen++;
+  }
+
+  /** Pops spawn-order entries until one still points at a live particle. */
+  private recycleOldest(): number {
+    while (this.ringLen > 0) {
+      const pos = this.ringHead;
+      const idx = this.ringIdx[pos];
+      const gen = this.ringGen[pos];
+      this.ringHead = (this.ringHead + 1) % MAX_PARTICLES;
+      this.ringLen--;
+      const p = this.pool[idx];
+      if (p.active && p.gen === gen) {
+        p.active = false;
+        this.live--;
+        return idx;
+      }
+    }
+    return -1;
+  }
+
+  // ── decals ─────────────────────────────────────────────────────────────────
+
+  private splat(p: Particle): void {
+    const d = this.decals[this.decalCursor];
+    this.decalCursor = (this.decalCursor + 1) % MAX_DECALS;
+    const speed = Math.hypot(p.vx, p.vz) + Math.abs(p.vy);
+    d.active = true;
+    d.x = p.x;
+    d.z = clamp(p.z, -Z_SLACK, Z_DEPTH + Z_SLACK);
+    d.r = clamp(p.size * (1.5 + speed * 0.22), 1.2, 9);
+    d.rot = Math.random() * TAU;
+    d.color = p.color;
+    d.maxLife = DECAL_LIFE;
+    d.life = DECAL_LIFE;
+    d.seed = p.seed;
+  }
+
+  private renderDecals(ctx: C2D, cam: Camera): void {
+    let any = false;
+    for (let i = 0; i < MAX_DECALS; i++) {
+      const d = this.decals[i];
+      if (!d.active) continue;
+      const sx = d.x;
+      const onScreen = d.x - cam.x;
+      if (onScreen < -60 || onScreen > VIEW_W + 60) continue;
+      if (!any) {
+        ctx.save();
+        any = true;
+      }
+      const t = d.life / d.maxLife;
+      const a = (t > 0.3 ? 1 : t / 0.3) * 0.7;
+      const sy = GROUND_Y + d.z * Z_SCALE;
+      ctx.globalAlpha = a;
+      ctx.fillStyle = d.color;
+      ctx.beginPath();
+      ctx.ellipse(sx, sy, d.r, d.r * 0.34, d.rot, 0, TAU);
+      ctx.fill();
+      for (let k = 0; k < 3; k++) {
+        const h1 = hash(d.seed + k * 31);
+        const h2 = hash(d.seed + k * 57 + 11);
+        const rr = d.r * (0.16 + h1 * 0.28);
+        ctx.beginPath();
+        ctx.ellipse(
+          sx + (h1 - 0.5) * d.r * 3.2,
+          sy + (h2 - 0.5) * d.r * 0.9,
+          rr,
+          rr * 0.34,
+          0,
+          0,
+          TAU,
+        );
+        ctx.fill();
+      }
+    }
+    if (any) ctx.restore();
+  }
+
+  // ── drawing ────────────────────────────────────────────────────────────────
+
+  private drawOne(ctx: C2D, p: Particle, cam: Camera): void {
+    const sx = p.x;
+    const sy = GROUND_Y + p.z * Z_SCALE - p.y;
+    const onScreen = p.x - cam.x;
+    if (onScreen < -70 || onScreen > VIEW_W + 70 || sy < -90 || sy > VIEW_H + 90) return;
+
+    const t = p.life / p.maxLife;
+    let a: number;
+    if (p.fade === FADE_EASE) a = 1 - (1 - t) * (1 - t);
+    else if (p.fade === FADE_FLICKER) a = t * p.flick;
+    else a = t;
+
+    const age = p.maxLife - p.life;
+    if (p.shape === SH_SMOKE && age < 8) a *= (age + 1) / 9;
+    a = clamp(a, 0, 1);
+    if (a <= 0.004) return;
+
+    const ps = clamp(1 - p.z * Z_PERSPECTIVE, 0.6, 1.25);
+    ctx.globalAlpha = a;
+
+    switch (p.shape) {
+      case SH_SPARK:
+        this.drawSpark(ctx, p, sx, sy, ps, a);
+        break;
+      case SH_SHARD:
+        this.drawShard(ctx, p, sx, sy, ps);
+        break;
+      case SH_RING:
+        this.drawRing(ctx, p, sx, sy, ps, t);
+        break;
+      case SH_STAR:
+        this.drawStar(ctx, p, sx, sy, ps);
+        break;
+      case SH_SMOKE:
+        this.drawSmoke(ctx, p, sx, sy, ps, t, a);
+        break;
+      case SH_BLOOD:
+        this.drawBlood(ctx, p, sx, sy, ps);
+        break;
+      case SH_BOLT:
+        this.drawBolt(ctx, p, sx, sy, ps, a);
+        break;
+      default:
+        this.drawDot(ctx, p, sx, sy, ps, a);
+        break;
+    }
+  }
+
+  private drawDot(ctx: C2D, p: Particle, sx: number, sy: number, ps: number, a: number): void {
+    const r = p.size * ps;
+    ctx.fillStyle = p.color;
+    if (r <= 0.9) {
+      ctx.fillRect(sx - r, sy - r, r * 2, r * 2);
+      return;
+    }
+    ctx.beginPath();
+    ctx.arc(sx, sy, r, 0, TAU);
+    ctx.fill();
+    if (p.additive && r > 1.4) {
+      ctx.globalAlpha = a * 0.75;
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(sx, sy, r * 0.42, 0, TAU);
+      ctx.fill();
+      ctx.globalAlpha = a;
+    }
+  }
+
+  private drawSpark(ctx: C2D, p: Particle, sx: number, sy: number, ps: number, a: number): void {
+    // Velocity projected into screen space, so the streak follows the same
+    // path the eye sees the particle take.
+    const vsx = p.vx;
+    const vsy = p.vz * Z_SCALE - p.vy;
+    const len = Math.hypot(vsx, vsy);
+    const w = Math.max(0.6, p.size * ps);
+    let nx = 1;
+    let ny = 0;
+    if (len > 0.0001) {
+      nx = vsx / len;
+      ny = vsy / len;
+    }
+    const stretch = clamp(len * 2.1, w * 1.5, 26) * ps;
+    ctx.strokeStyle = p.color;
+    ctx.lineWidth = w;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(sx - nx * stretch, sy - ny * stretch);
+    ctx.stroke();
+    if (w > 0.9) {
+      ctx.globalAlpha = a * 0.8;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = w * 0.42;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(sx - nx * stretch * 0.45, sy - ny * stretch * 0.45);
+      ctx.stroke();
+      ctx.globalAlpha = a;
+    }
+  }
+
+  private drawShard(ctx: C2D, p: Particle, sx: number, sy: number, ps: number): void {
+    const s = p.size * ps;
+    const q = this.pts;
+    q[0] = -s;
+    q[1] = -s * 0.55;
+    q[2] = s * 0.9;
+    q[3] = -s * 0.25;
+    q[4] = s * 0.62;
+    q[5] = s * 0.72;
+    q[6] = -s * 0.8;
+    q[7] = s * 0.42;
+    ctx.save();
+    ctx.translate(sx, sy);
+    ctx.rotate(p.rot);
+    poly(ctx, q, p.color, p.additive ? undefined : '#15121c', Math.max(0.55, s * 0.2));
+    ctx.restore();
+  }
+
+  private drawRing(ctx: C2D, p: Particle, sx: number, sy: number, ps: number, t: number): void {
+    const grow = 0.2 + 2.1 * (1 - t);
+    const r = Math.max(0.6, p.size * ps * grow);
+    ctx.strokeStyle = p.color;
+    ctx.lineWidth = Math.max(0.5, p.size * ps * 0.34 * t + 0.35);
+    ctx.beginPath();
+    ctx.ellipse(sx, sy, r, r * 0.85, p.rot, 0, TAU);
+    ctx.stroke();
+  }
+
+  private drawStar(ctx: C2D, p: Particle, sx: number, sy: number, ps: number): void {
+    const r = p.size * ps;
+    ctx.save();
+    ctx.translate(sx, sy);
+    ctx.rotate(p.rot);
+    ctx.beginPath();
+    for (let k = 0; k < 10; k++) {
+      const rr = (k & 1) === 0 ? r : r * 0.44;
+      const ang = (k / 10) * TAU - Math.PI / 2;
+      const x = Math.cos(ang) * rr;
+      const y = Math.sin(ang) * rr;
+      if (k === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fillStyle = p.color;
+    ctx.fill();
+    if (!p.additive && r > 1.6) {
+      ctx.lineWidth = Math.max(0.55, r * 0.18);
+      ctx.strokeStyle = '#15121c';
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  private drawSmoke(
+    ctx: C2D,
+    p: Particle,
+    sx: number,
+    sy: number,
+    ps: number,
+    t: number,
+    a: number,
+  ): void {
+    const r = p.size * ps * (1 + 1.7 * (1 - t));
+    const h1 = hash(p.seed);
+    const h2 = hash(p.seed + 7);
+    ctx.fillStyle = p.color;
+    ctx.globalAlpha = a * 0.5;
+    ctx.beginPath();
+    ctx.arc(sx, sy, r, 0, TAU);
+    ctx.fill();
+    ctx.globalAlpha = a * 0.32;
+    ctx.beginPath();
+    ctx.arc(sx + (h1 - 0.5) * r * 1.1, sy - r * 0.45 * h2, r * 0.74, 0, TAU);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(sx - (h2 - 0.5) * r * 0.95, sy + r * 0.3, r * 0.6, 0, TAU);
+    ctx.fill();
+    ctx.globalAlpha = a;
+  }
+
+  private drawBlood(ctx: C2D, p: Particle, sx: number, sy: number, ps: number): void {
+    const vsx = p.vx;
+    const vsy = p.vz * Z_SCALE - p.vy;
+    const spd = Math.hypot(vsx, vsy);
+    const r = p.size * ps;
+    ctx.save();
+    ctx.translate(sx, sy);
+    if (spd > 0.35) {
+      ctx.rotate(Math.atan2(vsy, vsx));
+      ctx.scale(1 + Math.min(spd * 0.16, 1.7), 1);
+    }
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  private drawBolt(ctx: C2D, p: Particle, sx: number, sy: number, ps: number, a: number): void {
+    const vsx = p.vx;
+    const vsy = p.vz * Z_SCALE - p.vy;
+    const spd = Math.hypot(vsx, vsy);
+    let nx: number;
+    let ny: number;
+    if (spd > 0.0001) {
+      nx = vsx / spd;
+      ny = vsy / spd;
+    } else {
+      nx = Math.cos(p.rot);
+      ny = Math.sin(p.rot);
+    }
+    const len = (p.size * 5.5 + spd * 3.2) * ps;
+    const amp = p.size * 1.5 * ps;
+    const ex = sx + nx * len;
+    const ey = sy + ny * len;
+    const salt = p.seed + p.life * 977;
+
+    ctx.strokeStyle = p.color;
+    ctx.lineWidth = Math.max(0.8, p.size * ps * 0.9);
+    ctx.globalAlpha = a * 0.6;
+    this.boltPath(ctx, sx, sy, ex, ey, amp, 6, salt);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = Math.max(0.45, p.size * ps * 0.35);
+    ctx.globalAlpha = a;
+    this.boltPath(ctx, sx, sy, ex, ey, amp * 0.8, 6, salt);
+    ctx.stroke();
+
+    // A short fork off the middle sells the arc as electricity.
+    const mx = sx + (ex - sx) * 0.45;
+    const my = sy + (ey - sy) * 0.45;
+    const fa = (hash(salt + 313) - 0.5) * 1.9;
+    const fl = len * 0.42;
+    ctx.globalAlpha = a * 0.75;
+    this.boltPath(
+      ctx,
+      mx,
+      my,
+      mx + (nx * Math.cos(fa) - ny * Math.sin(fa)) * fl,
+      my + (nx * Math.sin(fa) + ny * Math.cos(fa)) * fl,
+      amp * 0.6,
+      3,
+      salt + 91,
+    );
+    ctx.stroke();
+    ctx.globalAlpha = a;
+  }
+
+  private boltPath(
+    ctx: C2D,
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    amp: number,
+    segs: number,
+    salt: number,
+  ): void {
+    const dx = x1 - x0;
+    const dy = y1 - y0;
+    const l = Math.hypot(dx, dy) || 1;
+    const px = -dy / l;
+    const py = dx / l;
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    for (let k = 1; k < segs; k++) {
+      const f = k / segs;
+      const j = (hash(salt + k * 131) - 0.5) * 2 * amp * (1 - Math.abs(f - 0.5) * 1.2);
+      ctx.lineTo(x0 + dx * f + px * j, y0 + dy * f + py * j);
+    }
+    ctx.lineTo(x1, y1);
+  }
+}

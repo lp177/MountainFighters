@@ -1,0 +1,23 @@
+{
+  "name": "mountainfighters",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Mountain Fighters — a satirical browser beat-em-up. Seven dwarfs vs. Elon Musk to save Snow White.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && npm run validate && vite build",
+    "build:fast": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "validate": "esbuild tools/validate-content.ts --bundle --platform=node --format=esm --target=node18 --alias:@=./src --log-level=warning --outfile=node_modules/.cache/mountainfighters/validate-content.mjs && node node_modules/.cache/mountainfighters/validate-content.mjs"
+  },
+  "dependencies": {
+    "peerjs": "^1.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.11"
+  }
+}

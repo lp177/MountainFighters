@@ -1664,6 +1664,10 @@ export class FightScene implements Scene {
       // that shares it — actors, particles, floating text — moves together and
       // stays registered with the scenery above. See FIGHT_FRAME_Y.
       if (FIGHT_FRAME_Y !== 0) ctx.translate(0, FIGHT_FRAME_Y);
+      // Stains belong to the floor, so they go down before anybody stands on
+      // it. Drawn with the rest of the particles — which come after the actors
+      // — blood on the ground was painted over the fighters' heads.
+      this.particles.renderGround(ctx, this.cam);
       level.render(ctx, this.cam, alpha);
       // Between the map and the juice: the performance stands where the two
       // fighters stood — the Level has struck them from its own draw list — and

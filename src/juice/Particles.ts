@@ -364,8 +364,18 @@ export class ParticleSystem {
     }
   }
 
-  render(ctx: C2D, cam: Camera): void {
+  /**
+   * Stains only. Drawn with the FLOOR, before anything standing on it.
+   *
+   * These used to go out with the rest of the particle layer, which the fight
+   * draws after the fighters — so blood on the ground was painted over the top
+   * of the people standing in it, and read as floating in front of the scene.
+   */
+  renderGround(ctx: C2D, cam: Camera): void {
     this.renderDecals(ctx, cam);
+  }
+
+  render(ctx: C2D, cam: Camera): void {
     if (this.live === 0) return;
 
     this.bucketHead.fill(-1);

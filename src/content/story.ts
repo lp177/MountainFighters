@@ -50,6 +50,233 @@ export const INTRO_TEXT: string[] = [
   'HI HO.',
 ];
 
+// ─────────────────────────────────────────────────────────────────────────────
+// The opening cinematic
+//
+// A storyboard, not a switch statement. `CutsceneScene` walks this array and
+// nothing else decides the running order: each entry owns its own length, its
+// own way of arriving, and its own camera move. Cutting a shot, reordering two
+// of them or slowing a push-in is an edit to this table and to nothing else.
+//
+// Coordinates are in the 640x360 virtual screen. Camera x/y are a pan in
+// virtual pixels and z is a zoom; all three are interpolated across the shot
+// with easeInOut, so a shot is a move rather than a still.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type StoryShotId =
+  | 'cottage'
+  | 'headlights'
+  | 'door'
+  | 'taken'
+  | 'lab'
+  | 'note'
+  | 'suiting'
+  | 'title';
+
+/**
+ * How a shot arrives.
+ *   cut  — instant, no transition frames. Used where the edit should hurt.
+ *   fade — cross-dissolve. The outgoing shot keeps running underneath it.
+ *   dip  — through black, half out and half in. A change of place or of tone.
+ */
+export type ShotEntry = 'cut' | 'fade' | 'dip';
+
+export interface ShotCamera {
+  x0: number;
+  y0: number;
+  z0: number;
+  x1: number;
+  y1: number;
+  z1: number;
+}
+
+export interface StoryShot {
+  id: StoryShotId;
+  /** Frames the shot holds for. 0 means the scene measures it — see the note. */
+  frames: number;
+  entry: ShotEntry;
+  /** Frames the entry transition runs for. Ignored when entry is 'cut'. */
+  entryFrames: number;
+  cam: ShotCamera;
+  /** Screenplay slug, bottom left. Empty string for none. */
+  slug: string;
+}
+
+export const STORYBOARD: readonly StoryShot[] = [
+  // Establishing. Nothing has happened yet and the shot is in no hurry to
+  // suggest otherwise: a slow push toward the lit windows, and that is all.
+  {
+    id: 'cottage',
+    frames: 186,
+    entry: 'fade',
+    entryFrames: 34,
+    cam: { x0: 14, y0: 5, z0: 1.02, x1: -8, y1: -3, z1: 1.12 },
+    slug: 'EXT. THE MOUNTAIN — DUSK',
+  },
+  // The convoy. Pan right with it, then let the beams do the acting.
+  {
+    id: 'headlights',
+    frames: 214,
+    entry: 'fade',
+    entryFrames: 30,
+    cam: { x0: -26, y0: -2, z0: 1.08, x1: 24, y1: 2, z1: 1.0 },
+    slug: 'EXT. TREELINE — MOMENTS LATER',
+  },
+  // Hard in, tight, and out again before anybody gets comfortable.
+  {
+    id: 'door',
+    frames: 128,
+    entry: 'cut',
+    entryFrames: 0,
+    cam: { x0: 0, y0: 0, z0: 1.24, x1: 4, y1: -6, z1: 1.1 },
+    slug: '',
+  },
+  // Pull back and let the doorway do it. She is never anything but a shape.
+  {
+    id: 'taken',
+    frames: 168,
+    entry: 'fade',
+    entryFrames: 26,
+    cam: { x0: 10, y0: -6, z0: 1.18, x1: -6, y1: 3, z1: 1.0 },
+    slug: '',
+  },
+  // Cold open on the other end of the story. Dipped, because the cut from a
+  // warm forest to a surgical light should feel like a different film.
+  {
+    id: 'lab',
+    frames: 198,
+    entry: 'dip',
+    entryFrames: 44,
+    cam: { x0: -16, y0: 4, z0: 1.0, x1: 16, y1: -4, z1: 1.1 },
+    slug: 'INT. THE LAB — SOMEWHERE UNDER TEXAS',
+  },
+  // The payload. `frames: 0` — the scene measures INTRO_TEXT and sizes the shot
+  // to it, so editing the text never silently truncates the reveal.
+  {
+    id: 'note',
+    frames: 0,
+    entry: 'dip',
+    entryFrames: 38,
+    cam: { x0: 0, y0: 2, z0: 1.0, x1: 0, y1: -2, z1: 1.07 },
+    slug: 'INT. THE COTTAGE — LATER THAT NIGHT',
+  },
+  // Seven men putting on a jacket, which is the entire reason this game exists.
+  {
+    id: 'suiting',
+    frames: 246,
+    entry: 'fade',
+    entryFrames: 30,
+    cam: { x0: -10, y0: -4, z0: 1.06, x1: 8, y1: 2, z1: 1.0 },
+    slug: 'EXT. THE COTTAGE — TWENTY MINUTES LATER',
+  },
+  {
+    id: 'title',
+    frames: 172,
+    entry: 'cut',
+    entryFrames: 0,
+    cam: { x0: 0, y0: 0, z0: 1.0, x1: 0, y1: 0, z1: 1.04 },
+    slug: '',
+  },
+];
+
+/** Stacked, because one line of it across 640px is a logo, not a title card. */
+export const TITLE_LINES: readonly string[] = ['MOUNTAIN', 'FIGHTERS'];
+export const TITLE_SUB = 'SEVENTY MAPS · FOURTEEN THINGS IN THE WAY · ONE BILLIONAIRE';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Paginating the crawl
+//
+// INTRO_TEXT is thirty-nine lines and the virtual screen holds about eight, so
+// the note shot pages it. Paragraphs — runs of lines between the blanks the
+// text already uses as beats — are the unit: a page takes whole paragraphs
+// while they fit, and only splits one that is too long to fit on its own.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface NotePage {
+  lines: readonly string[];
+  /**
+   * Per line: true if it is inside the quoted letter rather than the narration
+   * around it. The cutscene colours the two differently, because one of them is
+   * a fairy tale and the other one is a man explaining himself.
+   */
+  letter: readonly boolean[];
+  /** Characters to type, counting one per line break. Drives the shot length. */
+  chars: number;
+  /** The page as one string, so the typewriter can index the character it just
+   *  revealed without slicing anything. */
+  flat: string;
+}
+
+/** Splits INTRO_TEXT into pages of at most `maxLines` lines. */
+export function paginateIntro(maxLines = 8): NotePage[] {
+  const limit = Math.max(1, Math.floor(maxLines));
+
+  // Group into paragraphs, tagging each line as narration or letter as we go.
+  const paras: { lines: string[]; letter: boolean[] }[] = [];
+  let cur: { lines: string[]; letter: boolean[] } | null = null;
+  let inQuote = false;
+
+  for (const raw of INTRO_TEXT) {
+    const line = raw;
+    if (line === '') {
+      cur = null;
+      continue;
+    }
+    const isLetter = inQuote || line.startsWith('"');
+    let quotes = 0;
+    for (let i = 0; i < line.length; i++) if (line.charCodeAt(i) === 34) quotes++;
+    if (quotes % 2 === 1) inQuote = !inQuote;
+
+    if (!cur) {
+      cur = { lines: [], letter: [] };
+      paras.push(cur);
+    }
+    cur.lines.push(line);
+    cur.letter.push(isLetter);
+  }
+
+  // Split anything that cannot fit on a page of its own before packing.
+  const units: { lines: string[]; letter: boolean[] }[] = [];
+  for (const p of paras) {
+    for (let i = 0; i < p.lines.length; i += limit) {
+      units.push({
+        lines: p.lines.slice(i, i + limit),
+        letter: p.letter.slice(i, i + limit),
+      });
+    }
+  }
+
+  const pages: NotePage[] = [];
+  let lines: string[] = [];
+  let letter: boolean[] = [];
+
+  const flush = (): void => {
+    if (lines.length === 0) return;
+    let chars = 0;
+    for (const l of lines) chars += l.length + 1;
+    pages.push({ lines, letter, chars, flat: lines.join('\n') });
+    lines = [];
+    letter = [];
+  };
+
+  for (const u of units) {
+    // A blank line between paragraphs on the same page, if there is room for it.
+    const gap = lines.length > 0 ? 1 : 0;
+    if (lines.length + gap + u.lines.length > limit) flush();
+    if (lines.length > 0) {
+      lines.push('');
+      letter.push(false);
+    }
+    for (let i = 0; i < u.lines.length; i++) {
+      lines.push(u.lines[i]);
+      letter.push(u.letter[i]);
+    }
+  }
+  flush();
+
+  return pages;
+}
+
 export const BOSS_INTROS: Record<string, string[]> = {
   dev: [
     'Somebody has to actually build the doomsday machine.',

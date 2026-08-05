@@ -135,6 +135,18 @@ const F_GLINT = 30;
 const F_WEAPON = 8;
 
 /**
+ * A per-dwarf playback rate for the cues every transformation shares.
+ *
+ * Seven dwarfs dressing produced seven identical sound sequences with only the
+ * final weapon differing, which reads as "it is the same sound for everyone".
+ * Leaning on each dwarf's own VoiceProfile pitch makes Grumpy's leather land
+ * heavier than Dopey's without needing seven bespoke cues.
+ */
+function voicePitch(d: DwarfDef): number {
+  return clamp(0.78 + (d.voice.pitch - 70) / 260, 0.7, 1.4);
+}
+
+/**
  * The outfit blend, scheduled against the rig's own thresholds:
  *   jacket hem   cover  = fit * 1.25          (full at 0.80)
  *   studs        pop    = 0.28 -> 0.70
@@ -596,12 +608,14 @@ export class SelectScene implements Scene {
     const cx = STAGE.x + STAGE.w * 0.5;
     const z0 = (FLOOR_Y - GROUND_Y) / Z_SCALE;
 
+    const vp = voicePitch(d);
+
     if (f === T_JACKET) {
-      this.game.audio.play('drop', { gain: 0.7, pitch: 0.85 });
+      this.game.audio.play('drop', { gain: 0.7, pitch: 0.85 * vp });
     } else if (f === T_JACKET + F_SNAP) {
       // The jacket lands. Studs, leather and a small amount of gravel.
-      this.game.audio.play('hit_metal', { gain: 0.75 });
-      this.game.audio.play('punch_light', { gain: 0.5 });
+      this.game.audio.play('hit_metal', { gain: 0.75, pitch: vp });
+      this.game.audio.play('punch_light', { gain: 0.5, pitch: vp });
       this.kick(0.03, 3.4, 0.22, d.style.jacketAccent);
       if (!reduced) {
         this.emit({
@@ -638,10 +652,10 @@ export class SelectScene implements Scene {
         });
       }
     } else if (f === T_SHADES + 2) {
-      this.game.audio.play('dash', { gain: 0.55, pitch: 1.3 });
+      this.game.audio.play('dash', { gain: 0.55, pitch: 1.3 * vp });
     } else if (f === T_SHADES + F_GLINT) {
       // Lenses hit the nose. One hard white glint, and he can no longer see you.
-      this.game.audio.play('meter_full', { gain: 0.8 });
+      this.game.audio.play('meter_full', { gain: 0.8, pitch: vp });
       this.kick(0.028, 1.6, 0.5, '#ffffff');
       if (!reduced) {
         this.emit({
@@ -702,13 +716,18 @@ export class SelectScene implements Scene {
         });
       }
     } else if (f === T_POSE + F_WEAPON) {
-      // Every dwarf produces a different weapon, so this must not always be the
-      // same generic pickup blip. A bike chain rattles, a bat cracks, a taser
-      // buzzes, a Cybertruck door is a sheet of broken glass.
+      // The weapon is the punchline of the transformation, so it gets the stage
+      // to itself — the generic pickup blip that used to play here competed
+      // with it and made every dwarf sound the same.
       const w = WEAPONS[d.signatureWeapon];
-      this.game.audio.play('pickup', { gain: 0.32, pitch: 1.15 });
-      this.game.audio.play(w.sfx.reveal, { gain: 0.85, pitch: w.sfx.pitch ?? 1 });
+      this.game.audio.play(w.sfx.reveal, { gain: 0.95, pitch: w.sfx.pitch ?? 1 });
       this.kick(0.02, 2, 0.12, GOLD);
+    } else if (f === T_POSE + F_WEAPON + 7) {
+      // A second beat as he swings it. Two notes are recognisable where one
+      // buried in a sequence is not.
+      const w = WEAPONS[d.signatureWeapon];
+      this.game.audio.play(w.sfx.swing, { gain: 0.72, pitch: (w.sfx.pitch ?? 1) * 1.06 });
+      this.game.audio.voice(d.voice, 'taunt');
     }
   }
 

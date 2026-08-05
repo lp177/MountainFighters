@@ -59,7 +59,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
 
   ironbar: {
     kind: 'ironbar',
-    sfx: { reveal: 'hit_metal', swing: 'weapon_swing', impact: 'hit_metal', pitch: 0.82 },
+    sfx: { reveal: 'hit_metal', swing: 'weapon_swing', impact: 'hit_metal', pitch: 0.58 },
     name: 'Length of Rebar',
     // Nearly indestructible, slow, and it goes straight through a suit.
     durability: 46,
@@ -79,7 +79,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
 
   pipe: {
     kind: 'pipe',
-    sfx: { reveal: 'hit_metal', swing: 'weapon_swing', impact: 'hit_metal', pitch: 1.15 },
+    sfx: { reveal: 'hit_metal', swing: 'weapon_swing', impact: 'hit_metal', pitch: 1.34 },
     name: 'Lead Pipe',
     // Short, dense, honest. The starter weapon of every wet alley in the game.
     durability: 24,
@@ -180,7 +180,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
 
   keyboard: {
     kind: 'keyboard',
-    sfx: { reveal: 'drop', swing: 'weapon_swing', impact: 'glass', pitch: 1.35 },
+    sfx: { reveal: 'bone_crack', swing: 'weapon_swing', impact: 'glass', pitch: 1.55 },
     name: 'Mechanical Keyboard',
     // Fast, light, extremely loud, does almost nothing. Ninety-eight percent
     // of the damage is emotional.

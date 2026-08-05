@@ -540,7 +540,9 @@ function handMade(index: number): MapDef | null {
         width: 1400,
         depth: THEME_DEPTH.mine,
         waves: [
-          { enemies: [{ kind: 'suit_guard', count: 2 }], at: 0.2 },
+          // One man, so the first fight of the game is a lesson and not an
+          // ambush. It grows from there, and Level scales it again by party.
+          { enemies: [{ kind: 'suit_guard', count: 1 }], at: 0.2 },
           { enemies: [{ kind: 'suit_guard', count: 2 }], at: 0.54, reward: { health: 25 } },
           { enemies: [{ kind: 'suit_guard', count: 3 }], at: 0.86, reward: { meter: 0.5 } },
         ],

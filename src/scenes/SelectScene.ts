@@ -849,14 +849,12 @@ export class SelectScene implements Scene {
     };
     this.game.audio.play('ko', { gain: 0.6, pitch: 1.4 });
 
-    // The story runs once, at the top of the first map. Not online — nobody
-    // wants to wait on a peer reading a crawl — and not on a retry, because
-    // dying on map 1 should not cost you half a minute of exposition. It is
-    // skippable either way.
-    const wantsIntro = mapIndex === 1 && !this.online && !this.game.save.seenIntro;
-    if (wantsIntro) {
-      this.game.save.seenIntro = true;
-      this.game.saveNow();
+    // The story runs at the top of the first map, every time a new game is
+    // started — starting one is a deliberate act and the story is the point.
+    // Retrying after a game over goes straight to 'fight' without passing
+    // through here, so a death never costs you the exposition again. Skipped
+    // with any key regardless. Not online: nobody waits on a peer reading.
+    if (mapIndex === 1 && !this.online) {
       this.game.setScene(
         new CutsceneScene(this.game, { onDone: () => this.game.setScene('fight', params) }),
       );

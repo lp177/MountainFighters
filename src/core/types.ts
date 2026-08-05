@@ -908,11 +908,6 @@ export interface SaveData {
   settings: Settings;
   /** Dwarf ids the player has cleared the game with. */
   cleared: string[];
-  /**
-   * True once the opening cinematic has played to the end or been skipped.
-   * Retrying map 1 after a game over should not replay 33 seconds of story.
-   */
-  seenIntro: boolean;
 }
 
 export interface Settings {

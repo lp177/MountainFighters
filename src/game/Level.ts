@@ -33,6 +33,7 @@ import type {
   InputFrame,
   MapDef,
   PropSpawn,
+  RigStyle,
   Rng,
   SimContext,
   Team,
@@ -120,6 +121,48 @@ const SQUAT_ENEMIES: ReadonlySet<EnemyKind> = new Set<EnemyKind>([
   'iot_speaker',
   'delivery_drone',
 ]);
+
+/** Alternates so a wave is not ten identical chains. */
+const WEAPON_POOL: Partial<Record<EnemyKind, WeaponKind[]>> = {
+  suit_guard: ['chain', 'bat', 'ironbar', 'pipe'],
+  taser_guard: ['taser', 'pipe'],
+  gunman: ['pistol', 'pistol', 'bat'],
+  riot_guard: ['riotshield', 'ironbar'],
+  intern: ['keyboard', 'gpu'],
+  lobbyist: ['briefcase' as WeaponKind, 'bat'].filter((w) => w in WEAPONS) as WeaponKind[],
+};
+
+const BEARDS: RigStyle['beardStyle'][] = ['none', 'stubble', 'bushy', 'forked'];
+
+/**
+ * Wardrobe. Scaling a near-black suit only ever produces another near-black
+ * suit, so variation has to come from actually different cloth, not from
+ * nudging one colour. Everything here is still office-issue miserable.
+ */
+const SUITS: string[] = ['#1a1a22', '#242a3a', '#2b2622', '#1f2b28', '#31303a', '#22283044'.slice(0, 7)];
+const SHIRTS: string[] = ['#3d4250', '#5a6272', '#7a6a58', '#46566a', '#6a5060', '#2f3a46'];
+const SKINS: [string, string][] = [
+  ['#d8a682', '#a9784f'],
+  ['#f0c9a8', '#c09468'],
+  ['#a9764e', '#7c5232'],
+  ['#7a5334', '#563820'],
+  ['#e8b892', '#b78455'],
+  ['#5f3f28', '#412a19'],
+];
+const HAIRS: string[] = ['#241d1a', '#0f0d0c', '#4a3527', '#6b5a44', '#8a8a90', '#2e1f1a'];
+
+/** Nudge a #rrggbb toward lighter/darker and warmer/cooler. */
+function shift(hex: string, mul: number, warm: number): string {
+  if (hex.length !== 7 || hex[0] !== '#') return hex;
+  const n = parseInt(hex.slice(1), 16);
+  if (Number.isNaN(n)) return hex;
+  const ch = (v: number, bias: number): number =>
+    Math.max(0, Math.min(255, Math.round(v * mul + bias)));
+  const r = ch((n >> 16) & 255, warm);
+  const g = ch((n >> 8) & 255, 0);
+  const b = ch(n & 255, -warm);
+  return '#' + ((r << 16) | (g << 8) | b).toString(16).padStart(6, '0');
+}
 
 function moveSet(light: string, heavy: string | undefined, ranged: string | undefined): Record<string, string> {
   const h = heavy ?? light;
@@ -449,6 +492,24 @@ export class Level {
     }
   }
 
+  /**
+   * How many of a wave's enemies actually turn up.
+   *
+   * Waves are authored for a single player. Two people on one screen were
+   * fighting the same four guards each, which is limp; four people made it
+   * trivial. Scale with the party, but sub-linearly — a crowd helps each other
+   * more than the numbers suggest — and shave the opening maps, which are
+   * meant to teach rather than to kill.
+   */
+  private waveCount(base: number): number {
+    let live = 0;
+    for (const p of this.players) if (p.alive) live++;
+    const party = Math.max(1, live);
+    let n = base * (1 + (party - 1) * 0.55);
+    if (this.def.index <= 3) n *= 0.7;
+    return Math.max(1, Math.round(n));
+  }
+
   private triggerX(index: number): number {
     const w = this.def.waves[index];
     const at = clamp(w ? w.at : 1, 0, 1);
@@ -462,7 +523,8 @@ export class Level {
     this.goTimer = 0;
 
     for (const group of wave.enemies) {
-      for (let i = 0; i < group.count; i++) this.queue.push({ kind: group.kind, wave: this.waveIndex });
+      const n = this.waveCount(group.count);
+      for (let i = 0; i < n; i++) this.queue.push({ kind: group.kind, wave: this.waveIndex });
     }
     this.spawnTimer = 0;
 
@@ -553,6 +615,60 @@ export class Level {
     };
   }
 
+  /** Odds a given enemy walks on armed. Early maps mostly send fists. */
+  private armedChance(): number {
+    return clamp(0.12 + this.def.index * 0.04, 0.12, 0.72);
+  }
+
+  /**
+   * A per-instance copy of the kind's look.
+   *
+   * Every enemy of a kind previously shared ONE RigStyle object, so a wave was
+   * the same man three times — and any per-fighter tint would have written
+   * through to the shared object. This clones it and nudges build and palette,
+   * so a line of corporate security reads as several different people who
+   * happen to shop at the same place.
+   */
+  private variantStyle(base: RigStyle, kind: EnemyKind): RigStyle {
+    const r = this.rng;
+    const lit = r.range(0.82, 1.24);
+    const warm = r.range(-12, 12);
+    const s: RigStyle = { ...base };
+
+    s.scale = base.scale * r.range(0.92, 1.09);
+    s.girth = base.girth * r.range(0.88, 1.14);
+    s.headSize = base.headSize * r.range(0.95, 1.06);
+
+    if (SQUAT_ENEMIES.has(kind)) {
+      // Machines come off one line: chassis tint only.
+      s.skin = shift(base.skin, lit, warm);
+      s.tunicColor = shift(base.tunicColor, lit, warm);
+      s.jacketColor = shift(base.jacketColor, lit, warm);
+      s.jacketAccent = shift(base.jacketAccent, r.range(0.8, 1.4), warm);
+      s.hatColor = shift(base.hatColor, lit, warm);
+      return s;
+    }
+
+    // People are people: different faces, different hair, different suits.
+    const skin = r.pick(SKINS);
+    s.skin = shift(skin[0], r.range(0.94, 1.06), 0);
+    s.skinShade = shift(skin[1], r.range(0.94, 1.06), 0);
+    s.hair = r.pick(HAIRS);
+
+    const suit = shift(r.pick(SUITS), lit, warm);
+    s.tunicColor = suit;
+    s.jacketColor = suit;
+    s.jacketAccent = shift(r.pick(SHIRTS), r.range(0.85, 1.2), warm);
+    s.hatColor = r.chance(0.5) ? suit : shift(suit, r.range(0.6, 1.5), warm);
+
+    if (base.shades) s.shades = r.chance(0.72);
+    if (r.chance(0.34)) {
+      s.beardStyle = r.pick(BEARDS);
+      s.beardLength = s.beardStyle === 'none' ? 0 : r.range(2, 6);
+    }
+    return s;
+  }
+
   private spawnEnemy(kind: EnemyKind, wave: number, x: number, z: number): Unit | null {
     const def = ENEMIES[kind];
     if (!def) return null;
@@ -562,7 +678,7 @@ export class Level {
       team: 'enemy',
       x: clamp(x, 4, this.def.width - 4),
       z: clamp(z, 1, this.def.depth - 1),
-      style: def.style,
+      style: this.variantStyle(def.style, kind),
       skeleton: SQUAT_ENEMIES.has(kind) ? DWARF_SKELETON : HUMAN_SKELETON,
       health: def.health,
       speed: def.speed,
@@ -573,7 +689,12 @@ export class Level {
     };
 
     const f = new Fighter(init);
-    if (def.weapon) f.giveWeapon(def.weapon);
+    // Not every guard is issued a weapon. Arming all of them made the opening
+    // of map 1 three chain-swingers abreast, which is not a tutorial.
+    if (def.weapon && this.rng.chance(this.armedChance())) {
+      const pool = WEAPON_POOL[kind];
+      f.giveWeapon(pool && pool.length > 0 ? this.rng.pick(pool) : def.weapon);
+    }
 
     const tuning: AiTuning = {
       reactionFrames: def.ai.reactionFrames,

@@ -94,6 +94,18 @@ const THREAT_STARTUP = 8;
 const THREAT_RANGE = 56;
 const DASH_TOTAL = 20;
 
+/**
+ * Which button walks a fighter toward a LARGER z.
+ *
+ * z=0 is the back wall and z=Z_DEPTH is nearest the camera, so growing z means
+ * walking toward the viewer, which is Down. Having this written out three
+ * times is how the AI ended up steering away from its target when the axis was
+ * corrected — every consumer now goes through here.
+ */
+function zButton(delta: number): BtnMask {
+  return delta > 0 ? Btn.Down : Btn.Up;
+}
+
 export class EnemyAI implements InputSource {
   readonly kind = 'ai' as const;
   readonly id: string;
@@ -451,7 +463,7 @@ export class EnemyAI implements InputSource {
     }
 
     const ddz = wantZ - self.pos.z;
-    if (Math.abs(ddz) > 2.2) mask |= ddz > 0 ? Btn.Up : Btn.Down;
+    if (Math.abs(ddz) > 2.2) mask |= zButton(ddz);
 
     const aligned = Math.abs(dz) <= Z_ALIGNED;
     const allowX = aligned || adx > CLOSE_X || this.plan === 'retreat' || this.plan === 'ranged';
@@ -587,7 +599,7 @@ export class EnemyAI implements InputSource {
     const away = this.self.pos.x < target.pos.x ? Btn.Left : Btn.Right;
     if (this.p.behaviour === 'turtle' || this.rng.chance(0.35)) mask |= away;
     const dz = target.pos.z - this.self.pos.z;
-    if (Math.abs(dz) > Z_ALIGNED) mask |= dz > 0 ? Btn.Up : Btn.Down;
+    if (Math.abs(dz) > Z_ALIGNED) mask |= zButton(dz);
     return mask;
   }
 
@@ -603,8 +615,8 @@ export class EnemyAI implements InputSource {
 
   private wanderMask(): BtnMask {
     let mask = this.side > 0 ? Btn.Right : Btn.Left;
-    if (this.lane > 0.4) mask |= Btn.Up;
-    else if (this.lane < -0.4) mask |= Btn.Down;
+    if (this.lane > 0.4) mask |= zButton(1);
+    else if (this.lane < -0.4) mask |= zButton(-1);
     return mask;
   }
 

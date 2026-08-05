@@ -28,6 +28,10 @@ chassis, with a great deal of screen shake.
   back, delivery drones, unpaid interns, and lobbyists.
 - **Weapons get dropped and picked up** — chains, bats, iron bars, riot
   shields, a Cybertruck door. Vehicle sections when walking gets boring.
+- **An opening cinematic** that shows you the kidnapping rather than
+  explaining it: the cottage, the headlights, the door coming off its hinges,
+  the lab, and seven dwarfs putting on the leather. Skippable, and it only
+  plays once.
 - **Local multiplayer** on one keyboard or with gamepads, up to four players.
 - **Online multiplayer** by sending a link. Your friend clicks it, picks a
   dwarf, and is in the fight. That is the entire flow — from the home screen or

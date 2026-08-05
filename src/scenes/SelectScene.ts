@@ -48,6 +48,7 @@ import { drawCharacter } from '@/render/rig/CharacterRig';
 import { burst, poly, roundRect, star } from '@/render/Shapes';
 import { Camera } from '@/render/Camera';
 import { ParticleSystem } from '@/juice/Particles';
+import { CutsceneScene } from '@/scenes/CutsceneScene';
 
 type C2D = CanvasRenderingContext2D;
 
@@ -844,6 +845,21 @@ export class SelectScene implements Scene {
       seed,
     };
     this.game.audio.play('ko', { gain: 0.6, pitch: 1.4 });
+
+    // The story runs once, at the top of the first map. Not online — nobody
+    // wants to wait on a peer reading a crawl — and not on a retry, because
+    // dying on map 1 should not cost you half a minute of exposition. It is
+    // skippable either way.
+    const wantsIntro = mapIndex === 1 && !this.online && !this.game.save.seenIntro;
+    if (wantsIntro) {
+      this.game.save.seenIntro = true;
+      this.game.saveNow();
+      this.game.setScene(
+        new CutsceneScene(this.game, { onDone: () => this.game.setScene('fight', params) }),
+      );
+      return;
+    }
+
     this.game.setScene('fight', params);
   }
 

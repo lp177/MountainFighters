@@ -109,6 +109,7 @@ export function defaultSave(): SaveData {
     scores: {},
     settings: defaultSettings(),
     cleared: [],
+    seenIntro: false,
   };
 }
 
@@ -163,6 +164,9 @@ function migrate(raw: unknown): SaveData {
     scores: repairScores(o['scores']),
     settings: repairSettings(o['settings']),
     cleared: repairCleared(o['cleared']),
+    // Older saves predate the cinematic. Treat them as having seen it: someone
+    // with progress already banked does not want a story crawl on next launch.
+    seenIntro: o['seenIntro'] === true || num(o['progress'], 1, 1, TOTAL_MAPS) > 1,
   };
 }
 

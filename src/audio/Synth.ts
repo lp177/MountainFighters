@@ -2,10 +2,53 @@
  * Every sound in Mountain Fighters is DSP. The repository ships zero audio
  * files: each cue below is a recipe of oscillators, pre-rendered noise,
  * biquad filters, waveshapers and envelopes, built fresh on every trigger.
+ *
+ * GORE VARIANTS — how the finishers get sounds the cue list does not name.
+ *
+ * `SfxCue` lives in the frozen shared contract, so the fatality library cannot
+ * be handed a 'squelch' or a 'cloth_tear' cue: those names do not exist and
+ * cannot be added. What CAN be added is what a cue does at a playback rate no
+ * existing call site uses. Five cues therefore branch on `pitch`, far outside
+ * their normal range, into a full second recipe:
+ *
+ *     hit_flesh  @ <=0.75   wet squelch      (normal game use: 0.8 .. 1.1)
+ *     bone_crack @ <=0.82   bone snapping    (normal game use: 0.9 .. 1.55)
+ *     whiff      @ >=1.5    cloth tearing    (normal game use: 0.55 .. 1.35)
+ *     grunt      @ <=0.75   gulp / swallow   (normal game use: ~1.0)
+ *     land       @ <=0.75   heavy body drop  (normal game use: 0.9 .. 1.1)
+ *
+ * Nothing in the game plays those cues in the variant range today, so no
+ * existing sound changes; the plain recipes are untouched. Use `GORE_SFX` below
+ * rather than hard-coding the numbers.
  */
 
 import { clamp } from '@/core/math';
 import type { SfxCue, VoiceProfile } from '@/core/types';
+
+/**
+ * The gore palette, as (cue, pitch) pairs. `audio.play(GORE_SFX.gulp.cue, {
+ * pitch: GORE_SFX.gulp.pitch })` gets you a swallow; the same cue at its normal
+ * pitch is still the same grunt it always was.
+ */
+export const GORE_SFX = {
+  /** Wet, sucking, unmistakably organic. The workhorse of the fatality library. */
+  squelch: { cue: 'hit_flesh', pitch: 0.6 },
+  /** A snap with splinters and meat around it, not the dry tick of a light hit. */
+  boneSnap: { cue: 'bone_crack', pitch: 0.7 },
+  /** Fabric giving way — a jacket, a shirt, a hat being torn off a head. */
+  clothTear: { cue: 'whiff', pitch: 1.8 },
+  /** Chew, chew, swallow. For the enemy who eats your hat. */
+  gulp: { cue: 'grunt', pitch: 0.55 },
+  /** A whole body arriving on the floor at speed. */
+  bodyImpact: { cue: 'land', pitch: 0.6 },
+} as const satisfies Record<string, { cue: SfxCue; pitch: number }>;
+
+/** Playback rates at which the five cues above swap to their gore recipe. */
+const SQUELCH_BELOW = 0.75;
+const BONE_SNAP_BELOW = 0.82;
+const CLOTH_TEAR_ABOVE = 1.5;
+const GULP_BELOW = 0.75;
+const BODY_IMPACT_BELOW = 0.75;
 
 /** Hard cap on simultaneous voices. Over budget, the quietest voice dies. */
 const MAX_VOICES = 24;
@@ -602,6 +645,162 @@ export class Synth {
     p.env(g, level, 0.004, dur, at);
   }
 
+  // ── Gore recipes ───────────────────────────────────────────────────────────
+  //
+  // Reached only from the pitch branches at the top of their cues. Each one
+  // normalises the incoming playback rate against the pitch `GORE_SFX`
+  // recommends, so the variant sounds right at the documented pitch and still
+  // moves if a caller pushes it — rather than being detuned into a joke by a
+  // rate the plain recipe was designed around.
+
+  /** Wet, sucking, organic. Impact, then suction, then dribble. */
+  private squelch(p: Patch, k: number): number {
+    const t = p.t;
+    // Normalised against GORE_SFX.squelch.pitch.
+    const w = clamp(k / 0.6, 0.6, 1.5);
+
+    const dist = p.drive(2.6);
+    dist.connect(p.out);
+    // The blow still has to land; this half is the punch it always was.
+    this.noiseHit(p, 'lowpass', 700 * w, 240 * w, 0.9, 0.75, 0.002, 0.12, 0, dist);
+    this.thump(p, 96 * w, 46 * w, 0.15, 0.5, 'sine', 0, dist);
+
+    // Suction: a high-Q band dragged downwards is a boot leaving mud, and a
+    // fist leaving a ribcage is the same physics with worse manners.
+    const wet = this.noiseHit(p, 'bandpass', 1200 * w, 1200 * w, 8, 0.5, 0.01, 0.26, 0.012);
+    wet.frequency.cancelScheduledValues(t);
+    wet.frequency.setValueAtTime(1300 * w, t + 0.012);
+    wet.frequency.exponentialRampToValueAtTime(170 * w, t + 0.26);
+    p.lfo(wet.frequency, 27, 130 * w, 'triangle');
+
+    // The slack body of the thing, falling an octave and a half.
+    const gloop = p.osc('triangle', 340 * w, 0.02);
+    gloop.frequency.exponentialRampToValueAtTime(70 * w, t + 0.3);
+    const lp = p.filter('lowpass', 1500, 3);
+    const gg = p.gain();
+    gloop.connect(lp);
+    lp.connect(gg);
+    gg.connect(p.out);
+    p.env(gg, 0.36, 0.012, 0.3, 0.02);
+
+    // Dribble. Three small wet ticks trailing off.
+    for (let i = 0; i < 3; i++) {
+      const at = 0.17 + i * 0.055 + Math.random() * 0.02;
+      this.noiseHit(p, 'bandpass', (1500 + i * 520) * w, 600 * w, 10, 0.12, 0.002, 0.05, at);
+    }
+    return 0.44;
+  }
+
+  /** A snap with splinters and meat around it. */
+  private boneSnap(p: Patch, k: number): number {
+    // Normalised against GORE_SFX.boneSnap.pitch.
+    const w = clamp(k / 0.7, 0.6, 1.5);
+
+    // The break: a hard transient, then a struck-timber ring, very short.
+    this.noiseHit(p, 'highpass', 2500 * w, 3400 * w, 0.7, 0.9, 0.0007, 0.016);
+    this.blip(p, 'square', 3100 * w, 1700 * w, 0.5, 0.015);
+    this.metal(p, 760 * w, 0.09, 0.22, 0.002);
+
+    // Splinters, scattered so no two snaps line up.
+    for (let i = 0; i < 4; i++) {
+      const at = 0.012 + i * 0.019 + Math.random() * 0.012;
+      const f = (1700 + Math.random() * 2300) * w;
+      this.noiseHit(p, 'bandpass', f, 850 * w, 13, 0.16, 0.001, 0.032, at);
+    }
+
+    // And the leg it was inside.
+    this.noiseHit(p, 'lowpass', 620 * w, 190 * w, 0.9, 0.5, 0.002, 0.17, 0.006);
+    this.thump(p, 92 * w, 42 * w, 0.18, 0.45, 'sine', 0.006);
+    return 0.3;
+  }
+
+  /** Fabric giving way: broadband noise, chopped, sweeping down as it rips. */
+  private clothTear(p: Patch, k: number): number {
+    const t = p.t;
+    // Normalised against GORE_SFX.clothTear.pitch.
+    const w = clamp(k / 1.8, 0.6, 1.5);
+
+    const body = p.gain();
+    body.connect(p.out);
+    const bp = p.filter('bandpass', 2600 * w, 1.3);
+    bp.frequency.setValueAtTime(3000 * w, t);
+    bp.frequency.exponentialRampToValueAtTime(820 * w, t + 0.34);
+    const hp = p.filter('highpass', 640 * w, 0.7);
+    const n = p.noise(1.25);
+    n.connect(hp);
+    hp.connect(bp);
+    bp.connect(body);
+    p.env(body, 0.5, 0.006, 0.34);
+
+    // A rip is not one event, it is a few hundred small ones. Chopping the
+    // band hard in the low audio range is what turns hiss into tearing.
+    const chop = p.gain(0);
+    p.lfo(chop.gain, 46, 0.7, 'square');
+    bp.connect(chop);
+    chop.connect(body);
+
+    // Individual threads letting go, accelerating as the tear runs.
+    for (let i = 0; i < 7; i++) {
+      const at = 0.008 + i * 0.032 * (1 + i * 0.09) + Math.random() * 0.012;
+      this.noiseHit(p, 'highpass', (3400 - i * 220) * w, 2100 * w, 0.8, 0.14, 0.0008, 0.022, at);
+    }
+
+    // The flap of the piece coming free.
+    this.noiseHit(p, 'lowpass', 900 * w, 260 * w, 0.9, 0.24, 0.006, 0.12, 0.3);
+    return 0.46;
+  }
+
+  /** Chew, chew, swallow. A gulp is a pitch contour, not a timbre. */
+  private gulp(p: Patch, k: number): number {
+    const t = p.t;
+    // Normalised against GORE_SFX.gulp.pitch.
+    const w = clamp(k / 0.55, 0.6, 1.5);
+
+    // Two closed-mouth chews.
+    for (let i = 0; i < 2; i++) {
+      const at = i * 0.13;
+      this.noiseHit(p, 'lowpass', 880 * w, 300 * w, 1.2, 0.3, 0.004, 0.07, at);
+      this.thump(p, 150 * w, 88 * w, 0.08, 0.22, 'triangle', at);
+    }
+
+    // The swallow itself: a resonant blip dropping through the throat.
+    const o = p.osc('sine', 300 * w, 0.28);
+    o.frequency.exponentialRampToValueAtTime(74 * w, t + 0.46);
+    const bp = p.filter('bandpass', 540 * w, 6);
+    bp.frequency.exponentialRampToValueAtTime(180 * w, t + 0.46);
+    const g = p.gain();
+    o.connect(bp);
+    bp.connect(g);
+    g.connect(p.out);
+    p.env(g, 0.5, 0.02, 0.22, 0.28);
+
+    // Throat closing behind it, and a small satisfied click.
+    this.noiseHit(p, 'bandpass', 700 * w, 250 * w, 5, 0.22, 0.01, 0.1, 0.3);
+    this.blip(p, 'sine', 180 * w, 96 * w, 0.2, 0.09, 0.44);
+    return 0.6;
+  }
+
+  /** A whole body arriving on the floor, limbs a beat behind it. */
+  private bodyImpact(p: Patch, k: number): number {
+    // Normalised against GORE_SFX.bodyImpact.pitch.
+    const w = clamp(k / 0.6, 0.6, 1.5);
+
+    const dist = p.drive(4);
+    dist.connect(p.out);
+    // The floor.
+    this.thump(p, 122 * w, 32, 0.3, 0.95, 'sine', 0, dist);
+    this.thump(p, 70 * w, 24, 0.44, 0.5, 'triangle', 0.012, dist);
+    // The meat.
+    this.noiseHit(p, 'lowpass', 1500 * w, 250 * w, 0.9, 0.6, 0.002, 0.18, 0, dist);
+    // Clothing, then the dust it knocked up.
+    this.noiseHit(p, 'highpass', 1800 * w, 700 * w, 0.7, 0.16, 0.004, 0.1, 0.01);
+    this.noiseHit(p, 'lowpass', 700, 200, 0.8, 0.2, 0.02, 0.5, 0.03);
+    // The follow-through as the arms and head land after the torso.
+    this.noiseHit(p, 'lowpass', 900 * w, 240 * w, 0.9, 0.3, 0.004, 0.12, 0.09);
+    this.thump(p, 96 * w, 38, 0.16, 0.35, 'sine', 0.095, dist);
+    return 0.72;
+  }
+
   // ── The cue table ──────────────────────────────────────────────────────────
 
   private build(p: Patch, cue: SfxCue, k: number): number {
@@ -632,6 +831,7 @@ export class Synth {
       }
 
       case 'whiff': {
+        if (k >= CLOTH_TEAR_ABOVE) return this.clothTear(p, k);
         const f = this.noiseHit(p, 'bandpass', 260 * k, 520 * k, 2.4, 0.3, 0.05, 0.13);
         f.frequency.cancelScheduledValues(t);
         f.frequency.setValueAtTime(260 * k, t);
@@ -659,6 +859,7 @@ export class Synth {
       }
 
       case 'hit_flesh': {
+        if (k <= SQUELCH_BELOW) return this.squelch(p, k);
         const dist = p.drive(3.5);
         dist.connect(p.out);
         this.noiseHit(p, 'lowpass', 760 * k, 260 * k, 0.9, 0.8, 0.002, 0.11, 0, dist);
@@ -674,6 +875,7 @@ export class Synth {
       }
 
       case 'bone_crack': {
+        if (k <= BONE_SNAP_BELOW) return this.boneSnap(p, k);
         this.noiseHit(p, 'highpass', 2600 * k, 3600 * k, 0.7, 0.85, 0.0008, 0.014);
         this.blip(p, 'square', 3400 * k, 2100 * k, 0.45, 0.012);
         this.noiseHit(p, 'bandpass', 900 * k, 420 * k, 3, 0.5, 0.001, 0.05, 0.008);
@@ -809,6 +1011,7 @@ export class Synth {
       }
 
       case 'land': {
+        if (k <= BODY_IMPACT_BELOW) return this.bodyImpact(p, k);
         this.noiseHit(p, 'lowpass', 420, 180, 0.8, 0.5, 0.003, 0.14);
         this.thump(p, 145 * k, 52 * k, 0.15, 0.55);
         return 0.2;
@@ -1007,6 +1210,7 @@ export class Synth {
       }
 
       case 'grunt': {
+        if (k <= GULP_BELOW) return this.gulp(p, k);
         const o = p.osc('sawtooth', 145 * k);
         o.frequency.exponentialRampToValueAtTime(102 * k, t + 0.2);
         const fa = p.filter('bandpass', 640, 4.5);

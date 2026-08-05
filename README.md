@@ -94,9 +94,22 @@ netcode possible without a game server. See
 ## Multiplayer, technically
 
 WebRTC data channels, brokered by the public PeerJS cloud server. There is no
-game server and no infrastructure to run — peers talk directly to each other and
-the broker is only used for the initial handshake. If you would rather run your
-own, point `NetConfig.host` at a self-hosted PeerServer.
+game server — peers talk directly to each other and the broker is only used for
+the initial handshake. If you would rather run your own, point `NetConfig.host`
+at a self-hosted PeerServer.
+
+**You almost certainly need a TURN relay.** Peer-to-peer only works when at
+least one side's network will accept an inbound packet at a predictable
+address. On a LAN that is always true. Across the internet it is a coin flip,
+and on mobile or carrier-grade-NAT connections it essentially never works — ICE
+fails with *"add a TURN server"* and the two players never meet. STUN cannot fix
+this; it only reports your own public address. A TURN server relays the traffic
+when a direct route does not exist.
+
+Configure one by copying `.env.example` to `.env` and rebuilding. Any credential
+shipped to a browser is public by construction, so use a dedicated, rate-limited
+one. Without it the game still works on a LAN and between lucky networks, and
+says so plainly instead of hanging.
 
 ## On the satire
 

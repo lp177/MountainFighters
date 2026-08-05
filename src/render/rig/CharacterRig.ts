@@ -7,9 +7,22 @@
  * soft cap, rosy cheeks) to the bad boy (spiked leather, studded belt, shades,
  * cigar). The hat survives at both ends: it is the one thing that keeps each
  * dwarf recognisable as himself.
+ *
+ * An optional `RigDamage` lays a second axis over all of that: the face changes
+ * expression, the chest heaves, the wardrobe comes apart in stages and the
+ * blood lands on top. See the damage section below for the rules it plays by.
  */
 
-import type { Bone, BoneName, Facing, Pose, RigStyle, WeaponDef } from '@/core/types';
+import type {
+  Bone,
+  BoneName,
+  FaceState,
+  Facing,
+  Pose,
+  RigDamage,
+  RigStyle,
+  WeaponDef,
+} from '@/core/types';
 import { clamp, easeOutBack, lerp, TAU } from '@/core/math';
 import {
   burst,
@@ -305,6 +318,304 @@ function studs(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Damage — the same character, chewed up
+//
+// A beaten fighter is not a second set of art. Everything here is a modifier on
+// the rig that already exists: the face swaps expression, the chest heaves, the
+// wardrobe loses material in stages, and blood lands on top of all of it.
+//
+// The three inputs are independent on purpose. `wear` is what the fight did to
+// his CLOTHES, `blood` is what it did to HIM, and `breath` is what he has LEFT,
+// so a fighter can be immaculate and gasping, or shredded and barely marked.
+//
+// GORE SETTING. This file never invents blood. `Settings.gore === 'off'` arrives
+// as `blood: 0` and every red mark below is gated on that number — the hits, the
+// tearing and the exhaustion all still read, bloodlessly. 'max' arrives as a
+// bigger number and everything scales with it for free.
+//
+// DETERMINISM. Tears, stains, bruises and which sleeve goes first are hashed out
+// of `RigDamage.seed`, never out of a frame counter, so they sit still on the
+// cloth instead of crawling. The only things allowed to move with the wall clock
+// are the breath, the sweat and the dazed spiral, which are presentation and
+// obey `reducedMotion`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Deep and a little purple. Pure red reads as plastic at this size. */
+const BLOOD = '#9e1420';
+const BLOOD_DK = '#5c0a12';
+/** Fresh, wet, still moving. */
+const BLOOD_WET = '#cf2230';
+/** A bruise at full ripeness; mixed back toward the skin by how fresh it is. */
+const BRUISE = '#43214f';
+const SWEAT = '#a8cfe8';
+/** Scuffs and ground-in dirt. Not blood, so it survives gore: 'off'. */
+const DIRT = '#2f2833';
+/** The inside of a shouting mouth. */
+const MAW = '#2a0d14';
+const TEETH = '#f2ece0';
+const TONGUE = '#c0505f';
+
+interface Dmg {
+  /** False when the caller passed no RigDamage at all: skip every extra pass. */
+  on: boolean;
+  wear: number;
+  blood: number;
+  breath: number;
+  seed: number;
+  face: FaceState;
+  hatless: boolean;
+  reduced: boolean;
+  /** -1..1 breathing oscillation, already reduced-motion aware. */
+  heave: number;
+  /** 0..1 postural collapse: forward hunch, dropped head, loose elbows. */
+  slump: number;
+  /** Wall-clock seconds. Presentation only — the sim never sees this file. */
+  t: number;
+  /** Wear stages, each 0..1 and overlapping: scuffed, ripped, shredded. */
+  t1: number;
+  t2: number;
+  t3: number;
+}
+
+const NEUTRAL_DMG: Dmg = {
+  on: false, wear: 0, blood: 0, breath: 0, seed: 0, face: 'calm', hatless: false,
+  reduced: false, heave: 0, slump: 0, t: 0, t1: 0, t2: 0, t3: 0,
+};
+
+/** Refilled once per character. drawCharacter is never re-entrant. */
+const DMG: Dmg = { ...NEUTRAL_DMG };
+
+/** Stable hash in [0,1) from a fighter seed and a slot index. */
+function hashf(seed: number, i: number): number {
+  let x = Math.imul(seed | 0, 0x9e3779b1) ^ Math.imul((i | 0) + 1, 0x85ebca77);
+  x = Math.imul(x ^ (x >>> 15), 0x2c1b3c6d);
+  x = Math.imul(x ^ (x >>> 13), 0x297a2d39);
+  return ((x ^ (x >>> 16)) >>> 0) / 4294967296;
+}
+
+/** ...and the same, in [-1,1). */
+function hashs(seed: number, i: number): number {
+  return hashf(seed, i) * 2 - 1;
+}
+
+/** Where `v` sits inside a wear stage, 0 before it starts and 1 once it is done. */
+function stage(v: number, a: number, b: number): number {
+  return clamp((v - a) / (b - a), 0, 1);
+}
+
+function nowSec(): number {
+  return typeof performance === 'undefined' ? 0 : performance.now() * 0.001;
+}
+
+/**
+ * Fallback for a caller that does not thread the setting through: `Ui`
+ * mirrors `Settings.reducedMotion` onto <html> already, so the rig can read it
+ * from there rather than quietly ignoring it. Cached, because this would
+ * otherwise be a DOM read once per character per frame.
+ */
+let motionCache = false;
+let motionCheckedAt = -1;
+
+function domReducedMotion(t: number): boolean {
+  if (typeof document === 'undefined') return false;
+  if (motionCheckedAt < 0 || t < motionCheckedAt || t - motionCheckedAt > 0.25) {
+    motionCheckedAt = t;
+    motionCache = document.documentElement.classList.contains('reduced-motion');
+  }
+  return motionCache;
+}
+
+function fillDamage(src: RigDamage | undefined, want: boolean | undefined): Dmg {
+  const t = nowSec();
+  const reduced = want ?? domReducedMotion(t);
+  if (!src) {
+    DMG.on = false;
+    DMG.wear = 0;
+    DMG.blood = 0;
+    DMG.breath = 0;
+    DMG.seed = 0;
+    DMG.face = 'calm';
+    DMG.hatless = false;
+    DMG.reduced = reduced;
+    DMG.heave = 0;
+    DMG.slump = 0;
+    DMG.t = 0;
+    DMG.t1 = 0;
+    DMG.t2 = 0;
+    DMG.t3 = 0;
+    return DMG;
+  }
+
+  const wear = clamp(src.wear, 0, 1);
+  const breath = clamp(src.breath, 0, 1);
+  const seed = src.seed | 0;
+  DMG.on = true;
+  DMG.wear = wear;
+  DMG.blood = clamp(src.blood, 0, 1);
+  DMG.breath = breath;
+  DMG.seed = seed;
+  DMG.face = src.face;
+  DMG.hatless = src.hatless === true;
+  DMG.reduced = reduced;
+  DMG.t1 = stage(wear, 0.1, 0.4);
+  DMG.t2 = stage(wear, 0.36, 0.68);
+  DMG.t3 = stage(wear, 0.62, 0.96);
+  DMG.t = t;
+  // Two oscillators at FIXED rates, crossfaded — not one oscillator whose rate
+  // climbs. A moving frequency slews the phase every time health changes, and
+  // the chest visibly stutters. Crossfading two sines that are already out of
+  // phase gives a ragged, uneven heave, which is exactly what panting is.
+  const ph = hashf(seed, 3) * TAU;
+  const slow = Math.sin(t * 2.5 + ph);
+  const fast = Math.sin(t * 9.6 + ph * 1.7);
+  const amp = 0.2 + 0.8 * breath;
+  DMG.heave = lerp(slow, fast, breath * breath) * amp * (reduced ? 0.28 : 1);
+  // Reduced motion damps the OSCILLATION but never the POSTURE: a player who
+  // turned the shaking off still has to be able to see that he is nearly out.
+  const s = stage(breath, 0.28, 1);
+  DMG.slump = clamp(s * s * (src.face === 'exhausted' ? 1.35 : 1) + wear * 0.12, 0, 1);
+  return DMG;
+}
+
+// ── Damage posture ───────────────────────────────────────────────────────────
+//
+// The heave is applied to the SKELETON rather than to the drawing, so the rim
+// light, the jacket, the arms and the held weapon all move with the chest for
+// free. The caller's pose is copied into a scratch that is allocated once.
+
+interface Bp {
+  rot: number;
+  x: number;
+  y: number;
+  scale: number;
+}
+
+const BONES_ALL: BoneName[] = [
+  'root', 'pelvis', 'torso', 'chest', 'neck', 'head', 'hat', 'beard',
+  'armL_upper', 'armL_lower', 'handL', 'armR_upper', 'armR_lower', 'handR',
+  'legL_upper', 'legL_lower', 'footL', 'legR_upper', 'legR_lower', 'footR',
+];
+
+const SB = {} as Record<BoneName, Bp>;
+const POSE_SCRATCH: Pose = {};
+for (let i = 0; i < BONES_ALL.length; i++) {
+  const bp: Bp = { rot: 0, x: 0, y: 0, scale: 1 };
+  SB[BONES_ALL[i]] = bp;
+  POSE_SCRATCH[BONES_ALL[i]] = bp;
+}
+
+/**
+ * The caller's pose with the breathing and the slump laid over it. Nothing here
+ * touches the pelvis or the legs: dropping the hips would push the feet through
+ * the floor, so the collapse is spent entirely on the spine and the shoulders.
+ */
+function damagePose(pose: Pose, d: Dmg): Pose {
+  if (!d.on) return pose;
+  const loll = d.face === 'dazed' ? 0.16 : d.face === 'exhausted' ? 0.09 : 0;
+  if (d.breath <= 0.001 && d.slump <= 0.001 && loll <= 0) return pose;
+
+  for (let i = 0; i < BONES_ALL.length; i++) {
+    const n = BONES_ALL[i];
+    const src = pose[n];
+    const bp = SB[n];
+    bp.rot = src?.rot ?? 0;
+    bp.x = src?.x ?? 0;
+    bp.y = src?.y ?? 0;
+    bp.scale = src?.scale ?? 1;
+  }
+
+  const hv = d.heave;
+  const b = d.breath;
+  const sl = d.slump;
+
+  // Whole upper body rides the inhale; the spine folds forward as he tires.
+  SB.torso.y += hv * (0.3 + 1.2 * b);
+  SB.torso.rot -= sl * 0.13;
+  SB.chest.rot += hv * 0.03 - sl * 0.1;
+  SB.neck.rot -= sl * 0.17;
+  SB.head.rot -= sl * 0.08;
+
+  // Shoulders. The single most readable part of being out of breath.
+  const rise = hv * (0.5 + 1.7 * b);
+  SB.armL_upper.y += rise;
+  SB.armR_upper.y += rise;
+  SB.neck.y += rise * 0.3;
+  SB.armL_upper.rot -= hv * 0.035 + sl * 0.05;
+  SB.armR_upper.rot += hv * 0.035 - sl * 0.05;
+  SB.armL_lower.rot += sl * 0.12;
+  SB.armR_lower.rot += sl * 0.12;
+
+  if (loll > 0) {
+    const w = d.reduced ? 0.5 : Math.sin(d.t * 1.7 + hashf(d.seed, 5) * TAU);
+    SB.head.rot += w * loll;
+    SB.neck.rot += w * loll * 0.4;
+  }
+  return POSE_SCRATCH;
+}
+
+// ── Damage marks ─────────────────────────────────────────────────────────────
+
+/** A tear: a lens of whatever is UNDERNEATH, ink-outlined so it reads as a hole. */
+const RIP_PTS: number[] = new Array<number>(8).fill(0);
+
+function rip(ctx: C2D, x: number, y: number, ang: number, l: number, w: number, under: string, ow: number): void {
+  const ca = Math.cos(ang);
+  const sa = Math.sin(ang);
+  const hx = ca * l * 0.5;
+  const hy = sa * l * 0.5;
+  RIP_PTS[0] = x - hx;
+  RIP_PTS[1] = y - hy;
+  RIP_PTS[2] = x - hx * 0.2 - sa * w;
+  RIP_PTS[3] = y - hy * 0.2 + ca * w;
+  RIP_PTS[4] = x + hx;
+  RIP_PTS[5] = y + hy;
+  RIP_PTS[6] = x + hx * 0.25 + sa * w * 0.75;
+  RIP_PTS[7] = y + hy * 0.25 - ca * w * 0.75;
+  poly(ctx, RIP_PTS, under, ink(), ow);
+}
+
+/** A flap of cloth hanging off a torn edge. */
+const TATTER_PTS: number[] = new Array<number>(6).fill(0);
+
+function tatter(ctx: C2D, x: number, y: number, dx: number, dy: number, w: number, c: string, ow: number): void {
+  TATTER_PTS[0] = x - w;
+  TATTER_PTS[1] = y;
+  TATTER_PTS[2] = x + dx;
+  TATTER_PTS[3] = y + dy;
+  TATTER_PTS[4] = x + w;
+  TATTER_PTS[5] = y;
+  poly(ctx, TATTER_PTS, c, ink(), ow);
+}
+
+/**
+ * Ground-in scratches scattered along a limb or a panel, all in one path.
+ * Dirt, not blood — this is the part of the damage that gore: 'off' keeps.
+ */
+function scuffs(r: Rig, a: Pt, b: Pt, wide: number, n: number, salt: number): void {
+  const t = r.d.t1;
+  if (t <= 0.05 || n <= 0) return;
+  const ctx = r.ctx;
+  const seed = r.d.seed;
+  const cnt = Math.max(1, Math.round(n * t));
+  const pd = perp(a, b);
+  ctx.strokeStyle = col(DIRT);
+  ctx.lineWidth = Math.max(0.5, 0.42 * r.u);
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  for (let i = 0; i < cnt; i++) {
+    const f = 0.14 + 0.72 * hashf(seed, salt + i);
+    const s = hashs(seed, salt + 41 + i) * wide;
+    const px = lerp(a.x, b.x, f) + pd.x * s;
+    const py = lerp(a.y, b.y, f) + pd.y * s;
+    const ang = hashf(seed, salt + 83 + i) * TAU;
+    const l = (0.8 + 1.3 * hashf(seed, salt + 127 + i)) * r.u;
+    ctx.moveTo(px - Math.cos(ang) * l, py - Math.sin(ang) * l);
+    ctx.lineTo(px + Math.cos(ang) * l, py + Math.sin(ang) * l);
+  }
+  ctx.stroke();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Rig plumbing
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -320,6 +631,8 @@ interface Rig {
   /** style.outfit, clamped. */
   fit: number;
   girth: number;
+  /** How chewed up he is. Always present; `on` is false for a fresh fighter. */
+  d: Dmg;
 }
 
 const ZERO: ResolvedBone = { name: 'root', x: 0, y: 0, rot: 0, scale: 1 };
@@ -378,10 +691,23 @@ export function drawCharacter(
     tint?: string;
     alpha?: number;
     scale?: number;
+    /**
+     * How far through the mincer this one is. Omit for an untouched character —
+     * the select screen, the menus and the cutscenes all leave it off and get
+     * exactly the art they had before.
+     */
+    damage?: RigDamage;
+    /**
+     * Settings.reducedMotion: keeps the damage POSTURE, drops the wobble.
+     * Omit it and the rig reads the same flag off <html>, which `Ui` keeps in
+     * sync — the setting is honoured whether or not a caller remembers it.
+     */
+    reducedMotion?: boolean;
   },
 ): void {
+  const d = fillDamage(opts?.damage, opts?.reducedMotion);
   const u = (opts?.scale ?? 1) * (style.scale || 1);
-  const bones = resolvePose(skeleton, pose, u);
+  const bones = resolvePose(skeleton, damagePose(pose, d), u);
 
   setPalette(opts?.tint, clamp(opts?.flash ?? 0, 0, 1));
 
@@ -397,6 +723,7 @@ export function drawCharacter(
     ow: Math.max(1, 1.35 * u),
     fit: clamp(style.outfit, 0, 1),
     girth: style.girth || 1,
+    d,
   };
 
   ctx.save();
@@ -425,9 +752,16 @@ export function drawCharacter(
   drawArm(r, true);
   if (opts?.weapon) drawHeldWeapon(r, opts.weapon);
   drawHead(r);
-  drawHat(r);
+  // The hat is the last thing he owns, so losing it is worth its own art.
+  if (d.hatless) drawFlatHair(r);
+  else drawHat(r);
   drawBeard(r);
+  // An open mouth punches THROUGH the beard — a dwarf yelling into his own
+  // whiskers is the whole joke, and a mouth drawn under them is no expression
+  // at all on five of the seven.
+  drawFaceOver(r);
   drawAccessories(r);
+  drawGoreOver(r);
 
   ctx.restore();
   // Loose weapons and pickups draw through drawWeapon() with no character
@@ -529,13 +863,19 @@ function rimHead(r: Rig, c: string, pad: number): void {
   const h = headFrame(r);
   ellipse(ctx, h.c.x, h.c.y, h.rx + pad, h.ry + pad, h.ang, c, NO);
 
-  const f = hatFrame(r);
-  hatCone(f, pad, HAT_PTS);
-  poly(ctx, HAT_PTS, c, NO);
-  const b1 = off(f.base, f.side, f.w * 1.06);
-  const b2 = off(f.base, f.side, -f.w * 1.06);
-  capsule(ctx, b1.x, b1.y, b2.x, b2.y, f.w * 0.24 + pad, c, NO);
-  ellipse(ctx, f.tip.x, f.tip.y, f.w * 0.25 + pad, f.w * 0.25 + pad, 0, c, NO);
+  // A cone-shaped sliver of back light hanging over a bald head is worse than
+  // no rim at all, so the hatless silhouette is the flattened hair instead.
+  if (r.d.hatless) {
+    ellipse(ctx, h.c.x, h.c.y - h.ry * 0.66, h.rx * 1.04 + pad, h.ry * 0.4 + pad, h.ang, c, NO);
+  } else {
+    const f = hatFrame(r);
+    hatCone(f, pad, HAT_PTS);
+    poly(ctx, HAT_PTS, c, NO);
+    const b1 = off(f.base, f.side, f.w * 1.06);
+    const b2 = off(f.base, f.side, -f.w * 1.06);
+    capsule(ctx, b1.x, b1.y, b2.x, b2.y, f.w * 0.24 + pad, c, NO);
+    ellipse(ctx, f.tip.x, f.tip.y, f.w * 0.25 + pad, f.w * 0.25 + pad, 0, c, NO);
+  }
 
   // The beard is deliberately approximated small: it hangs down and forward,
   // away from the lit edge, and an oversized guess here would leave bright
@@ -572,13 +912,27 @@ function beltCol(r: Rig): string {
 }
 
 /** How far the spikes have popped out, with a little overshoot on the way. */
+/** Bare skin, shaded for how far from the camera the part is. */
+function skinTone(r: Rig, f: number): string {
+  return keyCol(shadeOf(r.st.skin, f));
+}
+
+/** How far the shades have slid down onto the nose. Needed before they draw. */
+function shadesT(r: Rig): number {
+  return r.st.shades ? clamp((r.fit - 0.42) / 0.34, 0, 1) : 0;
+}
+
 function spikePop(r: Rig): number {
   const t = clamp((r.fit - 0.28) / 0.42, 0, 1);
   return t <= 0 ? 0 : easeOutBack(t);
 }
 
 function spikeCount(r: Rig): number {
-  return clamp(Math.round(r.st.spikes), 0, 9);
+  const n = clamp(Math.round(r.st.spikes), 0, 9);
+  // Studs are the first thing to go: they are riveted to leather that is being
+  // torn off him. Purely a function of wear, so it never flickers.
+  const lost = Math.round(n * stage(r.d.wear, 0.22, 0.85) * 0.85);
+  return Math.max(0, n - lost);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -601,9 +955,50 @@ function drawLeg(r: Rig, near: boolean): void {
   ctx.save();
   if (!near) ctx.translate(-0.9 * u, 0);
 
+  const d = r.d;
   const pants = pantsCol(r);
+  const skin = skinTone(r, near ? 1.0 : 0.76);
+  // Trousers in strips: the leg below the knee is bare and what is left of the
+  // cloth hangs off it. Near leg goes first — it is the one anyone can see.
+  const stripped = d.on && (near ? d.t3 : d.t3 * 0.8) > 0.34;
+
   limb(ctx, hip.x, hip.y, knee.x, knee.y, 3.7 * u * g, 3.0 * u * g, tone(pants), ink());
-  limb(ctx, knee.x, knee.y, ankle.x, ankle.y, 3.0 * u * g, 2.4 * u * g, tone(pants), ink());
+  limb(
+    ctx, knee.x, knee.y, ankle.x, ankle.y, 3.0 * u * g, 2.4 * u * g,
+    stripped ? skin : tone(pants), ink(),
+  );
+
+  if (d.on) {
+    if (stripped) {
+      // the torn-off hem, then three strips still clinging to it
+      const kp = perp(knee, ankle);
+      const e1 = off(knee, kp, 3.1 * u * g);
+      const e2 = off(knee, kp, -3.1 * u * g);
+      capsule(ctx, e1.x, e1.y, e2.x, e2.y, 0.85 * u, tone(pants), ink(), r.ow * 0.6);
+      const dir = { x: ankle.x - knee.x, y: ankle.y - knee.y };
+      const sway = d.reduced ? 0 : Math.sin(d.t * 2.3 + hashf(d.seed, near ? 301 : 311) * TAU) * 0.5 * u;
+      for (let i = 0; i < 3; i++) {
+        const f = -0.7 + i * 0.7;
+        const p = off(knee, kp, f * 2.6 * u * g);
+        const l = (0.3 + 0.5 * hashf(d.seed, 320 + i + (near ? 0 : 7))) * (1 + d.t3);
+        tatter(
+          ctx, p.x, p.y, dir.x * l * 0.5 + sway, dir.y * l * 0.5,
+          1.25 * u * g, tone(shadeOf(pants, 0.9)), r.ow * 0.5,
+        );
+      }
+    } else if (d.t2 > 0.05) {
+      // rips over the thigh, showing what is underneath
+      for (let i = 0; i < 2; i++) {
+        const p = mid(hip, knee, 0.3 + 0.45 * hashf(d.seed, 330 + i + (near ? 0 : 5)));
+        rip(
+          ctx, p.x + hashs(d.seed, 340 + i) * 1.6 * u, p.y,
+          hashf(d.seed, 350 + i) * TAU, (2.6 + 2.8 * d.t2) * u, (0.55 + 0.75 * d.t2) * u,
+          skin, r.ow * 0.5,
+        );
+      }
+    }
+    scuffs(r, hip, ankle, 2.2 * u * g, 5, near ? 360 : 380);
+  }
 
   // boot
   const bc = bootCol(r);
@@ -650,22 +1045,57 @@ function drawArm(r: Rig, near: boolean): void {
 
   // sleeve down to the elbow, bare forearm below it — rolled sleeves at both
   // ends of the outfit blend, which is where the tattoo lives
+  const d = r.d;
   const sleeve = garmentCol(r);
-  limb(ctx, sh.x, sh.y, el.x, el.y, 3.5 * u * g, 2.8 * u * g, tone(sleeve), ink());
-  limb(ctx, el.x, el.y, wr.x, wr.y, 2.7 * u * g, 2.3 * u * g, flesh(r.st.skin), ink());
+  const bareSkin = flesh(r.st.skin);
+  // Which sleeve goes first is seeded, so two guards in the same wave are not
+  // wearing the same torn jacket.
+  const firstIsNear = hashf(d.seed, 11) < 0.5;
+  const sleeveWear = near === firstIsNear ? d.t2 : d.t3;
+  const bare = d.on && sleeveWear > 0.4;
 
-  // cuff at the elbow
+  if (bare) {
+    limb(ctx, sh.x, sh.y, el.x, el.y, 3.5 * u * g, 2.8 * u * g, bareSkin, ink());
+    // what is left of it, torn off at the shoulder and still flapping
+    const stub = mid(sh, el, 0.24 + 0.12 * (1 - sleeveWear));
+    capsule(ctx, sh.x, sh.y, stub.x, stub.y, 3.3 * u * g, tone(sleeve), ink(), r.ow * 0.8);
+    const sp = perp(sh, el);
+    const dir = { x: el.x - sh.x, y: el.y - sh.y };
+    for (let i = 0; i < 3; i++) {
+      const p = off(stub, sp, (-0.66 + i * 0.66) * 2.6 * u * g);
+      const l = 0.14 + 0.16 * hashf(d.seed, 400 + i + (near ? 0 : 9));
+      tatter(ctx, p.x, p.y, dir.x * l, dir.y * l, 1.15 * u * g, tone(shadeOf(sleeve, 0.88)), r.ow * 0.5);
+    }
+  } else {
+    limb(ctx, sh.x, sh.y, el.x, el.y, 3.5 * u * g, 2.8 * u * g, tone(sleeve), ink());
+    if (d.t2 > 0.05) {
+      for (let i = 0; i < 2; i++) {
+        const p = mid(sh, el, 0.28 + 0.44 * hashf(d.seed, 410 + i + (near ? 0 : 4)));
+        rip(
+          ctx, p.x + hashs(d.seed, 420 + i) * 1.4 * u, p.y,
+          hashf(d.seed, 430 + i) * TAU, (2.4 + 2.6 * d.t2) * u, (0.5 + 0.7 * d.t2) * u,
+          bareSkin, r.ow * 0.5,
+        );
+      }
+    }
+  }
+  limb(ctx, el.x, el.y, wr.x, wr.y, 2.7 * u * g, 2.3 * u * g, bareSkin, ink());
+  if (d.on) scuffs(r, sh, wr, 2.0 * u * g, 4, near ? 440 : 460);
+
+  // cuff at the elbow — gone with the sleeve it was holding up
   const pp = perp(el, wr);
-  const ca = off(el, pp, 2.9 * u * g);
-  const cb = off(el, pp, -2.9 * u * g);
-  capsule(
-    ctx, ca.x, ca.y, cb.x, cb.y, 1.0 * u,
-    tone(mixCol(shadeOf(r.st.tunicColor, 1.2), r.st.jacketAccent, r.fit)), ink(), r.ow * 0.7,
-  );
+  if (!bare) {
+    const ca = off(el, pp, 2.9 * u * g);
+    const cb = off(el, pp, -2.9 * u * g);
+    capsule(
+      ctx, ca.x, ca.y, cb.x, cb.y, 1.0 * u,
+      tone(mixCol(shadeOf(r.st.tunicColor, 1.2), r.st.jacketAccent, r.fit)), ink(), r.ow * 0.7,
+    );
+  }
 
   const pop = spikePop(r);
   const count = spikeCount(r);
-  if (pop > 0.02 && count > 0) {
+  if (pop > 0.02 && count > 0 && !bare) {
     const back = perp(sh, el);
     const a = off(mid(sh, el, 0.18), back, -1.9 * u * g);
     const b = off(mid(sh, el, 0.92), back, -1.6 * u * g);
@@ -752,15 +1182,19 @@ function drawTattoo(r: Rig, p: Pt, rot: number): void {
 function drawTorso(r: Rig): void {
   const ctx = r.ctx;
   const u = r.u;
+  const d = r.d;
   const P = jp(r, 'pelvis');
   const N = jp(r, 'neck');
   const spineLen = len2(P, N) || u;
-  const hw = spineLen * 0.42 * r.girth;
+  const waist = spineLen * 0.42 * r.girth;
+  // The ribcage swells on the inhale and empties on the way out. The waist does
+  // not, which is what makes it read as breathing rather than as a size change.
+  const hw = waist * (1 + d.heave * 0.1 * (0.35 + 0.65 * d.breath));
   const pp = perp(P, N); // points forward (+x when facing right)
 
   // body mass
   const a = mid(P, N, 0.02);
-  const b = mid(P, N, 0.84);
+  const b = mid(P, N, 0.84 + d.heave * 0.02);
   capsule(ctx, a.x, a.y, b.x, b.y, hw, col(r.st.tunicColor), ink(), r.ow);
 
   // a lighter panel down the front sells the tunic at outfit 0
@@ -773,12 +1207,32 @@ function drawTorso(r: Rig): void {
     );
   }
 
+  // Wear on the shirt itself. Under an intact jacket none of this shows, which
+  // is correct — it appears exactly as the leather stops covering it.
+  if (d.on) {
+    scuffs(r, P, N, hw * 0.8, 6, 500);
+    if (d.t2 > 0.05) {
+      for (let i = 0; i < 3; i++) {
+        const p = off(
+          mid(P, N, 0.12 + 0.7 * hashf(d.seed, 510 + i)),
+          pp,
+          hashs(d.seed, 520 + i) * hw * 0.7,
+        );
+        rip(
+          ctx, p.x, p.y, hashf(d.seed, 530 + i) * TAU,
+          (2.8 + 3.4 * d.t2) * u, (0.6 + 0.8 * d.t2) * u, skinTone(r, 0.95), r.ow * 0.5,
+        );
+      }
+    }
+  }
+
   // neck
   const H = jp(r, 'head');
   capsule(ctx, N.x, N.y, H.x, H.y, 2.1 * u * r.girth, keyCol(shadeOf(r.st.skin, 0.9)), ink(), r.ow);
 
   drawJacket(r, P, N, hw, pp);
-  drawBelt(r, P, hw, pp);
+  drawBelt(r, P, waist, pp);
+  drawExposedChest(r, P, N, hw, pp);
 
   // spikes across the near shoulder
   const pop = spikePop(r);
@@ -791,11 +1245,71 @@ function drawTorso(r: Rig): void {
   }
 }
 
+/** Scratch for the ragged hole torn down the front of everything he wears. */
+const CHEST_PTS: number[] = new Array<number>(24).fill(0);
+
+/**
+ * The last stage: shirt, jacket and dignity all opened down the middle. Drawn
+ * OVER the jacket, because the hole goes through it, not behind it.
+ */
+function drawExposedChest(r: Rig, P: Pt, N: Pt, hw: number, pp: Pt): void {
+  const d = r.d;
+  const t = d.t3;
+  if (t <= 0.04) return;
+  const ctx = r.ctx;
+  const u = r.u;
+  const seed = d.seed;
+  const top = mid(P, N, 0.76);
+  const bot = mid(P, N, 0.16);
+  const w = hw * (0.3 + 0.55 * t);
+  const n = 5;
+
+  let k = 0;
+  for (let i = 0; i <= n; i++) {
+    const f = i / n;
+    const jag = w * (0.6 + 0.55 * hashf(seed, 540 + i));
+    CHEST_PTS[k++] = lerp(top.x, bot.x, f) + pp.x * jag;
+    CHEST_PTS[k++] = lerp(top.y, bot.y, f) + pp.y * jag;
+  }
+  for (let i = n; i >= 0; i--) {
+    const f = i / n;
+    const jag = w * (0.55 + 0.55 * hashf(seed, 560 + i));
+    CHEST_PTS[k++] = lerp(top.x, bot.x, f) - pp.x * jag;
+    CHEST_PTS[k++] = lerp(top.y, bot.y, f) - pp.y * jag;
+  }
+  poly(ctx, CHEST_PTS, skinTone(r, 0.98), ink(), r.ow * 0.8);
+
+  // Ribs, spreading with the heave. Nobody in this game has a six-pack.
+  if (t > 0.35) {
+    ctx.strokeStyle = col(shadeOf(r.st.skin, 0.66));
+    ctx.lineWidth = Math.max(0.5, 0.4 * u);
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    for (let i = 0; i < 3; i++) {
+      const f = 0.6 - i * 0.14 + d.heave * 0.014;
+      const c0 = mid(top, bot, 1 - f);
+      ctx.moveTo(c0.x + pp.x * w * 0.62, c0.y + pp.y * w * 0.62);
+      ctx.lineTo(c0.x - pp.x * w * 0.5, c0.y - pp.y * w * 0.5);
+    }
+    ctx.stroke();
+    const nav = mid(top, bot, 0.86);
+    ellipse(ctx, nav.x, nav.y, 0.5 * u, 0.42 * u, 0, col(shadeOf(r.st.skin, 0.6)), NO);
+  }
+}
+
+/** The jacket body, with a hem that goes ragged instead of straight. */
+const JACKET_PTS: number[] = new Array<number>(16).fill(0);
+/** The gap where the front hangs open. */
+const GAP_PTS: number[] = new Array<number>(8).fill(0);
+
 function drawJacket(r: Rig, P: Pt, N: Pt, hw: number, pp: Pt): void {
-  const cover = clamp(r.fit * 1.25, 0, 1);
+  const d = r.d;
+  // As the leather is torn off him the hem climbs back up the body.
+  const cover = clamp(r.fit * 1.25, 0, 1) * (1 - 0.42 * d.t3);
   if (cover < 0.02) return;
   const ctx = r.ctx;
   const u = r.u;
+  const seed = d.seed;
   const jc = col(r.st.jacketColor);
 
   // the hem crawls down over the tunic as the outfit blend rises
@@ -803,24 +1317,50 @@ function drawJacket(r: Rig, P: Pt, N: Pt, hw: number, pp: Pt): void {
   const bot = mid(P, N, lerp(0.9, -0.04, cover));
   const tw = hw * 1.08;
   const bw = hw * 1.0;
-  poly(
-    ctx,
-    [
-      top.x + pp.x * tw, top.y + pp.y * tw,
-      bot.x + pp.x * bw, bot.y + pp.y * bw,
-      bot.x - pp.x * bw, bot.y - pp.y * bw,
-      top.x - pp.x * tw, top.y - pp.y * tw,
-    ],
-    jc,
-    ink(),
-    r.ow,
-  );
+  const sl = len2(P, N) || u;
+  const ax = (N.x - P.x) / sl;
+  const ay = (N.y - P.y) / sl;
+  // Notches bite UP toward the chest along the spine, so a torn hem still hangs
+  // off the same silhouette instead of growing spikes sideways.
+  const tear = (0.9 * d.t1 + 2.6 * d.t3) * u;
+  const hem = 5;
+
+  let k = 0;
+  JACKET_PTS[k++] = top.x + pp.x * tw;
+  JACKET_PTS[k++] = top.y + pp.y * tw;
+  for (let i = 0; i <= hem; i++) {
+    const f = i / hem;
+    const s = lerp(bw, -bw, f);
+    const up = tear * hashf(seed, 570 + i);
+    JACKET_PTS[k++] = bot.x + pp.x * s + ax * up;
+    JACKET_PTS[k++] = bot.y + pp.y * s + ay * up;
+  }
+  JACKET_PTS[k++] = top.x - pp.x * tw;
+  JACKET_PTS[k++] = top.y - pp.y * tw;
+  poly(ctx, JACKET_PTS, jc, ink(), r.ow);
 
   if (cover > 0.3) {
+    // Hanging open. One good hit and nothing holds the front closed any more.
+    const gap = d.t1;
+    if (gap > 0.06) {
+      const g1 = mid(top, bot, 0.96);
+      const g2 = mid(top, bot, 0.06);
+      const gw = hw * 0.44 * gap;
+      GAP_PTS[0] = g1.x + pp.x * gw * 1.15;
+      GAP_PTS[1] = g1.y + pp.y * gw * 1.15;
+      GAP_PTS[2] = g2.x + pp.x * gw * 1.5;
+      GAP_PTS[3] = g2.y + pp.y * gw * 1.5;
+      GAP_PTS[4] = g2.x - pp.x * gw * 0.7;
+      GAP_PTS[5] = g2.y - pp.y * gw * 0.7;
+      GAP_PTS[6] = g1.x - pp.x * gw * 0.45;
+      GAP_PTS[7] = g1.y - pp.y * gw * 0.45;
+      poly(ctx, GAP_PTS, col(r.st.tunicColor), ink(), r.ow * 0.7);
+    }
+
     // open front: lapel folded back, zip running down the middle
-    const lapTop = off(top, pp, hw * 1.0);
+    const lapTop = off(top, pp, hw * (1.0 + 0.18 * gap));
     const lapIn = off(top, pp, hw * 0.05);
-    const lapEnd = off(mid(top, bot, 0.5), pp, hw * 0.62);
+    const lapEnd = off(mid(top, bot, 0.5), pp, hw * (0.62 + 0.3 * gap));
     poly(
       ctx,
       [lapTop.x, lapTop.y, lapEnd.x, lapEnd.y, lapIn.x, lapIn.y],
@@ -829,24 +1369,50 @@ function drawJacket(r: Rig, P: Pt, N: Pt, hw: number, pp: Pt): void {
       r.ow * 0.8,
     );
     const z1 = off(mid(top, bot, 0.86), pp, hw * 0.1);
-    const z2 = off(mid(top, bot, 0.12), pp, hw * 0.16);
+    const z2 = off(mid(top, bot, lerp(0.12, 0.5, d.t2)), pp, hw * 0.16);
     capsule(ctx, z1.x, z1.y, z2.x, z2.y, 0.55 * u, keyCol(r.st.jacketAccent), ink(), r.ow * 0.5);
 
-    // popped collar
-    const cA = off(top, pp, hw * 0.95);
-    const cB = off(top, pp, -hw * 0.95);
-    const upA = { x: cA.x + pp.x * 1.2 * u, y: cA.y - 3.4 * u };
-    const upB = { x: cB.x - pp.x * 1.2 * u, y: cB.y - 3.0 * u };
-    poly(
-      ctx,
-      [cA.x, cA.y, upA.x, upA.y, top.x + pp.x * hw * 0.2, top.y - 1.2 * u],
-      col(shadeOf(r.st.jacketColor, 1.2)), ink(), r.ow * 0.8,
-    );
-    poly(
-      ctx,
-      [cB.x, cB.y, upB.x, upB.y, top.x - pp.x * hw * 0.2, top.y - 1.2 * u],
-      col(shadeOf(r.st.jacketColor, 0.85)), ink(), r.ow * 0.8,
-    );
+    // Buttons pop off one at a time, and the thread they left stays behind.
+    if (d.on) {
+      for (let i = 0; i < 3; i++) {
+        const p = off(mid(top, bot, 0.68 - i * 0.24), pp, hw * 0.36);
+        const goneAt = 0.2 + i * 0.26;
+        if (d.wear < goneAt) {
+          ellipse(ctx, p.x, p.y, 0.62 * u, 0.62 * u, 0, keyCol(r.st.jacketAccent), ink(), r.ow * 0.4);
+        } else {
+          ellipse(ctx, p.x, p.y, 0.5 * u, 0.4 * u, 0, col(shadeOf(r.st.jacketColor, 0.55)), NO);
+        }
+      }
+    }
+
+    // Popped collar — until somebody rips it off, which they will.
+    if (d.t2 < 0.55) {
+      const cA = off(top, pp, hw * 0.95);
+      const cB = off(top, pp, -hw * 0.95);
+      const upA = { x: cA.x + pp.x * 1.2 * u, y: cA.y - 3.4 * u * (1 - d.t2) };
+      const upB = { x: cB.x - pp.x * 1.2 * u, y: cB.y - 3.0 * u * (1 - d.t2) };
+      poly(
+        ctx,
+        [cA.x, cA.y, upA.x, upA.y, top.x + pp.x * hw * 0.2, top.y - 1.2 * u],
+        col(shadeOf(r.st.jacketColor, 1.2)), ink(), r.ow * 0.8,
+      );
+      poly(
+        ctx,
+        [cB.x, cB.y, upB.x, upB.y, top.x - pp.x * hw * 0.2, top.y - 1.2 * u],
+        col(shadeOf(r.st.jacketColor, 0.85)), ink(), r.ow * 0.8,
+      );
+    } else {
+      // the stub of a collar, torn off at the seam
+      const cA = off(top, pp, hw * 0.95);
+      const cB = off(top, pp, -hw * 0.95);
+      for (let i = 0; i < 4; i++) {
+        const p = mid(cA, cB, i / 3);
+        tatter(
+          ctx, p.x, p.y, 0, -(1.0 + 1.3 * hashf(seed, 590 + i)) * u, 1.05 * u,
+          col(shadeOf(r.st.jacketColor, 1.1)), r.ow * 0.5,
+        );
+      }
+    }
   }
 }
 
@@ -935,32 +1501,28 @@ function drawHead(r: Rig): void {
     );
   }
 
-  // brow ridge — level and friendly at 0, dropped and mean at 1
-  const browY = -ry * 0.36;
-  const meanness = r.fit * 0.5;
-  capsule(
-    ctx, rx * 0.08, browY + meanness * ry * 0.22, rx * 0.72, browY - ry * 0.06,
-    0.95 * u, hair, ink(), r.ow * 0.6,
-  );
-  capsule(
-    ctx, -rx * 0.34, browY + meanness * ry * 0.16, -rx * 0.02, browY - ry * 0.02,
-    0.8 * u, keyCol(shadeOf(r.st.hair, 0.8)), ink(), r.ow * 0.5,
-  );
-
-  // eyes: the near one reads, the far one is a hint
-  const eyeY = -ry * 0.1;
-  ellipse(ctx, rx * 0.44, eyeY, 1.5 * u, 1.7 * u, 0, col('#f6f2ea'), ink(), r.ow * 0.55);
-  ellipse(ctx, rx * 0.56, eyeY + 0.2 * u, 0.72 * u, 0.86 * u, 0, col('#1a1622'), NO);
-  ellipse(ctx, rx * 0.04, eyeY + 0.1 * u, 1.1 * u, 1.35 * u, 0, col('#e8e2d8'), ink(), r.ow * 0.5);
-  ellipse(ctx, rx * 0.12, eyeY + 0.28 * u, 0.6 * u, 0.72 * u, 0, col('#1a1622'), NO);
+  drawBruises(r, rx, ry);
+  // Brows go on last when there are shades to clear — see drawAccessories.
+  if (shadesT(r) < 0.35) drawBrows(r, rx, ry, false, -ry * 0.36);
+  drawEyes(r, rx, ry);
 
   // the nose. It is a potato and it is load-bearing.
-  ellipse(ctx, rx * 0.7, ry * 0.06, rx * 0.36, ry * 0.3, -0.15, dark, ink(), r.ow);
+  const flare =
+    r.d.face === 'angry' ? 1 : r.d.face === 'exhausted' ? 0.7 : r.d.face === 'strained' ? 0.3 : 0;
+  const ns = 1 + flare * 0.16;
+  ellipse(ctx, rx * 0.7, ry * 0.06, rx * 0.36 * ns, ry * 0.3 * ns, -0.15, dark, ink(), r.ow);
   ellipse(ctx, rx * 0.66, -ry * 0.02, rx * 0.13, ry * 0.1, 0, keyCol(shadeOf(r.st.skin, 1.12)), NO);
+  if (flare > 0.2) {
+    // nostrils, flared. A furious dwarf breathes through his nose.
+    const nc = keyCol(shadeOf(r.st.skin, 0.5));
+    ellipse(ctx, rx * 0.82, ry * 0.2, rx * 0.1 * flare + 0.2, ry * 0.08 * flare + 0.2, 0.5, nc, NO);
+    ellipse(ctx, rx * 0.6, ry * 0.24, rx * 0.08 * flare + 0.15, ry * 0.07 * flare + 0.15, 0.5, nc, NO);
+  }
 
-  // mouth, only where a beard is not already covering it
+  // A closed mouth is only a line, so it stays here where the beard can cover
+  // it. Everything that OPENS is drawn over the beard by drawFaceOver.
   const bs = r.st.beardStyle;
-  if (bs === 'none' || bs === 'stubble') {
+  if (r.d.face === 'calm' && (bs === 'none' || bs === 'stubble')) {
     ctx.strokeStyle = col('#4a2f2c');
     ctx.lineWidth = Math.max(0.6, 0.5 * u);
     ctx.lineCap = 'round';
@@ -976,6 +1538,388 @@ function drawHead(r: Rig): void {
   }
 
   ctx.restore();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The face
+//
+// Head-local space: the origin is the middle of the skull, +x is the direction
+// he is facing, and the head is drawn three-quarter on — the near eye sits at
+// 0.44·rx, the far one at 0.04·rx and the nose out at 0.7·rx. A dwarf is about
+// fifty pixels tall in play, which makes this whole face roughly thirteen
+// pixels wide: every feature here is deliberately two or three times bolder
+// than it would need to be in close-up, because subtle does not survive.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Brows carry more of the expression than the eyes do, which is why they are
+ * also the pass that gets redrawn on top of the sunglasses. `inner` is the
+ * nose-side end, `outer` the temple end, both as fractions of ry.
+ */
+function drawBrows(r: Rig, rx: number, ry: number, over: boolean, baseY: number): void {
+  const ctx = r.ctx;
+  const u = r.u;
+  let inner = -0.06;
+  let outer = r.fit * 0.5 * 0.22;
+  let thick = 1;
+  let drop = 0;
+
+  switch (r.d.face) {
+    case 'strained':
+      inner = 0.2; outer = -0.02; thick = 1.15; drop = 0.02;
+      break;
+    case 'angry':
+      // The hard V: inner ends crashing down over the eyes, outer ends up.
+      inner = 0.3; outer = -0.22; thick = 1.45; drop = 0.04;
+      break;
+    case 'exhausted':
+      inner = -0.22; outer = 0.18; thick = 0.9; drop = -0.04;
+      break;
+    case 'dazed':
+      inner = -0.16; outer = -0.12; thick = 0.9; drop = -0.08;
+      break;
+    case 'dead':
+      inner = 0.0; outer = 0.1; thick = 0.85; drop = 0.02;
+      break;
+    default:
+      break;
+  }
+
+  // Over the lenses the brow rides on top of the frame and its spread is halved,
+  // so the whole V stays readable against the top edge of the glass instead of
+  // sinking behind it. Overlapping the frame is fine — it reads as a brow ridge
+  // overhanging a pair of sunglasses, which is what it is.
+  const t = thick * (over ? 1.2 : 1);
+  const sp = over ? 0.55 : 1;
+  const browY = baseY + (over ? 0 : drop * ry);
+  const hair = keyCol(r.st.hair);
+  capsule(
+    ctx, rx * 0.08, browY + outer * ry * sp, rx * 0.72, browY + inner * ry * sp,
+    0.95 * u * t, hair, ink(), r.ow * 0.6,
+  );
+  capsule(
+    ctx, -rx * 0.34, browY + outer * ry * 0.78 * sp, -rx * 0.02, browY + inner * ry * 0.72 * sp,
+    0.8 * u * t, keyCol(shadeOf(r.st.hair, 0.8)), ink(), r.ow * 0.5,
+  );
+
+  // The vein. Purely editorial.
+  if (r.d.face === 'angry' && r.d.wear > 0.3 && !over) {
+    ctx.strokeStyle = col('#c0384a');
+    ctx.lineWidth = Math.max(0.5, 0.36 * u);
+    ctx.beginPath();
+    ctx.moveTo(-rx * 0.5, -ry * 0.62);
+    ctx.lineTo(-rx * 0.3, -ry * 0.52);
+    ctx.moveTo(-rx * 0.44, -ry * 0.44);
+    ctx.lineTo(-rx * 0.3, -ry * 0.52);
+    ctx.lineTo(-rx * 0.2, -ry * 0.66);
+    ctx.stroke();
+  }
+}
+
+/** How far one eye has puffed shut. Seeded, so it is always the same eye. */
+function swellAmt(r: Rig): number {
+  return clamp(r.d.blood * 1.3 - 0.15, 0, 1) * clamp(0.45 + r.d.wear, 0, 1);
+}
+
+function drawEyes(r: Rig, rx: number, ry: number): void {
+  const ctx = r.ctx;
+  const u = r.u;
+  const d = r.d;
+  const eyeY = -ry * 0.1;
+  const nx = rx * 0.44;
+  const fx = rx * 0.04;
+  const pupil = col('#1a1622');
+
+  if (d.face === 'dead' || d.face === 'dazed') {
+    const pale = col('#efe9df');
+    ellipse(ctx, nx, eyeY, 1.7 * u, 1.8 * u, 0, pale, ink(), r.ow * 0.5);
+    ellipse(ctx, fx, eyeY + 0.1 * u, 1.25 * u, 1.4 * u, 0, pale, ink(), r.ow * 0.45);
+    if (d.face === 'dead') {
+      crossEye(ctx, nx, eyeY, 1.5 * u, ink(), Math.max(0.7, 0.62 * u));
+      crossEye(ctx, fx, eyeY + 0.1 * u, 1.1 * u, ink(), Math.max(0.6, 0.5 * u));
+    } else {
+      // one spinning, one crossed — funnier than a matched pair
+      const turn = d.reduced ? 0.6 : d.t * 2.4;
+      spiralEye(ctx, nx, eyeY, 1.5 * u, ink(), Math.max(0.55, 0.42 * u), turn);
+      crossEye(ctx, fx, eyeY + 0.1 * u, 1.0 * u, ink(), Math.max(0.55, 0.46 * u));
+    }
+    return;
+  }
+
+  let squash = 1;
+  let lid = 0;
+  let pupilS = 1;
+  let pupilDy = 0.2 * u;
+  let white = '#f6f2ea';
+  switch (d.face) {
+    case 'strained':
+      squash = 0.66; lid = 0.28; pupilS = 0.9;
+      break;
+    case 'angry':
+      squash = 0.56; lid = 0.4; pupilS = 0.74; pupilDy = -0.1 * u; white = '#f6e4dc';
+      break;
+    case 'exhausted':
+      squash = 0.48; lid = 0.7; pupilS = 0.9; pupilDy = 0.55 * u; white = '#efe6d8';
+      break;
+    default:
+      break;
+  }
+  // The swollen eye is the near one half the time and the far one the rest.
+  const sw = swellAmt(r);
+  const swNear = hashf(d.seed, 2) < 0.5;
+  const nearSquash = squash * (1 - 0.65 * (swNear ? sw : 0));
+  const farSquash = squash * (1 - 0.65 * (swNear ? 0 : sw));
+
+  ellipse(ctx, nx, eyeY, 1.5 * u, 1.7 * u * nearSquash, 0, col(white), ink(), r.ow * 0.55);
+  ellipse(
+    ctx, nx + rx * 0.12, eyeY + pupilDy * nearSquash,
+    0.72 * u * pupilS, 0.86 * u * nearSquash * pupilS, 0, pupil, NO,
+  );
+  ellipse(ctx, fx, eyeY + 0.1 * u, 1.1 * u, 1.35 * u * farSquash, 0, col('#e8e2d8'), ink(), r.ow * 0.5);
+  ellipse(
+    ctx, fx + rx * 0.08, eyeY + 0.28 * u * farSquash,
+    0.6 * u * pupilS, 0.72 * u * farSquash * pupilS, 0, pupil, NO,
+  );
+
+  // Heavy lids, dropped ACROSS the top of the eye rather than shrinking it —
+  // an eye that just gets smaller reads as a smaller eye, not as a closing one.
+  // The lid's lower edge lands `lid` of the way down the eye it is covering.
+  if (lid > 0.35) {
+    const lc = keyCol(shadeOf(r.st.skin, 0.94));
+    const nh = 1.7 * u * nearSquash;
+    const ly = eyeY + nh * (2 * lid - 1) - 1.05 * u;
+    capsule(ctx, nx - 1.7 * u, ly, nx + 1.6 * u, ly - 0.25 * u, 1.05 * u, lc, ink(), r.ow * 0.4);
+    const fh = 1.35 * u * farSquash;
+    const fy = eyeY + 0.1 * u + fh * (2 * lid - 1) - 0.85 * u;
+    capsule(ctx, fx - 1.3 * u, fy, fx + 1.2 * u, fy - 0.2 * u, 0.85 * u, lc, ink(), r.ow * 0.35);
+  }
+}
+
+function crossEye(ctx: C2D, x: number, y: number, s: number, c: string, w: number): void {
+  ctx.strokeStyle = c;
+  ctx.lineWidth = w;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(x - s, y - s);
+  ctx.lineTo(x + s, y + s);
+  ctx.moveTo(x + s, y - s);
+  ctx.lineTo(x - s, y + s);
+  ctx.stroke();
+}
+
+function spiralEye(ctx: C2D, x: number, y: number, s: number, c: string, w: number, turn: number): void {
+  ctx.strokeStyle = c;
+  ctx.lineWidth = w;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  const n = 20;
+  for (let i = 0; i <= n; i++) {
+    const f = i / n;
+    const a = turn + f * TAU * 1.9;
+    const px = x + Math.cos(a) * s * f;
+    const py = y + Math.sin(a) * s * f;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.stroke();
+}
+
+/**
+ * Bruising. Clipped to the skull so a blotch can be placed anywhere on the face
+ * without a corner of it floating off the side of his head.
+ */
+function drawBruises(r: Rig, rx: number, ry: number): void {
+  const d = r.d;
+  const b = d.blood;
+  if (b <= 0.02) return;
+  const ctx = r.ctx;
+  const seed = d.seed;
+  // Fresh is red-purple; a day old and a lot of wear later it is nearly black.
+  const ripe = clamp(b * 0.7 + d.wear * 0.4, 0, 1);
+  const c = keyCol(mixCol(r.st.skin, BRUISE, 0.3 + 0.5 * ripe));
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(0, 0, rx, ry, 0, 0, TAU);
+  ctx.clip();
+
+  const sw = swellAmt(r);
+  if (sw > 0.02) {
+    const ex = hashf(seed, 2) < 0.5 ? rx * 0.44 : rx * 0.04;
+    ellipse(ctx, ex, -ry * 0.1, (1.6 + 1.3 * sw) * r.u, (1.8 + 1.1 * sw) * r.u, 0, c, NO);
+  }
+  const n = b > 0.55 ? 3 : b > 0.25 ? 2 : 1;
+  for (let i = 0; i < n; i++) {
+    const x = rx * lerp(-0.45, 0.7, hashf(seed, 600 + i));
+    const y = ry * lerp(-0.35, 0.6, hashf(seed, 610 + i));
+    const s = (0.9 + 1.4 * hashf(seed, 620 + i)) * r.u * (0.55 + 0.7 * ripe);
+    ellipse(ctx, x, y, s, s * 0.82, 0, c, NO);
+  }
+  ctx.restore();
+}
+
+/**
+ * Everything on the face that has to sit ON TOP of the beard: the open mouths,
+ * the bleeding and the sweat. Drawn in the same head-local space as drawHead.
+ */
+function drawFaceOver(r: Rig): void {
+  if (!r.d.on) return;
+  const ctx = r.ctx;
+  const h = headFrame(r);
+  ctx.save();
+  ctx.translate(h.c.x, h.c.y);
+  ctx.rotate(h.ang);
+  drawOpenMouth(r, h.rx, h.ry);
+  drawFaceBlood(r, h.rx, h.ry);
+  drawSweat(r, h.rx, h.ry);
+  ctx.restore();
+}
+
+/** A row of teeth hanging off an edge. `drop` down for the top row, up for the bottom. */
+function toothRow(ctx: C2D, x1: number, x2: number, y: number, drop: number, n: number, c: string): void {
+  const w = x2 - x1;
+  ctx.beginPath();
+  ctx.moveTo(x1, y);
+  for (let i = 0; i < n; i++) {
+    ctx.lineTo(x1 + (w * (i + 0.5)) / n, y + drop);
+    ctx.lineTo(x1 + (w * (i + 1)) / n, y);
+  }
+  ctx.closePath();
+  ctx.fillStyle = c;
+  ctx.fill();
+}
+
+const MOUTH_PTS: number[] = new Array<number>(8).fill(0);
+
+function drawOpenMouth(r: Rig, rx: number, ry: number): void {
+  const d = r.d;
+  const f = d.face;
+  if (f === 'calm') return;
+  const ctx = r.ctx;
+  const u = r.u;
+  const cx = rx * 0.4;
+  const cy = ry * 0.5;
+  const maw = col(MAW);
+  const teeth = col(TEETH);
+  const tongue = col(TONGUE);
+
+  if (f === 'strained') {
+    // Jaw set. The rows are clamped together and the whole thing is a slot.
+    const w = rx * 0.3;
+    const hgt = 1.0 * u;
+    roundRect(ctx, cx - w, cy - hgt, w * 2, hgt * 2, 0.35 * u, maw, ink(), r.ow * 0.7);
+    roundRect(ctx, cx - w * 0.86, cy - hgt * 0.65, w * 1.72, hgt * 1.15, 0.2 * u, teeth, NO);
+    ctx.fillStyle = maw;
+    for (let i = 1; i < 4; i++) {
+      ctx.fillRect(cx - w * 0.86 + (i / 4) * w * 1.72, cy - hgt * 0.65, Math.max(0.4, 0.16 * u), hgt * 1.15);
+    }
+    return;
+  }
+
+  if (f === 'angry') {
+    // Bared. A wedge, wider at the front, with both rows showing.
+    const w = rx * 0.34;
+    const hgt = (1.8 + 0.25 * d.heave) * u;
+    MOUTH_PTS[0] = cx - w;
+    MOUTH_PTS[1] = cy - hgt * 0.8;
+    MOUTH_PTS[2] = cx + w * 1.1;
+    MOUTH_PTS[3] = cy - hgt;
+    MOUTH_PTS[4] = cx + w * 0.95;
+    MOUTH_PTS[5] = cy + hgt;
+    MOUTH_PTS[6] = cx - w * 0.92;
+    MOUTH_PTS[7] = cy + hgt * 0.78;
+    poly(ctx, MOUTH_PTS, maw, ink(), r.ow * 0.8);
+    toothRow(ctx, cx - w * 0.88, cx + w * 1.0, cy - hgt * 0.72, hgt * 0.7, 3, teeth);
+    toothRow(ctx, cx - w * 0.82, cx + w * 0.88, cy + hgt * 0.7, -hgt * 0.55, 3, teeth);
+    return;
+  }
+
+  if (f === 'exhausted') {
+    // Gasping: the mouth opens and shuts with the breath, and it never shuts far.
+    const open = 1.5 + 1.1 * Math.max(0, d.heave);
+    ellipse(ctx, cx, cy, rx * 0.23, open * u, 0.1, maw, ink(), r.ow * 0.7);
+    toothRow(ctx, cx - rx * 0.19, cx + rx * 0.19, cy - open * u * 0.72, open * u * 0.45, 3, teeth);
+    ellipse(ctx, cx - rx * 0.02, cy + open * u * 0.45, rx * 0.15, open * u * 0.35, 0, tongue, NO);
+    return;
+  }
+
+  // dazed and dead: slack, lopsided, tongue out. Nobody looks dignified here.
+  const w = rx * (f === 'dead' ? 0.26 : 0.21);
+  const hgt = (f === 'dead' ? 2.0 : 1.5) * u;
+  ellipse(ctx, cx, cy, w, hgt, f === 'dead' ? 0.16 : -0.2, maw, ink(), r.ow * 0.7);
+  const tx = cx + w * 0.35;
+  const ty = cy + hgt * (f === 'dead' ? 1.0 : 0.75);
+  capsule(ctx, cx, cy + hgt * 0.2, tx, ty, w * 0.5, tongue, ink(), r.ow * 0.5);
+  ellipse(ctx, tx, ty, w * 0.55, w * 0.45, 0.3, tongue, ink(), r.ow * 0.5);
+}
+
+function drawFaceBlood(r: Rig, rx: number, ry: number): void {
+  const d = r.d;
+  const b = d.blood;
+  if (b <= 0.02) return;
+  const ctx = r.ctx;
+  const u = r.u;
+  const seed = d.seed;
+  const bl = col(BLOOD);
+
+  // Nosebleed. Straight down the front of the beard, because gravity.
+  const run = (1.8 + 5.5 * b) * u;
+  const nx = rx * 0.74;
+  const ny = ry * 0.26;
+  capsule(ctx, nx, ny, nx - 0.35 * u + hashs(seed, 630) * 0.5 * u, ny + run, 0.55 * u, bl, NO);
+  ellipse(ctx, nx - 0.35 * u, ny + run, 0.62 * u, 0.72 * u, 0, col(BLOOD_WET), NO);
+  if (b > 0.4) {
+    capsule(ctx, rx * 0.58, ry * 0.28, rx * 0.55, ry * 0.28 + run * 0.6, 0.3 * u, bl, NO);
+  }
+
+  // Split lip, and the trail it leaves down the chin.
+  if (b > 0.15) {
+    const lx = rx * 0.16;
+    const ly = ry * 0.52;
+    capsule(ctx, lx - 0.6 * u, ly - 0.5 * u, lx + 0.5 * u, ly + 0.6 * u, 0.45 * u, col(BLOOD_WET), NO);
+    capsule(ctx, lx, ly + 0.4 * u, lx - 0.4 * u, ly + run * 0.75, 0.42 * u, bl, NO);
+    ellipse(ctx, lx - 0.4 * u, ly + run * 0.75, 0.5 * u, 0.6 * u, 0, bl, NO);
+  }
+}
+
+function drawSweat(r: Rig, rx: number, ry: number): void {
+  const d = r.d;
+  const amt = clamp(d.breath * 1.25 + d.wear * 0.4 - 0.3, 0, 1);
+  if (amt <= 0.02) return;
+  const ctx = r.ctx;
+  const u = r.u;
+  const prev = ctx.globalAlpha;
+  const c = col(SWEAT);
+  const n = amt > 0.6 ? 3 : 2;
+
+  for (let i = 0; i < n; i++) {
+    const p = hashf(d.seed, 640 + i);
+    // Beads run down the temple and start again at the top. Frozen when the
+    // player has asked for less motion — a bead that sits there still reads.
+    const fall = d.reduced ? 0.35 + 0.4 * p : (p + d.t * 0.5) % 1;
+    const x = rx * (-0.5 + 1.0 * hashf(d.seed, 650 + i));
+    const y = -ry * 0.9 + fall * ry * 1.7;
+    ctx.globalAlpha = prev * clamp((1 - fall) * amt * 1.4, 0, 0.9);
+    ellipse(ctx, x, y, 0.5 * u, 0.75 * u, 0, c, NO);
+    ellipse(ctx, x - 0.18 * u, y - 0.2 * u, 0.18 * u, 0.24 * u, 0, col('#ffffff'), NO);
+  }
+  ctx.globalAlpha = prev;
+
+  // The exhale itself, in the cold. Motion, so reduced motion drops it.
+  if (!d.reduced && d.breath > 0.5) {
+    const ex = clamp(-d.heave, 0, 1);
+    if (ex > 0.05) {
+      ctx.globalAlpha = prev * 0.2 * ex * d.breath;
+      for (let i = 1; i <= 2; i++) {
+        ellipse(
+          ctx, rx * (0.72 + 0.3 * i) + ex * i * 1.6 * u, ry * (0.42 - 0.06 * i),
+          (1.1 + 0.7 * i) * u * (0.6 + ex), (0.9 + 0.5 * i) * u * (0.6 + ex), 0,
+          col('#dfe8f2'), NO,
+        );
+      }
+      ctx.globalAlpha = prev;
+    }
+  }
 }
 
 interface HatF {
@@ -1072,6 +2016,137 @@ function drawHat(r: Rig): void {
       ellipse(ctx, p.x, p.y, 0.55 * u * pop, 0.55 * u * pop, 0, keyCol(r.st.jacketAccent), NO);
     }
   }
+}
+
+/**
+ * What is under the hat, which nobody was supposed to ever see. Drawn instead
+ * of the cone once the hat has been knocked off, stolen, eaten or thrown onto a
+ * roof — this is the payoff for the theft fatality, so it is allowed to be as
+ * undignified as it likes. Which head he has is seeded, not random: the same
+ * dwarf is bald every time.
+ */
+function drawFlatHair(r: Rig): void {
+  const ctx = r.ctx;
+  const u = r.u;
+  const h = headFrame(r);
+  const { rx, ry } = h;
+  const seed = r.d.seed;
+  const hair = keyCol(r.st.hair);
+  const hairDk = keyCol(shadeOf(r.st.hair, 0.76));
+  const bald = hashf(seed, 700) < 0.34;
+
+  ctx.save();
+  ctx.translate(h.c.x, h.c.y);
+  ctx.rotate(h.ang);
+
+  // The pale band where the brim lived. No forehead survives a hat.
+  ellipse(ctx, rx * 0.06, -ry * 0.5, rx * 0.92, ry * 0.17, 0, keyCol(shadeOf(r.st.skin, 1.18)), NO);
+
+  if (bald) {
+    // A dome, a monk's fringe, and three heroic strands combed across it.
+    ellipse(ctx, -rx * 0.04, -ry * 0.6, rx * 0.88, ry * 0.44, 0, keyCol(shadeOf(r.st.skin, 1.06)), ink(), r.ow * 0.6);
+    ellipse(ctx, -rx * 0.72, -ry * 0.42, rx * 0.3, ry * 0.24, -0.5, hairDk, ink(), r.ow * 0.5);
+    ellipse(ctx, rx * 0.6, -ry * 0.4, rx * 0.24, ry * 0.2, 0.5, hairDk, ink(), r.ow * 0.5);
+    for (let i = 0; i < 3; i++) {
+      const y = -ry * (0.86 - i * 0.08);
+      capsule(ctx, -rx * 0.66, y + 0.4 * u, rx * (0.34 + i * 0.12), y, 0.4 * u, hairDk, NO);
+    }
+  } else {
+    // A pancake. Squashed flat on top and squeezed out at the sides.
+    ellipse(ctx, -rx * 0.04, -ry * 0.74, rx * 1.06, ry * 0.32, 0, hair, ink(), r.ow * 0.8);
+    ellipse(ctx, -rx * 0.78, -ry * 0.5, rx * 0.32, ry * 0.22, -0.55, hairDk, ink(), r.ow * 0.5);
+    ellipse(ctx, rx * 0.66, -ry * 0.48, rx * 0.28, ry * 0.2, 0.55, hairDk, ink(), r.ow * 0.5);
+    // the parting, dead centre, maintained under a hat for forty years
+    ctx.strokeStyle = keyCol(shadeOf(r.st.skin, 1.0));
+    ctx.lineWidth = Math.max(0.5, 0.4 * u);
+    ctx.beginPath();
+    ctx.moveTo(-rx * 0.2, -ry * 1.0);
+    ctx.lineTo(-rx * 0.12, -ry * 0.62);
+    ctx.stroke();
+  }
+
+  // The one strand that no hat was ever going to hold down.
+  const sway = r.d.reduced ? 0.4 * u : Math.sin(r.d.t * 3.1 + hashf(seed, 701) * TAU) * 0.9 * u;
+  const bx = rx * (bald ? 0.06 : -0.12);
+  const by = -ry * (bald ? 0.9 : 0.98);
+  capsule(ctx, bx, by + 0.8 * u, bx + sway - 0.5 * u, by - 3.2 * u, 0.55 * u, hair, ink(), r.ow * 0.55);
+  capsule(ctx, bx + sway - 0.5 * u, by - 3.2 * u, bx + sway + 1.9 * u, by - 4.2 * u, 0.42 * u, hair, ink(), r.ow * 0.45);
+  ctx.restore();
+}
+
+/** Standalone hat frame, filled in place so the loose hat allocates nothing. */
+const LOOSE_HAT: HatF = {
+  base: { x: 0, y: 0 },
+  axis: { x: 0, y: -1 },
+  side: { x: 1, y: 0 },
+  l: 1,
+  w: 1,
+  tipP: { x: 0, y: 0 },
+  tip: { x: 0, y: 0 },
+};
+
+/**
+ * The hat, off the head. The fatality director needs this for the theft
+ * finisher — the one where an enemy takes it and EATS it, or lobs it onto a
+ * roof — and for the moment it lands in the dirt afterwards.
+ *
+ * `rot` is the resting angle and `scale` matches the `scale` handed to
+ * drawCharacter, so a hat drawn beside its owner is the same size as the one he
+ * was wearing a second ago. The cone is squashed a little on the way out: a hat
+ * with nobody inside it has no shape of its own.
+ */
+export function drawLooseHat(
+  ctx: C2D,
+  style: RigStyle,
+  x: number,
+  y: number,
+  rot: number,
+  scale: number,
+): void {
+  // Loose props draw outside any character, so take the neutral palette. This
+  // is a no-op whenever drawCharacter has already reset it, which is always.
+  setPalette(undefined, 0);
+  const u = Math.abs(scale) * (style.scale || 1);
+  if (u < 0.02) return;
+  const ow = Math.max(1, 1.35 * u);
+  // Mirrors DWARF_SKELETON: a 13-unit hat bone over a 13-unit head, and a brim
+  // just wider than the skull it came off.
+  const l = 13 * u;
+  const w = 6.63 * u * (style.headSize || 1);
+  const fit = clamp(style.outfit, 0, 1);
+  const hatC = mixCol(style.hatColor, shadeOf(style.hatColor, 0.7), fit * 0.55);
+
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rot);
+  ctx.scale(1, 0.84);
+
+  const f = LOOSE_HAT;
+  f.l = l;
+  f.w = w;
+  f.tipP.y = -l;
+  f.tip.x = w * HAT_LAT[3];
+  f.tip.y = -l;
+  hatCone(f, 0, HAT_PTS);
+  poly(ctx, HAT_PTS, keyCol(hatC), ink(), ow);
+
+  // A crease down the collapsed side, which is the whole difference between a
+  // hat lying on the floor and a cone standing on the floor.
+  capsule(ctx, -w * 0.2, -l * 0.16, -w * 0.72, -l * 0.62, 0.5 * u, col(shadeOf(hatC, 0.72)), NO);
+
+  ellipse(ctx, f.tip.x, f.tip.y, w * 0.25, w * 0.25, 0, keyCol(shadeOf(style.hatColor, 1.18)), ink(), ow * 0.7);
+  capsule(ctx, w * 1.06, 0, -w * 1.06, 0, w * 0.24, keyCol(shadeOf(hatC, 1.18)), ink(), ow);
+
+  const pop = fit <= 0.28 ? 0 : easeOutBack(clamp((fit - 0.28) / 0.42, 0, 1));
+  if (pop > 0.02 && clamp(Math.round(style.spikes), 0, 9) > 0) {
+    const by = -l * 0.1;
+    capsule(ctx, w * 0.82, by, -w * 0.82, by, 0.7 * u, col(mixCol('#4a3320', '#141118', fit)), ink(), ow * 0.5);
+    for (let i = 0; i < 3; i++) {
+      const px = lerp(w * 0.82, -w * 0.82, 0.2 + i * 0.3);
+      ellipse(ctx, px, by, 0.55 * u * pop, 0.55 * u * pop, 0, keyCol(style.jacketAccent), NO);
+    }
+  }
+  ctx.restore();
 }
 
 function drawBeard(r: Rig): void {
@@ -1181,7 +2256,7 @@ function drawAccessories(r: Rig): void {
   const u = r.u;
   const h = headFrame(r);
   const { rx, ry } = h;
-  const shadeT = r.st.shades ? clamp((r.fit - 0.42) / 0.34, 0, 1) : 0;
+  const shadeT = shadesT(r);
   const cigarT = r.st.cigar ? clamp((r.fit - 0.35) / 0.3, 0, 1) : 0;
   if (shadeT <= 0.01 && cigarT <= 0.01) return;
 
@@ -1232,6 +2307,43 @@ function drawAccessories(r: Rig): void {
       col('#8fa6c8'), NO,
     );
     if (shadeT > 0.92) star(ctx, rx * 0.92, y - 1.4 * u, 1.4 * u, 4, col('#ffffff'), NO);
+
+    // Most of the cast wears these, so if the expression stopped at the lens
+    // then most of the cast would have no expression. The brows come back over
+    // the top of the frame, and the eyes that are a JOKE — the X and the spiral
+    // — are painted onto the glass, where a punchline can still be seen.
+    if (shadeT >= 0.35) {
+      const f = r.d.face;
+      if (r.d.on && (f === 'dead' || f === 'dazed')) {
+        const mark = col('#dbe3f0');
+        const nlx = rx * 0.6;
+        const flx = -rx * 0.16;
+        if (f === 'dead') {
+          crossEye(ctx, nlx, y, 1.5 * u, mark, Math.max(0.7, 0.6 * u));
+          crossEye(ctx, flx, y - 0.1 * u, 1.0 * u, mark, Math.max(0.6, 0.5 * u));
+        } else {
+          const turn = r.d.reduced ? 0.6 : r.d.t * 2.4;
+          spiralEye(ctx, nlx, y, 1.5 * u, mark, Math.max(0.55, 0.42 * u), turn);
+          crossEye(ctx, flx, y - 0.1 * u, 1.0 * u, mark, Math.max(0.6, 0.48 * u));
+        }
+      }
+      // A lens that has taken a punch. Seeded, so the crack does not travel.
+      if (r.d.on && r.d.wear > 0.42) {
+        const cx = rx * (0.4 + 0.5 * hashf(r.d.seed, 710));
+        const cy = y + hashs(r.d.seed, 711) * 0.9 * u;
+        ctx.strokeStyle = col('#c6d2e6');
+        ctx.lineWidth = Math.max(0.5, 0.38 * u);
+        ctx.beginPath();
+        for (let i = 0; i < 4; i++) {
+          const a = hashf(r.d.seed, 712 + i) * TAU;
+          const l = (1.4 + 1.8 * hashf(r.d.seed, 716 + i)) * u;
+          ctx.moveTo(cx, cy);
+          ctx.lineTo(cx + Math.cos(a) * l, cy + Math.sin(a) * l);
+        }
+        ctx.stroke();
+      }
+      drawBrows(r, rx, ry, true, y - 2.8 * u);
+    }
   }
 
   if (cigarT > 0.01) {
@@ -1255,6 +2367,81 @@ function drawAccessories(r: Rig): void {
   }
 
   ctx.restore();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Blood on the body
+//
+// Last pass of all, over cloth and skin alike, because that is where it lands.
+// Every drop is placed from the seed against a BODY LANDMARK — a point along
+// the spine or a limb — rather than in a box around the character, so it stays
+// on him whatever the pose is doing.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function drawGoreOver(r: Rig): void {
+  const d = r.d;
+  const b = d.blood;
+  if (!d.on || b <= 0.02) return;
+  const ctx = r.ctx;
+  const u = r.u;
+  const seed = d.seed;
+  const P = jp(r, 'pelvis');
+  const N = jp(r, 'neck');
+  const pp = perp(P, N);
+  const hw = (len2(P, N) || u) * 0.42 * r.girth;
+
+  // The soaked patch. Blood spreads THROUGH cloth, so this one is translucent
+  // and soft-edged where the spatter on top of it is neither.
+  const prev = ctx.globalAlpha;
+  ctx.globalAlpha = prev * 0.5;
+  const soak = mid(P, N, 0.3 + 0.2 * hashf(seed, 720));
+  const sr = hw * (0.34 + 0.8 * b);
+  ellipse(
+    ctx, soak.x + pp.x * hw * 0.22, soak.y + pp.y * hw * 0.22,
+    sr, sr * 1.2, 0, col(BLOOD_DK), NO,
+  );
+  ctx.globalAlpha = prev;
+
+  const sh = jp(r, 'armR_upper');
+  const el = jp(r, 'armR_lower');
+  const hip = jp(r, 'legR_upper');
+  const kn = jp(r, 'legR_lower');
+  const n = Math.min(12, Math.round(b * 9 * (1 + d.wear * 0.35)));
+  const bl = col(BLOOD);
+  const dk = col(BLOOD_DK);
+
+  for (let i = 0; i < n; i++) {
+    const where = hashf(seed, 730 + i);
+    const f = hashf(seed, 750 + i);
+    let px: number;
+    let py: number;
+    if (where < 0.58) {
+      const t = 0.05 + 0.85 * f;
+      // Kept inside the torso capsule: a drop hanging in mid-air beside him
+      // reads as a bug, not as blood.
+      const lat = hw * (hashf(seed, 770 + i) * 1.25 - 0.55);
+      px = lerp(P.x, N.x, t) + pp.x * lat;
+      py = lerp(P.y, N.y, t) + pp.y * lat;
+    } else if (where < 0.82) {
+      px = lerp(sh.x, el.x, f);
+      py = lerp(sh.y, el.y, f);
+    } else {
+      px = lerp(hip.x, kn.x, f);
+      py = lerp(hip.y, kn.y, f);
+    }
+    const s = (0.45 + 1.2 * hashf(seed, 790 + i)) * u * (0.55 + 0.75 * b);
+    ellipse(ctx, px, py, s, s * 0.85, 0, bl, NO);
+    if (hashf(seed, 810 + i) < 0.55) {
+      ellipse(
+        ctx, px + hashs(seed, 830 + i) * 2.4 * u, py + hashs(seed, 850 + i) * 2.1 * u,
+        s * 0.4, s * 0.38, 0, bl, NO,
+      );
+    }
+    // the big ones run
+    if (s > 1.1 * u) {
+      capsule(ctx, px, py, px, py + s * (1.4 + 2.2 * b), s * 0.32, dk, NO);
+    }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

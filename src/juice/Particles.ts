@@ -16,6 +16,17 @@
  * when the pool is exhausted they recycle the oldest live particle via a
  * generation-tagged ring of spawn order.
  *
+ * GORE. Blood is not just a red dot: a droplet arcs, tumbles, stretches into a
+ * ribbon while it is moving fast, and when it reaches the floor it dies into a
+ * persistent decal oriented along the direction it was travelling. Decals
+ * accumulate through a fight from a fixed ring, so the floor gets filthier and
+ * the budget never moves. `gib` chunks are the same idea with mass: they tumble
+ * with real angular momentum, bounce once, paint the floor where they land and
+ * again where they settle, then lie there.
+ *
+ * The gore level is NOT decided here — this pool draws whatever it is handed.
+ * `Fx` owns Settings.gore and simply does not emit at 'off'.
+ *
  * This is presentation-only code, so Math.random is fair game here.
  */
 
@@ -35,6 +46,22 @@ import { poly } from '@/render/Shapes';
 
 type C2D = CanvasRenderingContext2D;
 
+/**
+ * Shapes this pool can draw. A superset of `ParticleSpec['shape']`: the gore
+ * layer needs a chunky `gib` lump, and the shared contract in core/types.ts is
+ * frozen, so the extra shape is named here instead.
+ */
+export type ParticleShape = ParticleSpec['shape'] | 'gib';
+
+/**
+ * `ParticleSpec` widened to the shapes the pool actually supports. Every
+ * `ParticleSpec` is already a valid `EmitSpec`, so nothing that emits today
+ * changes; only code that wants `gib` needs to know this type exists.
+ */
+export interface EmitSpec extends Omit<ParticleSpec, 'shape'> {
+  shape: ParticleShape;
+}
+
 const SH_DOT = 0;
 const SH_SPARK = 1;
 const SH_SHARD = 2;
@@ -43,8 +70,9 @@ const SH_STAR = 4;
 const SH_SMOKE = 5;
 const SH_BLOOD = 6;
 const SH_BOLT = 7;
+const SH_GIB = 8;
 
-const SHAPE_CODE: Record<ParticleSpec['shape'], number> = {
+const SHAPE_CODE: Record<ParticleShape, number> = {
   dot: SH_DOT,
   spark: SH_SPARK,
   shard: SH_SHARD,
@@ -53,6 +81,7 @@ const SHAPE_CODE: Record<ParticleSpec['shape'], number> = {
   smoke: SH_SMOKE,
   blood: SH_BLOOD,
   bolt: SH_BOLT,
+  gib: SH_GIB,
 };
 
 const FADE_LINEAR = 0;
@@ -69,8 +98,20 @@ const SMOKE_LIFT = 0.035;
 /** How far outside the walkable band a particle may stray before rebounding. */
 const Z_SLACK = 30;
 
-const MAX_DECALS = 96;
-const DECAL_LIFE = 900;
+/**
+ * Floor stains. A fight should leave the room a mess, so these are numerous and
+ * long-lived — but the ring is fixed, so the 145th splat quietly overwrites the
+ * first and the cost per frame never moves.
+ */
+const MAX_DECALS = 144;
+/** ~25s at 60Hz: long enough to accumulate across a whole wave. */
+const DECAL_LIFE = 1500;
+/** Fraction of a decal's life spent fading out. */
+const DECAL_FADE = 0.45;
+/** The darker wet middle of a fresh stain, before it dries to the edge colour. */
+const DECAL_CORE = '#5c0a15';
+/** Vertices in a gib lump. Odd, so no chunk reads as symmetrical. */
+const GIB_VERTS = 7;
 
 /** Depth buckets used for a cheap allocation-free back-to-front draw order. */
 const BUCKETS = 16;
@@ -120,8 +161,13 @@ class Decal {
   x = 0;
   z = 0;
   r = 1;
+  /** Elongation along `rot`, taken from how fast the drop was travelling. */
+  stretch = 1;
+  /** Screen-space angle of travel across the floor plane. */
   rot = 0;
   color = '#8e1220';
+  /** 1 when a chunk dragged this out, 0 when a droplet burst into it. */
+  smear = 0;
   life = 0;
   maxLife = 1;
   seed = 0;
@@ -146,8 +192,10 @@ export class ParticleSystem {
   private readonly decals: Decal[] = [];
   private decalCursor = 0;
 
-  /** Scratch polygon buffer for shard drawing. */
+  /** Scratch polygon buffer for shard and blood-ribbon drawing. */
   private readonly pts = [0, 0, 0, 0, 0, 0, 0, 0];
+  /** Scratch polygon buffer for gib lumps, GIB_VERTS points. */
+  private readonly gibPts = new Array<number>(GIB_VERTS * 2).fill(0);
 
   constructor() {
     for (let i = 0; i < MAX_PARTICLES; i++) {
@@ -162,7 +210,7 @@ export class ParticleSystem {
     return this.live;
   }
 
-  emit(spec: ParticleSpec): void {
+  emit(spec: EmitSpec): void {
     let n = spec.count | 0;
     if (n <= 0) return;
     if (n > 256) n = 256;
@@ -210,6 +258,12 @@ export class ParticleSystem {
       p.gravity = spec.gravity;
       p.drag = drag;
       p.spin = spin !== 0 ? spin * (Math.random() < 0.5 ? -1 : 1) : 0;
+      // A chunk of somebody carries angular momentum of its own: the spec sets
+      // the scale, the lump decides how hard it is tumbling.
+      if (shape === SH_GIB) {
+        const base = spin !== 0 ? spin : 0.16;
+        p.spin = base * (0.45 + Math.random() * 1.3) * (Math.random() < 0.5 ? -1 : 1);
+      }
       p.rot = Math.random() * TAU;
       p.seed = (Math.random() * 65536) | 0;
       p.bounces = 0;
@@ -251,26 +305,31 @@ export class ParticleSystem {
       if (p.fade === FADE_FLICKER) p.flick = 0.35 + Math.random() * 0.65;
 
       if (p.y <= 0 && !isRing && p.shape !== SH_SMOKE && p.shape !== SH_BOLT) {
+        // A droplet does not survive the floor: it becomes the floor.
         if (p.shape === SH_BLOOD) {
-          this.splat(p);
+          this.splat(p, false);
           this.release(i);
           continue;
         }
+        const gib = p.shape === SH_GIB;
         p.y = 0;
-        if (p.vy < -REST_SPEED && p.bounces < 4) {
-          p.vy = -p.vy * BOUNCE;
+        const bounce = p.vy < -REST_SPEED && p.bounces < (gib ? 1 : 4);
+        // Chunks paint the floor where they land AND where they stop rolling.
+        if (gib && (bounce || !p.resting)) this.splat(p, true);
+        if (bounce) {
+          p.vy = -p.vy * (gib ? BOUNCE * 1.25 : BOUNCE);
           p.vx *= FLOOR_GRIP;
           p.vz *= FLOOR_GRIP;
-          p.spin *= -0.55;
+          p.spin *= gib ? -0.72 : -0.55;
           p.bounces++;
         } else {
           p.vy = 0;
-          p.vx *= 0.8;
-          p.vz *= 0.8;
-          p.spin *= 0.7;
+          p.vx *= gib ? 0.72 : 0.8;
+          p.vz *= gib ? 0.72 : 0.8;
+          p.spin *= gib ? 0.5 : 0.7;
           if (!p.resting) {
             p.resting = true;
-            // Sparks die on the floor; debris is allowed to lie there.
+            // Sparks die on the floor; debris and offal are allowed to lie there.
             if (p.shape === SH_SPARK || p.shape === SH_STAR) {
               p.life = Math.min(p.life, 8);
               p.maxLife = Math.min(p.maxLife, Math.max(p.life, 1));
@@ -402,55 +461,89 @@ export class ParticleSystem {
 
   // ── decals ─────────────────────────────────────────────────────────────────
 
-  private splat(p: Particle): void {
+  /**
+   * Turn a particle that has just reached the floor into a stain.
+   *
+   * The splat is oriented along the direction the thing was travelling —
+   * projected onto the floor plane, where a unit of depth is only Z_SCALE
+   * screen pixels — and stretched by how fast it got there, which is what makes
+   * a thrown drop read as thrown rather than dropped.
+   */
+  private splat(p: Particle, smear: boolean): void {
     const d = this.decals[this.decalCursor];
     this.decalCursor = (this.decalCursor + 1) % MAX_DECALS;
-    const speed = Math.hypot(p.vx, p.vz) + Math.abs(p.vy);
+    const fx = p.vx;
+    const fz = p.vz * Z_SCALE;
+    const flat = Math.hypot(fx, fz);
+    const speed = flat + Math.abs(p.vy);
     d.active = true;
     d.x = p.x;
     d.z = clamp(p.z, -Z_SLACK, Z_DEPTH + Z_SLACK);
-    d.r = clamp(p.size * (1.5 + speed * 0.22), 1.2, 9);
-    d.rot = Math.random() * TAU;
+    d.r = clamp(p.size * (smear ? 1.15 : 1.5) + speed * 0.3, 1.2, smear ? 11 : 9);
+    d.stretch = clamp(1 + flat * (smear ? 0.5 : 0.34), 1, smear ? 4.2 : 3);
+    d.rot = flat > 0.08 ? Math.atan2(fz, fx) : hash(p.seed + 5) * TAU;
     d.color = p.color;
+    d.smear = smear ? 1 : 0;
     d.maxLife = DECAL_LIFE;
     d.life = DECAL_LIFE;
     d.seed = p.seed;
   }
 
+  /**
+   * One stain is a pool, a directional tail and a few flecks. All of it goes
+   * into a single path so the whole splat costs one fill, which is what lets
+   * the floor carry 144 of them.
+   */
   private renderDecals(ctx: C2D, cam: Camera): void {
     let any = false;
     for (let i = 0; i < MAX_DECALS; i++) {
       const d = this.decals[i];
       if (!d.active) continue;
-      const sx = d.x;
       const onScreen = d.x - cam.x;
-      if (onScreen < -60 || onScreen > VIEW_W + 60) continue;
+      if (onScreen < -80 || onScreen > VIEW_W + 80) continue;
       if (!any) {
         ctx.save();
         any = true;
       }
       const t = d.life / d.maxLife;
-      const a = (t > 0.3 ? 1 : t / 0.3) * 0.7;
+      const a = (t > DECAL_FADE ? 1 : t / DECAL_FADE) * 0.72;
+      const sx = d.x;
       const sy = GROUND_Y + d.z * Z_SCALE;
+      const rx = d.r * d.stretch;
+      const ry = d.r * 0.34;
+      const cs = Math.cos(d.rot);
+      const sn = Math.sin(d.rot);
+
       ctx.globalAlpha = a;
       ctx.fillStyle = d.color;
       ctx.beginPath();
-      ctx.ellipse(sx, sy, d.r, d.r * 0.34, d.rot, 0, TAU);
-      ctx.fill();
-      for (let k = 0; k < 3; k++) {
+      // moveTo the ellipse's own start point first: an ellipse appended to a
+      // live subpath would be joined to the previous decal by a stray line, and
+      // any other seed point would leave a spur across this one.
+      ctx.moveTo(sx + rx * cs, sy + rx * sn);
+      ctx.ellipse(sx, sy, rx, ry, d.rot, 0, TAU);
+      const reach = d.smear > 0 ? 1.5 : 1;
+      for (let k = 0; k < 4; k++) {
         const h1 = hash(d.seed + k * 31);
         const h2 = hash(d.seed + k * 57 + 11);
-        const rr = d.r * (0.16 + h1 * 0.28);
+        // Mostly thrown forwards along the travel, occasionally kicked back.
+        const along = (0.6 + h1 * 0.95 * reach) * rx * (h2 < 0.22 ? -0.5 : 1);
+        const side = (h2 - 0.5) * d.r * 1.3;
+        const fx = sx + cs * along - sn * side;
+        const fy = sy + (sn * along + cs * side) * 0.34;
+        const fr = d.r * (0.13 + h1 * 0.3);
+        ctx.moveTo(fx + fr, fy);
+        ctx.ellipse(fx, fy, fr, fr * 0.4, 0, 0, TAU);
+      }
+      ctx.fill();
+
+      // A fresh stain is still wet in the middle; it dries as it fades.
+      if (t > 0.55 && d.r > 1.8) {
+        ctx.globalAlpha = a * (t - 0.55) * 1.1;
+        ctx.fillStyle = DECAL_CORE;
         ctx.beginPath();
-        ctx.ellipse(
-          sx + (h1 - 0.5) * d.r * 3.2,
-          sy + (h2 - 0.5) * d.r * 0.9,
-          rr,
-          rr * 0.34,
-          0,
-          0,
-          TAU,
-        );
+        ctx.moveTo(sx + rx * 0.5 * cs, sy + rx * 0.5 * sn);
+        ctx.ellipse(sx, sy, rx * 0.5, ry * 0.58, d.rot, 0, TAU);
         ctx.fill();
       }
     }
@@ -497,6 +590,9 @@ export class ParticleSystem {
         break;
       case SH_BLOOD:
         this.drawBlood(ctx, p, sx, sy, ps);
+        break;
+      case SH_GIB:
+        this.drawGib(ctx, p, sx, sy, ps);
         break;
       case SH_BOLT:
         this.drawBolt(ctx, p, sx, sy, ps, a);
@@ -639,20 +735,72 @@ export class ParticleSystem {
     ctx.globalAlpha = a;
   }
 
+  /**
+   * Blood reads two ways. Moving fast it is a ribbon — a tapered smear drawn
+   * between where it was last frame and where it is now, which is what turns an
+   * arterial spurt into a trailing streak instead of a line of dots. Moving
+   * slowly it is a tumbling droplet, fattest across its short axis.
+   */
   private drawBlood(ctx: C2D, p: Particle, sx: number, sy: number, ps: number): void {
-    const vsx = p.vx;
-    const vsy = p.vz * Z_SCALE - p.vy;
-    const spd = Math.hypot(vsx, vsy);
-    const r = p.size * ps;
-    ctx.save();
-    ctx.translate(sx, sy);
-    if (spd > 0.35) {
-      ctx.rotate(Math.atan2(vsy, vsx));
-      ctx.scale(1 + Math.min(spd * 0.16, 1.7), 1);
+    const r = Math.max(0.35, p.size * ps);
+    const psx = p.px;
+    const psy = GROUND_Y + p.pz * Z_SCALE - p.py;
+    const dx = sx - psx;
+    const dy = sy - psy;
+    const travel = Math.hypot(dx, dy);
+
+    if (travel > r * 1.1) {
+      const nx = -dy / travel;
+      const ny = dx / travel;
+      const tw = r * 0.2;
+      const hw = r * 0.9;
+      const q = this.pts;
+      q[0] = psx + nx * tw;
+      q[1] = psy + ny * tw;
+      q[2] = sx + nx * hw;
+      q[3] = sy + ny * hw;
+      q[4] = sx - nx * hw;
+      q[5] = sy - ny * hw;
+      q[6] = psx - nx * tw;
+      q[7] = psy - ny * tw;
+      poly(ctx, q, p.color, 'none', 0);
+      ctx.beginPath();
+      ctx.arc(sx, sy, r * 0.9, 0, TAU);
+      ctx.fillStyle = p.color;
+      ctx.fill();
+      return;
     }
+
+    const wob = 0.68 + 0.32 * Math.cos(p.rot);
     ctx.fillStyle = p.color;
     ctx.beginPath();
-    ctx.arc(0, 0, r, 0, TAU);
+    ctx.ellipse(sx, sy, r, r * wob, p.rot * 0.4, 0, TAU);
+    ctx.fill();
+  }
+
+  /**
+   * A chunk of somebody. Irregular by seed so no two lumps match, outlined in
+   * the house ink like every other solid in the game, with a wet glint that
+   * sells it as something that used to be inside a person.
+   */
+  private drawGib(ctx: C2D, p: Particle, sx: number, sy: number, ps: number): void {
+    const s = Math.max(0.9, p.size * ps);
+    const q = this.gibPts;
+    for (let k = 0; k < GIB_VERTS; k++) {
+      const h = hash(p.seed + k * 41);
+      const ang = (k / GIB_VERTS) * TAU;
+      const rr = s * (0.58 + h * 0.66);
+      q[k * 2] = Math.cos(ang) * rr;
+      q[k * 2 + 1] = Math.sin(ang) * rr * 0.84;
+    }
+    ctx.save();
+    ctx.translate(sx, sy);
+    ctx.rotate(p.rot);
+    poly(ctx, q, p.color, '#26060d', Math.max(0.45, s * 0.14));
+    ctx.globalAlpha *= 0.4;
+    ctx.fillStyle = '#ffb0a8';
+    ctx.beginPath();
+    ctx.ellipse(-s * 0.2, -s * 0.24, s * 0.3, s * 0.18, -0.55, 0, TAU);
     ctx.fill();
     ctx.restore();
   }

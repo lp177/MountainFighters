@@ -18,6 +18,9 @@ type Difficulty = Settings['difficulty'];
 
 const DIFFICULTIES: readonly Difficulty[] = ['easy', 'normal', 'hard', 'musk'];
 
+type Gore = Settings['gore'];
+const GORE_LEVELS: readonly Gore[] = ['off', 'on', 'max'];
+
 /** Used when localStorage is unavailable, so settings still stick for the session. */
 let memory: string | null = null;
 let store: Storage | null | undefined;
@@ -98,6 +101,7 @@ export function defaultSettings(): Settings {
     reducedMotion: prefersReducedMotion(),
     showHitboxes: false,
     difficulty: 'normal',
+    gore: 'on',
     bindings: defaultBindings(),
   };
 }
@@ -117,6 +121,7 @@ function repairSettings(v: unknown): Settings {
   if (!v || typeof v !== 'object') return base;
   const o = v as Record<string, unknown>;
   const difficulty = o['difficulty'];
+  const gore = o['gore'];
   return {
     masterVolume: num(o['masterVolume'], base.masterVolume, 0, 1),
     sfxVolume: num(o['sfxVolume'], base.sfxVolume, 0, 1),
@@ -127,6 +132,7 @@ function repairSettings(v: unknown): Settings {
     difficulty: DIFFICULTIES.includes(difficulty as Difficulty)
       ? (difficulty as Difficulty)
       : base.difficulty,
+    gore: GORE_LEVELS.includes(gore as Gore) ? (gore as Gore) : base.gore,
     bindings: repairBindings(o['bindings']),
   };
 }

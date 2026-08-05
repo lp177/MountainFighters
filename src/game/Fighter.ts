@@ -16,6 +16,7 @@
 
 import type {
   Bone,
+  FaceState,
   Facing,
   FighterState,
   FighterView,
@@ -23,7 +24,9 @@ import type {
   HitReaction,
   InputFrame,
   MoveDef,
+  RigDamage,
   RigStyle,
+  Settings,
   SimContext,
   Team,
   Vec3,
@@ -33,7 +36,7 @@ import type {
 } from '@/core/types';
 import { Btn } from '@/core/types';
 import type { Camera } from '@/render/Camera';
-import { clamp, hashNumber, lerp, sign } from '@/core/math';
+import { approach, clamp, hashNumber, lerp, sign } from '@/core/math';
 import {
   AIR_FRICTION,
   COMBO_RESET_FRAMES,
@@ -80,6 +83,16 @@ import { WEAPONS } from '@/content/weapons';
 
 type C2D = CanvasRenderingContext2D;
 
+/**
+ * The rig's draw options, plus the damage channel.
+ *
+ * Intersected rather than redeclared so this stays exactly one type: whatever
+ * `drawCharacter` accepts today, plus `damage`. When the rig grows the option
+ * itself the intersection collapses to the rig's own declaration and nothing
+ * here has to change.
+ */
+type RigOpts = NonNullable<Parameters<typeof drawCharacter>[7]> & { damage?: RigDamage };
+
 export interface FighterInit {
   id: number;
   team: Team;
@@ -99,6 +112,42 @@ export interface FighterInit {
 
 /** Buffered action slots. These map to move ids through `moves`. */
 type Action = 'light' | 'heavy' | 'special' | 'grab' | 'super' | 'jump';
+
+export type GoreLevel = Settings['gore'];
+
+/**
+ * How much viscera the player asked for.
+ *
+ * A Fighter must not reach into `Game` or a `Settings` object it does not own —
+ * it is constructed by content code, long before anybody knows which save file
+ * is loaded — so the preference lives here as one module-level value the game
+ * sets once at boot and whenever the option changes. It is deliberately NOT
+ * part of the simulation: it never touches physics, damage or the checksum, so
+ * two peers with different gore settings still agree on the fight.
+ */
+let goreSetting: GoreLevel = 'on';
+
+/** Called by the game when settings load or change. */
+export function setGoreLevel(level: GoreLevel): void {
+  goreSetting = level === 'off' || level === 'max' ? level : 'on';
+}
+
+export function goreLevel(): GoreLevel {
+  return goreSetting;
+}
+
+/** Particle-count multiplier for the current gore setting. */
+export function goreScale(): number {
+  return goreSetting === 'max' ? 1.8 : goreSetting === 'off' ? 0.75 : 1;
+}
+
+/** Wet palettes, and the dry ones that stand in for them when gore is off. */
+const BLOOD_COLORS = ['#e8514f', '#b6262c', '#f2a3a0'];
+const BLOOD_DEEP = ['#e8514f', '#b6262c', '#3b2f35'];
+const SPARK_COLORS = ['#ffe08a', '#ffb03a', '#9fd8ff'];
+const DEBRIS_COLORS = ['#ffd166', '#ff8a2a', '#9fd8ff', '#5a5f6b'];
+/** Dust and sweat: what a hit throws when the player wants no blood. */
+const DRY_COLORS = ['#f4f0e6', '#cfc6b8', '#a89e90'];
 
 const ACTION_PRIORITY: readonly [number, Action][] = [
   [Btn.Super, 'super'],
@@ -141,6 +190,45 @@ const STUN_BUILD: Record<HitReaction, number> = {
   stun: 0,
 };
 
+// ── Damage state tuning ──────────────────────────────────────────────────────
+// Everything here drives how chewed up a fighter LOOKS. None of it feeds back
+// into the fight.
+
+/**
+ * Extra wear per hit, as a multiple of the fraction of max health it took.
+ * Health alone sets a floor; this is what puts a fighter who has been through a
+ * meat grinder ahead of one who was chipped down politely.
+ */
+const WEAR_PER_HIT = 0.55;
+/** Blood picked up per hit, as a multiple of the fraction of health it took. */
+const BLOOD_PER_HIT = 1.3;
+/** Blood at the 'max' setting soaks in faster. */
+const BLOOD_GORE_MAX = 1.7;
+/** Breath chases health this fast, so a burst of damage lands before the gasp. */
+const BREATH_LAG = 0.009;
+/** Breath kicked up by a hit (scaled by how hard) and by spending a dash. */
+const BREATH_HIT_SPIKE = 0.34;
+const BREATH_BLOCK_SPIKE = 0.06;
+const BREATH_DASH_SPIKE = 0.16;
+const BREATH_SPIKE_MAX = 0.55;
+const BREATH_SPIKE_DECAY = 0.008;
+/** Frames a hard knock keeps the jaw set, even at full health. */
+const STRAIN_FRAMES = 48;
+/** A hit worth this fraction of max health reads as "hard". */
+const HARD_HIT_FRAC = 0.06;
+/** ...and one worth this much takes the hat with it. */
+const HAT_HIT_FRAC = 0.16;
+/** Reactions violent enough to send the hat flying on their own. */
+const HAT_LOSING: Record<HitReaction, boolean> = {
+  light: false,
+  heavy: false,
+  launch: true,
+  sweep: false,
+  crumple: true,
+  blowback: true,
+  stun: true,
+};
+
 const STATE_CODE: Record<FighterState, number> = {
   idle: 0,
   walk: 1,
@@ -167,16 +255,47 @@ const STATE_CODE: Record<FighterState, number> = {
   dead: 22,
 };
 
-/** Archetypes that spark and shed bolts instead of bleeding. */
-function isMechanical(archetype: string): boolean {
-  return (
-    archetype.includes('bot') ||
-    archetype.includes('drone') ||
-    archetype.includes('fridge') ||
-    archetype.includes('speaker') ||
-    archetype.includes('robot') ||
-    archetype.includes('truck')
-  );
+/** Name segments that mean "appliance": these spark and leak instead of bleed. */
+const MECHANICAL_PARTS = new Set([
+  'bot',
+  'robot',
+  'drone',
+  'iot',
+  'fridge',
+  'speaker',
+  'vacuum',
+  'truck',
+  'cybertruck',
+  'rocket',
+  'machine',
+  'turret',
+]);
+
+/**
+ * Bosses whose names give nothing away. Lane Assist is a car, the Boring
+ * Machine is a drill, Optimus and Grok are robots and Starship is a rocket —
+ * all of which should be throwing sparks. Subject P-47 and Snow White Mk. II
+ * are not on this list on purpose: an implant and a clone are still meat.
+ */
+const MECHANICAL_IDS = new Set(['fsd', 'boring', 'optimus', 'grok', 'starship']);
+
+/**
+ * Does this thing bleed, or does it spark?
+ *
+ * Matched on whole underscore-separated segments rather than as a substring,
+ * because `riot_guard` contains "iot" and a naive search turns a man in a
+ * helmet into an internet-connected fridge.
+ */
+export function isMechanicalArchetype(archetype: string): boolean {
+  const a = archetype.toLowerCase();
+  if (MECHANICAL_IDS.has(a)) return true;
+  let start = 0;
+  for (let i = 0; i <= a.length; i++) {
+    if (i < a.length && a.charCodeAt(i) !== 95 /* _ */) continue;
+    if (i > start && MECHANICAL_PARTS.has(a.slice(start, i))) return true;
+    start = i + 1;
+  }
+  return false;
 }
 
 /** Moves are authored by other modules; a bad id must not take the game down. */
@@ -235,6 +354,13 @@ export class Fighter implements FighterView {
    */
   readonly drawPos: Vec3;
 
+  /**
+   * How wrecked this body looks. Maintained here, consumed by the rig — the
+   * simulation never reads it back, which is what lets it hold a local setting
+   * (gore) without putting a netplay desync in the checksum.
+   */
+  readonly damage: RigDamage;
+
   private readonly baseMoves: Record<string, string>;
   private readonly speedStat: number;
   private readonly powerStat: number;
@@ -288,6 +414,27 @@ export class Fighter implements FighterView {
   private animFrame = 0;
   private prevAnimFrame = 0;
 
+  /** Monotonic: a torn jacket does not mend when a burger restores health. */
+  private wearAccum = 0;
+  private bloodAccum = 0;
+  private breathBase = 0;
+  private breathSpike = 0;
+  private strainTimer = 0;
+
+  /**
+   * Reused draw options. `render` runs sixty times a second for every body on
+   * screen, so it hands the rig the same object every frame instead of minting
+   * a fresh one for the garbage collector.
+   */
+  private readonly rigOpts: RigOpts = {
+    weapon: null,
+    flash: 0,
+    tint: undefined,
+    alpha: 1,
+    scale: 1,
+    damage: undefined,
+  };
+
   constructor(init: FighterInit) {
     this.id = init.id;
     this.team = init.team;
@@ -306,7 +453,17 @@ export class Fighter implements FighterView {
     this.speedStat = clamp(init.speed || 1, 0.2, 3);
     this.powerStat = clamp(init.power || 1, 0.1, 5);
     this.jumpStat = clamp(init.jump ?? 1, 0.4, 2.5);
-    this.mechanical = isMechanical(init.archetype);
+    this.mechanical = isMechanicalArchetype(init.archetype);
+    this.damage = {
+      wear: 0,
+      breath: 0,
+      face: 'calm',
+      // Stable for the life of this body, so its tears and stains sit in the
+      // same places every frame instead of crawling across the cloth.
+      seed: hashNumber(0x9e3779b9, init.id) >>> 0,
+      blood: 0,
+      hatless: false,
+    };
   }
 
   // ── queries ────────────────────────────────────────────────────────────────
@@ -348,6 +505,7 @@ export class Fighter implements FighterView {
     if (this.state === 'dead') {
       this.physics(ctx);
       this.updateAnim();
+      this.updateDamage();
       return;
     }
 
@@ -411,6 +569,105 @@ export class Fighter implements FighterView {
     this.physics(ctx);
     this.separate(ctx);
     this.updateAnim();
+    this.updateDamage();
+  }
+
+  // ── damage state ───────────────────────────────────────────────────────────
+
+  /**
+   * Derives the whole `RigDamage` block from this frame's sim state.
+   *
+   * Deterministic — it reads health, state and its own accumulators and nothing
+   * else — but its output is presentation only, so the local gore setting can
+   * safely reach in here and zero the blood without any peer noticing.
+   */
+  private updateDamage(): void {
+    const d = this.damage;
+    const hp = clamp(this.health / this.maxHealth, 0, 1);
+
+    // Health sets a floor; hits taken push above it. The value only ever
+    // climbs, so healing patches the health bar and not the jacket.
+    const floor = 1 - hp;
+    if (floor > this.wearAccum) this.wearAccum = floor;
+    d.wear = clamp(this.wearAccum, 0, 1);
+
+    // Breath lags health rather than tracking it, and spikes on exertion, so a
+    // fighter is still catching up on air a second after the exchange ended.
+    this.breathBase = approach(this.breathBase, 1 - hp, BREATH_LAG);
+    if (this.breathSpike > 0) {
+      this.breathSpike = Math.max(0, this.breathSpike - BREATH_SPIKE_DECAY);
+    }
+    d.breath = clamp(this.breathBase + this.breathSpike, 0, 1);
+
+    if (this.strainTimer > 0) this.strainTimer--;
+    d.face = this.faceState(hp);
+    d.blood = goreSetting === 'off' ? 0 : clamp(this.bloodAccum, 0, 1);
+  }
+
+  private faceState(hp: number): FaceState {
+    if (this.health <= 0 || this.state === 'dead') return 'dead';
+    if (this.state === 'stunned' || this.dizzyTimer > 0) return 'dazed';
+    if (hp < 0.15) return 'exhausted';
+    if (hp < 0.35) return 'angry';
+    if (hp < 0.65) return 'strained';
+    // Even a fresh fighter grits their teeth for a moment after a real one.
+    return this.strainTimer > 0 ? 'strained' : 'calm';
+  }
+
+  /** Books the cosmetic cost of a hit: wear, blood, breath, hat. */
+  private recordDamage(
+    amount: number,
+    reaction: HitReaction,
+    ctx: SimContext,
+  ): void {
+    const frac = clamp(amount / this.maxHealth, 0, 1);
+    this.wearAccum = clamp(this.wearAccum + frac * WEAR_PER_HIT, 0, 1);
+    const soak = goreSetting === 'max' ? BLOOD_GORE_MAX : 1;
+    this.bloodAccum = clamp(this.bloodAccum + frac * BLOOD_PER_HIT * soak, 0, 1);
+    this.breathSpike = Math.min(
+      BREATH_SPIKE_MAX,
+      this.breathSpike + BREATH_HIT_SPIKE * (0.45 + frac * 3),
+    );
+
+    const hard = frac >= HARD_HIT_FRAC || reaction !== 'light';
+    if (hard) this.strainTimer = STRAIN_FRAMES;
+    if (!this.damage.hatless && (frac >= HAT_HIT_FRAC || HAT_LOSING[reaction])) {
+      this.knockHatOff(ctx);
+    }
+  }
+
+  /**
+   * The hat comes off for good — knocked loose here, or taken by the fatality
+   * director when something eats it or puts it on a roof.
+   */
+  knockHatOff(ctx?: SimContext): void {
+    if (this.damage.hatless) return;
+    this.damage.hatless = true;
+    if (!ctx) return;
+    ctx.fx.particles({
+      count: 5,
+      x: this.pos.x,
+      y: this.pos.y + 46,
+      z: this.pos.z,
+      // Up and behind: the hat leaves in the direction the blow was going.
+      angle: this.facing > 0 ? Math.PI * 0.68 : Math.PI * 0.32,
+      spread: 1.1,
+      speed: [1.4, 3.6],
+      life: [14, 30],
+      size: [1.4, 3],
+      colors: [this.style.hatColor, this.style.hair, '#2b2229'],
+      gravity: 0.2,
+      drag: 0.94,
+      shape: 'shard',
+      fade: 'ease',
+      spin: 0.4,
+    });
+  }
+
+  /** Smears more blood on. For the fatality director's benefit. */
+  addBlood(amount: number): void {
+    if (amount <= 0) return;
+    this.bloodAccum = clamp(this.bloodAccum + amount, 0, 1);
   }
 
   private tickTimers(): void {
@@ -843,6 +1100,8 @@ export class Fighter implements FighterView {
     this.dashTimer = DASH_FRAMES;
     this.vel.x = dir * DASH_SPEED * this.moveSpeed;
     this.setState('dash', true);
+    // A dash is spent effort, and it should read that way a moment later.
+    this.breathSpike = Math.min(BREATH_SPIKE_MAX, this.breathSpike + BREATH_DASH_SPIKE);
     ctx.audio.play('dash', { pan: 0 });
     ctx.fx.particles({
       count: 6,
@@ -1120,6 +1379,7 @@ export class Fighter implements FighterView {
     this.dizzyMeter += STUN_BUILD[props.reaction] ?? 1;
     this.pendingKnockdown = false;
 
+    this.recordDamage(damage, props.reaction, ctx);
     this.applyReaction(props.reaction, dir, juggle * resist, ctx);
     this.hitFx(props, dir, damage, ctx, attacker);
 
@@ -1214,9 +1474,13 @@ export class Fighter implements FighterView {
     const big = props.reaction !== 'light';
     const hx = this.pos.x - dir * 6;
     const hy = this.pos.y + 24;
+    // Sparks are machine damage, not viscera: a robot still throws them with
+    // gore off. Flesh gets dust and sweat instead, so the hit still reads.
+    const dry = goreSetting === 'off' && !this.mechanical;
+    const gs = goreScale();
 
     ctx.fx.particles({
-      count: big ? 14 : 8,
+      count: Math.max(3, Math.round((big ? 14 : 8) * gs)),
       x: hx,
       y: hy,
       z: this.pos.z,
@@ -1225,12 +1489,10 @@ export class Fighter implements FighterView {
       speed: [1.2, big ? 5.2 : 3.2],
       life: [8, big ? 26 : 16],
       size: [1, big ? 3.2 : 2],
-      colors: this.mechanical
-        ? ['#ffe08a', '#ffb03a', '#9fd8ff']
-        : ['#e8514f', '#b6262c', '#f2a3a0'],
+      colors: this.mechanical ? SPARK_COLORS : dry ? DRY_COLORS : BLOOD_COLORS,
       gravity: this.mechanical ? 0.22 : 0.14,
       drag: 0.93,
-      shape: this.mechanical ? 'spark' : 'blood',
+      shape: this.mechanical ? 'spark' : dry ? 'dot' : 'blood',
       additive: this.mechanical,
       fade: 'ease',
     });
@@ -1328,6 +1590,8 @@ export class Fighter implements FighterView {
     this.vel.x = dir * Math.abs(props.knockback.x) * 0.35;
     this.addMeter(props.meterGainVictim * 0.5, ctx);
     this.flash = 0.4;
+    // Holding a guard against something heavy still costs you air.
+    this.breathSpike = Math.min(BREATH_SPIKE_MAX, this.breathSpike + BREATH_BLOCK_SPIKE);
 
     ctx.audio.play('block');
     ctx.fx.particles({
@@ -1409,8 +1673,9 @@ export class Fighter implements FighterView {
 
     ctx.audio.play(this.mechanical ? 'robot_death' : 'ko');
     ctx.audio.voice(this.voice, 'ko');
+    const dry = goreSetting === 'off' && !this.mechanical;
     ctx.fx.particles({
-      count: this.mechanical ? 22 : 14,
+      count: Math.max(6, Math.round((this.mechanical ? 22 : 14) * goreScale())),
       x: this.pos.x,
       y: this.pos.y + 20,
       z: this.pos.z,
@@ -1419,12 +1684,10 @@ export class Fighter implements FighterView {
       speed: [1.5, 5],
       life: [16, 40],
       size: [1.4, 3.6],
-      colors: this.mechanical
-        ? ['#ffd166', '#ff8a2a', '#9fd8ff', '#5a5f6b']
-        : ['#e8514f', '#b6262c', '#3b2f35'],
+      colors: this.mechanical ? DEBRIS_COLORS : dry ? DRY_COLORS : BLOOD_DEEP,
       gravity: 0.24,
       drag: 0.94,
-      shape: this.mechanical ? 'shard' : 'blood',
+      shape: this.mechanical ? 'shard' : dry ? 'smoke' : 'blood',
       additive: false,
       fade: 'ease',
     });
@@ -1725,6 +1988,16 @@ export class Fighter implements FighterView {
     // Invulnerability reads as a strobe; a solid ghost would look like a bug.
     const strobe = this.invulnFrames > 0 && (this.age & 2) !== 0 ? 0.45 : 1;
 
+    const o = this.rigOpts;
+    o.weapon = this.weaponDef;
+    o.flash = this.flash;
+    o.tint = this.tint ?? undefined;
+    o.alpha = strobe;
+    // Far things are smaller, and far is z=0 — so the falloff is measured from
+    // the back wall, not from the origin.
+    o.scale = clamp(1 - (Z_DEPTH - z) * Z_PERSPECTIVE, 0.75, 1);
+    o.damage = this.damage;
+
     drawCharacter(
       ctx,
       this.style,
@@ -1733,15 +2006,7 @@ export class Fighter implements FighterView {
       x,
       GROUND_Y + z * Z_SCALE - y,
       this.facing,
-      {
-        weapon: this.weaponDef,
-        flash: this.flash,
-        tint: this.tint ?? undefined,
-        alpha: strobe,
-        // Far things are smaller, and far is z=0 — so the falloff is measured
-        // from the back wall, not from the origin.
-        scale: clamp(1 - (Z_DEPTH - z) * Z_PERSPECTIVE, 0.75, 1),
-      },
+      o,
     );
   }
 

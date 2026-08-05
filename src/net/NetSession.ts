@@ -15,6 +15,7 @@ import { Peer } from 'peerjs';
 import type { DataConnection, PeerOptions } from 'peerjs';
 
 import type { NetConfig, NetMessage, NetPlayer, NetRole } from '@/core/types';
+import { iceFailureMessage, rtcConfig } from '@/net/ice';
 import { MAX_LOCAL_PLAYERS, NET_VERSION } from '@/core/constants';
 import { createRoomId, normalizeRoomId } from '@/net/Room';
 import { randomSeed } from '@/engine/Rng';
@@ -264,6 +265,10 @@ export class NetSession {
     if (typeof c.port === 'number' && c.port > 0) o.port = c.port;
     if (typeof c.path === 'string' && c.path) o.path = c.path;
     if (typeof c.secure === 'boolean') o.secure = c.secure;
+    // Without this PeerJS uses its STUN-only default, which cannot cross
+    // symmetric or carrier-grade NAT — the connection simply fails with
+    // "ICE failed" and no relay candidate to fall back on.
+    o.config = rtcConfig(c);
     return o;
   }
 
@@ -290,7 +295,7 @@ export class NetSession {
           /* already gone */
         }
         if (this.peer === peer) this.peer = null;
-        reject(new Error(describePeerError(err)));
+        reject(new Error(describePeerError(err, this.cfg)));
       };
       peer.on('open', onOpen);
       peer.on('error', onError);
@@ -327,7 +332,7 @@ export class NetSession {
   }
 
   private onPeerError(err: Error): void {
-    const msg = describePeerError(err);
+    const msg = describePeerError(err, this.cfg);
     this._lastError = msg;
     // peer-unavailable while joining means the room simply is not there.
     if (this.joinSettle) this.failJoin(new Error(msg));
@@ -713,7 +718,7 @@ function cleanName(name: string, slot: number): string {
   return s || `Player ${slot + 1}`;
 }
 
-function describePeerError(err: unknown): string {
+function describePeerError(err: unknown, cfg?: NetConfig): string {
   const type = (err as { type?: string })?.type ?? '';
   const raw = err instanceof Error ? err.message : String(err);
   switch (type) {
@@ -734,7 +739,9 @@ function describePeerError(err: unknown): string {
     case 'invalid-key':
       return 'That room id is not valid.';
     case 'webrtc':
-      return `WebRTC failed to negotiate a connection: ${raw}`;
+      // Almost always ICE failing to find a route between the two networks,
+      // which is a relay problem, not something the player did wrong.
+      return iceFailureMessage(cfg);
     case 'disconnected':
       return 'Disconnected from the matchmaking server.';
     default:

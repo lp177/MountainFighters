@@ -13,30 +13,43 @@
  * Particles are emitted through here but are updated and drawn by whoever owns
  * the `ParticleSystem` — this class only forwards emission so it can apply the
  * reduced-motion budget.
+ *
+ * GORE lives here too, because gore is a *policy* as much as an effect:
+ * `Settings.gore` is read live on every entry point, 'off' means nothing wet
+ * ever spawns (the hits, the wear and the exhaustion still read, just
+ * bloodlessly), and 'max' simply scales the same emitters up. Screen-space gore
+ * — the lens spatter and the fatality grade — is additionally damped by
+ * `reducedMotion`, since that is the part that happens to the player's eyes
+ * rather than to the fighter.
  */
 
-import type {
-  FloatingTextSpec,
-  FxBus,
-  ParticleSpec,
-  Settings,
-  ShakeSpec,
-} from '@/core/types';
+import type { FloatingTextSpec, FxBus, Settings, ShakeSpec } from '@/core/types';
 import type { Camera } from '@/render/Camera';
 import type { Renderer } from '@/render/Renderer';
 import type { GameLoop } from '@/engine/Loop';
-import type { ParticleSystem } from '@/juice/Particles';
+import type { EmitSpec, ParticleSystem } from '@/juice/Particles';
 import { clamp, easeIn, easeOut, easeOutBack, lerp, TAU } from '@/core/math';
 import {
   CAMERA_PUNCH,
   GROUND_Y,
   IMPACT_FLASH_FRAMES,
+  VIEW_H,
   VIEW_W,
   Z_PERSPECTIVE,
   Z_SCALE,
 } from '@/core/constants';
 
 type C2D = CanvasRenderingContext2D;
+
+/**
+ * How wet a single moment is, matching `FatalityDef.gore`. This is the severity
+ * of the *event*, not the player's setting — `Settings.gore` scales all three
+ * and silences all three at 'off'.
+ */
+export type GoreGrade = 'light' | 'heavy' | 'absurd';
+
+/** What is coming out of the thing. Robots leak, they do not bleed. */
+export type SprayKind = 'blood' | 'oil';
 
 const ST_DAMAGE = 0;
 const ST_COMBO = 1;
@@ -48,6 +61,11 @@ const MAX_TEXTS = 32;
 const MAX_SHOCKWAVES = 10;
 const MAX_IMPACTS = 24;
 
+/** Blobs of blood the camera lens can carry at once. */
+const MAX_LENS = 26;
+/** Base life of a lens blob, in frames. It runs out over several seconds. */
+const LENS_LIFE = 230;
+
 /** Frames a floating text takes to pop in. */
 const POP_FRAMES = 9;
 /** Fraction of a text's life spent fading out. */
@@ -56,6 +74,34 @@ const TEXT_FADE = 0.35;
 const SLOWMO_IN = 0.18;
 /** Particle budget multiplier when the player asked for reduced motion. */
 const REDUCED_PARTICLES = 0.35;
+
+/** Fat, dark, arterial. The wet end of the palette; sparks live in Combat.ts. */
+const BLOOD_DROP = ['#c2122a', '#9b0b1e', '#e3454a', '#7d0616'];
+/** The fine stuff that hangs in the air for a few frames after a good hit. */
+const BLOOD_MIST = ['#ff5d5d', '#e3454a', '#ffb3b3'];
+/** Offal: darker than blood, with a pale fatty note. */
+const GIB_MEAT = ['#a81530', '#7d0d20', '#c94a4a', '#d99a8f'];
+/** Hydraulic fluid and coolant, for everything that was never alive. */
+const OIL_DROP = ['#2b2731', '#181419', '#4a3f2c', '#6b5a3a'];
+const OIL_MIST = ['#6b5a3a', '#4a3f2c', '#9aa3b0'];
+const OIL_SCRAP = ['#8f96a3', '#5a5f6b', '#c9d3e0', '#3ad07a'];
+/** On the glass, blood is nearly black until the light gets behind it. */
+const LENS_BLOOD = '#8a0f1c';
+const LENS_RIM = '#ff5c4e';
+
+class LensBlob {
+  active = false;
+  x = 0;
+  y = 0;
+  r = 3;
+  /** Downward slide speed in virtual pixels per frame. */
+  vy = 0;
+  /** Length of the smear it has dragged down the glass so far. */
+  trail = 0;
+  life = 0;
+  maxLife = 1;
+  seed = 0;
+}
 
 class FloatingText {
   active = false;
@@ -113,8 +159,19 @@ export class Fx implements FxBus {
   private textCursor = 0;
   private waveCursor = 0;
 
+  private readonly lens: LensBlob[] = [];
+  private lensCursor = 0;
+  private lensLive = 0;
+
+  private gradeStrength = 0;
+  private gradeLife = 0;
+  private gradeMax = 1;
+
+  /** Set for the duration of one `renderOverlay`, read by the bound draw pass. */
+  private overlayCtx: C2D | null = null;
+
   /** Reused when the reduced-motion budget forces a modified emission. */
-  private readonly scratch: ParticleSpec = {
+  private readonly scratch: EmitSpec = {
     count: 0,
     x: 0,
     y: 0,
@@ -130,6 +187,30 @@ export class Fx implements FxBus {
     shape: 'dot',
   };
 
+  /**
+   * Second scratch spec, owned by the gore emitters. They fill this and hand it
+   * to `particles()`, which copies into `scratch` if the reduced-motion budget
+   * applies — so the two never fight over the same buffer.
+   */
+  private readonly gspec: EmitSpec = {
+    count: 0,
+    x: 0,
+    y: 0,
+    z: 0,
+    angle: 0,
+    spread: 0,
+    speed: [0, 0],
+    life: [0, 0],
+    size: [0, 0],
+    colors: BLOOD_DROP,
+    gravity: 0,
+    drag: 0,
+    shape: 'blood',
+    additive: false,
+    fade: 'ease',
+    spin: 0,
+  };
+
   constructor(cam: Camera, particles: ParticleSystem, loop: GameLoop, settings: Settings) {
     this.cam = cam;
     this.ps = particles;
@@ -137,12 +218,13 @@ export class Fx implements FxBus {
     this.settings = settings;
     for (let i = 0; i < MAX_TEXTS; i++) this.texts.push(new FloatingText());
     for (let i = 0; i < MAX_SHOCKWAVES; i++) this.waves.push(new Shockwave());
+    for (let i = 0; i < MAX_LENS; i++) this.lens.push(new LensBlob());
     this.impId.fill(-1);
   }
 
   // ── FxBus ──────────────────────────────────────────────────────────────────
 
-  particles(spec: ParticleSpec): void {
+  particles(spec: EmitSpec): void {
     if (this.muted) return;
     if (!this.settings.reducedMotion) {
       this.ps.emit(spec);
@@ -306,7 +388,297 @@ export class Fx implements FxBus {
     }
   }
 
+  // ── gore ───────────────────────────────────────────────────────────────────
+
+  /**
+   * The standard impact spray.
+   *
+   * `dir` is the direction the blow travelled: a facing (+1 right, -1 left) or,
+   * if the caller has one, a world angle in radians — anything outside ±1 is
+   * read as an angle, which is what lets the combat resolver hand this the same
+   * cone angle it passes its own emitters.
+   *
+   * `amount` is a 0..1 intensity dial; a figure above 3 is read as raw damage
+   * points and normalised instead, so a call site holding either number is fine.
+   *
+   * `gore` is the severity of THIS moment: a `FatalityDef.gore` grade, or a
+   * `Settings.gore` value, or 'blood'/'oil' when all the caller knows is what
+   * the thing is full of. Every one of those unions turns up at some call site;
+   * 'off' always means nothing at all, and 'oil' comes out black.
+   */
+  blood(
+    x: number,
+    y: number,
+    z: number,
+    dir: number,
+    amount: number,
+    gore: GoreGrade | Settings['gore'] | SprayKind = 'light',
+  ): void {
+    if (this.muted || gore === 'off') return;
+    const g = this.goreScale();
+    if (g <= 0) return;
+    const amt = intensity(amount);
+    if (amt <= 0) return;
+    const big = gore === 'heavy' || gore === 'absurd' || gore === 'max' || amt > 0.8;
+    const oil = gore === 'oil';
+
+    // The wet half: fat droplets thrown along the blow, which arc, tumble and
+    // end their lives as stains on the floor.
+    const s = this.gspec;
+    s.count = Math.round(clamp((5 + amt * 15) * g, 3, 64));
+    s.x = x;
+    s.y = y;
+    s.z = z;
+    s.angle = sprayAngle(dir, 0.32);
+    s.spread = 1.5;
+    s.speed[0] = 1.1 + amt * 1.5;
+    s.speed[1] = 2.9 + amt * 5.4;
+    s.life[0] = 16;
+    s.life[1] = 38 + amt * 26;
+    s.size[0] = 0.8;
+    s.size[1] = 1.3 + amt * 1.7;
+    s.colors = oil ? OIL_DROP : BLOOD_DROP;
+    s.gravity = 0.34;
+    s.drag = 0.985;
+    s.shape = 'blood';
+    s.additive = false;
+    s.fade = 'ease';
+    s.spin = 0.2;
+    this.particles(s);
+
+    // The fine half: a puff of mist that never reaches the ground.
+    s.count = Math.round(clamp((3 + amt * 9) * g, 2, 40));
+    s.spread = 2.1;
+    s.speed[0] = 1.8 + amt * 2;
+    s.speed[1] = 4.4 + amt * 4;
+    s.life[0] = 5;
+    s.life[1] = 13;
+    s.size[0] = 0.45;
+    s.size[1] = 0.95;
+    s.colors = oil ? OIL_MIST : BLOOD_MIST;
+    s.gravity = 0.1;
+    s.drag = 0.9;
+    s.spin = 0.4;
+    this.particles(s);
+
+    // Only meat has pressure behind it.
+    if (big && !oil) this.arterial(x, y, z, dir, amt);
+  }
+
+  /**
+   * Arterial spray: a fast, tight cone of fine droplets with a handful of fat
+   * ones behind them, which the pool draws as trailing ribbons because they are
+   * moving several pixels a frame. For heavy hits and finishers.
+   */
+  arterial(x: number, y: number, z: number, dir: number, amount: number): void {
+    if (this.muted) return;
+    const g = this.goreScale();
+    if (g <= 0) return;
+    const amt = intensity(amount);
+    if (amt <= 0) return;
+    const s = this.gspec;
+
+    s.count = Math.round(clamp((7 + amt * 14) * g, 4, 52));
+    s.x = x;
+    s.y = y;
+    s.z = z;
+    // Angled up and forward: a spurt has pressure behind it, unlike a splash.
+    s.angle = sprayAngle(dir, 0.52);
+    s.spread = 0.6;
+    s.speed[0] = 4.6 + amt * 3.4;
+    s.speed[1] = 8.4 + amt * 8;
+    s.life[0] = 18;
+    s.life[1] = 40;
+    s.size[0] = 0.55;
+    s.size[1] = 1.15;
+    s.colors = BLOOD_DROP;
+    s.gravity = 0.3;
+    // Barely any drag, so the ribbons stay long for their whole flight.
+    s.drag = 0.997;
+    s.shape = 'blood';
+    s.additive = false;
+    s.fade = 'ease';
+    s.spin = 0.1;
+    this.particles(s);
+
+    s.count = Math.round(clamp((2 + amt * 4) * g, 2, 12));
+    s.spread = 0.35;
+    s.speed[0] = 3.4 + amt * 2;
+    s.speed[1] = 6 + amt * 4;
+    s.life[0] = 26;
+    s.life[1] = 54;
+    s.size[0] = 1.5;
+    s.size[1] = 2.7;
+    this.particles(s);
+  }
+
+  /**
+   * Chunks. Tumbling, bouncing, floor-painting pieces of somebody.
+   *
+   * Normally `gibs(x, y, z, amount)`. A caller that also knows which way the
+   * pieces should go passes the direction fourth and the amount fifth — the
+   * combat resolver's gore shim does exactly that — and the extra argument is
+   * what tells the two apart.
+   */
+  gibs(
+    x: number,
+    y: number,
+    z: number,
+    amount: number,
+    amountIfDirected?: number,
+    kind: SprayKind = 'blood',
+  ): void {
+    if (this.muted) return;
+    const g = this.goreScale();
+    if (g <= 0) return;
+    const directed = amountIfDirected !== undefined;
+    const amt = intensity(directed ? amountIfDirected : amount);
+    if (amt <= 0) return;
+    const oil = kind === 'oil';
+
+    const s = this.gspec;
+    s.count = Math.round(clamp((3 + amt * 7) * g, 2, 28));
+    s.x = x;
+    s.y = y;
+    s.z = z;
+    // Up by default: a chunk does not care which way the fist went, it cares
+    // about gravity. A directed call still gets thrown mostly that way.
+    s.angle = directed ? sprayAngle(amount, 0.9) : Math.PI * 0.5;
+    s.spread = Math.PI * 1.4;
+    s.speed[0] = 1.5 + amt * 1.6;
+    s.speed[1] = 4 + amt * 4.6;
+    // Long lives: a chunk that has stopped moving is scenery, not an effect.
+    s.life[0] = 110;
+    s.life[1] = 240;
+    s.size[0] = 1.5 + amt * 0.9;
+    s.size[1] = 3 + amt * 2.6;
+    s.colors = oil ? OIL_SCRAP : GIB_MEAT;
+    s.gravity = 0.44;
+    s.drag = 0.995;
+    s.shape = 'gib';
+    s.additive = false;
+    s.fade = 'ease';
+    s.spin = 0.22;
+    this.particles(s);
+
+    // Nothing comes out of a body dry.
+    s.count = Math.round(clamp((4 + amt * 8) * g, 3, 36));
+    s.spread = Math.PI * 1.9;
+    s.speed[0] = 1.2;
+    s.speed[1] = 4.2 + amt * 3;
+    s.life[0] = 18;
+    s.life[1] = 46;
+    s.size[0] = 0.7;
+    s.size[1] = 1.8;
+    s.colors = oil ? OIL_DROP : BLOOD_DROP;
+    s.gravity = 0.32;
+    s.drag = 0.985;
+    s.shape = 'blood';
+    s.spin = 0.25;
+    this.particles(s);
+  }
+
+  /**
+   * The slow leak from a wounded fighter. Call it every frame with the wound
+   * position and how badly hurt they are; it meters itself, so a hurt character
+   * keeps bleeding instead of only flashing red.
+   */
+  drip(x: number, y: number, z: number, amount: number): void {
+    if (this.muted) return;
+    const g = this.goreScale();
+    if (g <= 0) return;
+    const amt = intensity(amount);
+    if (amt <= 0.02) return;
+    // Presentation-only rate limiting: a coin flip per frame, not a counter, so
+    // two fighters bleeding at once never fall into step.
+    if (Math.random() > (0.012 + amt * 0.07) * g) return;
+
+    const s = this.gspec;
+    s.count = 1;
+    s.x = x;
+    s.y = y;
+    s.z = z;
+    s.angle = -Math.PI * 0.5;
+    s.spread = 1.1;
+    s.speed[0] = 0.05;
+    s.speed[1] = 0.45;
+    s.life[0] = 50;
+    s.life[1] = 110;
+    s.size[0] = 0.9;
+    s.size[1] = 1.5 + amt;
+    s.colors = BLOOD_DROP;
+    s.gravity = 0.2;
+    s.drag = 1;
+    s.shape = 'blood';
+    s.additive = false;
+    s.fade = 'ease';
+    s.spin = 0.08;
+    this.particles(s);
+  }
+
+  /**
+   * Spatter on the CAMERA. Screen-space blobs that stick to the glass and slide
+   * down it over the next few seconds — the cheapest way there is to make a
+   * kill feel like it happened to the player rather than in front of them, so
+   * use it sparingly: finishers only.
+   */
+  lensSplatter(amount: number): void {
+    if (this.muted) return;
+    const g = this.goreScale();
+    if (g <= 0) return;
+    const amt = intensity(amount);
+    if (amt <= 0) return;
+    // This one lands on the player's eyes, so reduced motion gets a light dusting.
+    const damp = this.settings.reducedMotion ? 0.4 : 1;
+    const n = Math.round(clamp((3 + amt * 9) * g * damp, 1, MAX_LENS));
+    const fat = this.settings.gore === 'max' ? 1.3 : 1;
+
+    for (let i = 0; i < n; i++) {
+      const b = this.lens[this.lensCursor];
+      this.lensCursor = (this.lensCursor + 1) % MAX_LENS;
+      if (!b.active) this.lensLive++;
+      b.active = true;
+      b.x = VIEW_W * (0.1 + Math.random() * 0.8);
+      // Weighted to the upper half, because that is where a face is.
+      b.y = VIEW_H * (0.06 + Math.random() * 0.62);
+      b.r = (1.8 + Math.random() * (3.5 + amt * 6.5)) * fat;
+      b.vy = (0.05 + Math.random() * 0.2) * damp;
+      b.trail = 0;
+      b.life = Math.round(LENS_LIFE * (0.6 + Math.random() * 0.85));
+      b.maxLife = b.life;
+      b.seed = (Math.random() * 65536) | 0;
+    }
+  }
+
+  /**
+   * The moment of a fatality: the frame desaturates and a bruise of red is
+   * pushed back into it. Brief by design — it is punctuation, not a filter.
+   */
+  fatalityGrade(frames: number, strength = 1): void {
+    if (this.muted) return;
+    if (frames <= 0) return;
+    const s = clamp(strength, 0, 1) * (this.settings.reducedMotion ? 0.45 : 1);
+    if (s <= 0.01) return;
+    const current = this.gradeLife > 0 ? this.gradeStrength * (this.gradeLife / this.gradeMax) : 0;
+    if (s >= current) {
+      this.gradeStrength = s;
+      this.gradeLife = frames;
+      this.gradeMax = frames;
+    } else if (frames > this.gradeLife) {
+      this.gradeLife = frames;
+      this.gradeMax = Math.max(this.gradeMax, frames);
+    }
+  }
+
   // ── queries ────────────────────────────────────────────────────────────────
+
+  /**
+   * The live gore setting, so a fatality director can decline to run a finisher
+   * at all rather than run a bloodless one.
+   */
+  get goreSetting(): Settings['gore'] {
+    return this.settings.gore;
+  }
 
   /**
    * How hard a fighter should be drawn as a flat white silhouette this frame,
@@ -344,6 +716,34 @@ export class Fx implements FxBus {
       if (this.impLife[i] > 0) {
         this.impLife[i]--;
         if (this.impLife[i] <= 0) this.impId[i] = -1;
+      }
+    }
+
+    if (this.gradeLife > 0) {
+      this.gradeLife--;
+      if (this.gradeLife <= 0) this.gradeStrength = 0;
+    }
+
+    if (this.lensLive > 0) {
+      for (let i = 0; i < MAX_LENS; i++) {
+        const b = this.lens[i];
+        if (!b.active) continue;
+        b.life--;
+        if (b.life <= 0) {
+          b.active = false;
+          this.lensLive--;
+          continue;
+        }
+        // It runs while it is heavy, then the smear thins and it stops.
+        if (b.vy > 0.004) {
+          b.y += b.vy;
+          b.trail = Math.min(b.trail + b.vy, b.r * 9);
+          b.vy *= 0.988;
+          if (b.y > VIEW_H + b.r * 2) {
+            b.active = false;
+            this.lensLive--;
+          }
+        }
       }
     }
 
@@ -394,12 +794,21 @@ export class Fx implements FxBus {
     if (any) ctx.restore();
   }
 
-  /** Screen-space layer: full-screen flash and chromatic aberration. */
+  /**
+   * Screen-space layer: full-screen flash, the fatality grade, whatever is on
+   * the lens, and chromatic aberration last so it fringes all of it.
+   */
   renderOverlay(r: Renderer): void {
     if (this.flashLife > 0) {
       const t = this.flashLife / this.flashMax;
       const a = this.flashAlpha * t * t * (0.6 + 0.4 * t);
       if (a > 0.004) r.flash(this.flashColor, a);
+    }
+    if (this.gradeLife > 0 || this.lensLive > 0) {
+      this.overlayCtx = r.ctx;
+      // The callback is bound once at construction: this runs every frame.
+      r.withScreen(this.drawScreenGore);
+      this.overlayCtx = null;
     }
     if (this.abLife > 0 && !this.settings.reducedMotion) {
       const s = this.abStrength * (this.abLife / this.abMax);
@@ -408,6 +817,118 @@ export class Fx implements FxBus {
   }
 
   // ── internals ──────────────────────────────────────────────────────────────
+
+  private goreScale(): number {
+    switch (this.settings.gore) {
+      case 'off':
+        return 0;
+      case 'max':
+        return 1.9;
+      default:
+        return 1;
+    }
+  }
+
+  private readonly drawScreenGore = (): void => {
+    const ctx = this.overlayCtx;
+    if (!ctx) return;
+    if (this.gradeLife > 0) {
+      const t = this.gradeLife / this.gradeMax;
+      // Snap in, hang, fall away.
+      const k = this.gradeStrength * (t > 0.75 ? (1 - t) * 4 : easeOut(t / 0.75));
+      if (k > 0.01) this.drawGrade(ctx, k);
+    }
+    if (this.lensLive > 0) this.drawLens(ctx);
+  };
+
+  /**
+   * Pull the colour out of the frame, then bruise it.
+   *
+   * The desaturation is a single 'saturation' blend fill; if the browser has
+   * not implemented that separable blend mode it silently refuses the
+   * assignment, in which case the red multiply alone still carries the moment.
+   */
+  private drawGrade(ctx: C2D, k: number): void {
+    ctx.save();
+    ctx.globalCompositeOperation = 'saturation';
+    if (ctx.globalCompositeOperation === 'saturation') {
+      ctx.globalAlpha = clamp(k * 0.85, 0, 1);
+      ctx.fillStyle = '#808080';
+      ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+    }
+    // Multiplying by a warm red crushes green and blue and leaves the reds.
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.globalAlpha = clamp(k * 0.5, 0, 1);
+    ctx.fillStyle = '#ff5f4a';
+    ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+    // A little back on top, so the shadows do not go flat black.
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = clamp(k * 0.14, 0, 1);
+    ctx.fillStyle = '#4a0006';
+    ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+    ctx.restore();
+  }
+
+  /**
+   * Blood on the glass. Each blob is a tapered smear behind a head, plus a rim
+   * highlight — the highlight is what puts it ON the lens rather than in the
+   * world, since nothing else in the frame is lit from that side.
+   */
+  private drawLens(ctx: C2D): void {
+    ctx.save();
+    for (let i = 0; i < MAX_LENS; i++) {
+      const b = this.lens[i];
+      if (!b.active) continue;
+      const t = b.life / b.maxLife;
+      const a = clamp(t > 0.3 ? 0.9 : (t / 0.3) * 0.9, 0, 1);
+      if (a <= 0.01) continue;
+
+      if (b.trail > 0.6) {
+        const w = b.r * 0.75;
+        ctx.globalAlpha = a * 0.42;
+        ctx.fillStyle = LENS_BLOOD;
+        ctx.beginPath();
+        ctx.moveTo(b.x - w, b.y);
+        ctx.lineTo(b.x - w * 0.28, b.y - b.trail);
+        ctx.lineTo(b.x + w * 0.28, b.y - b.trail);
+        ctx.lineTo(b.x + w, b.y);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      ctx.globalAlpha = a;
+      ctx.fillStyle = LENS_BLOOD;
+      ctx.beginPath();
+      ctx.ellipse(b.x, b.y, b.r, b.r * 1.1, 0, 0, TAU);
+      ctx.fill();
+
+      // Satellite droplets, stable per blob so they do not crawl.
+      const h1 = hash01(b.seed);
+      const h2 = hash01(b.seed + 17);
+      const rr = b.r * 0.3;
+      if (rr > 0.6) {
+        const ax = b.x + (h1 - 0.5) * b.r * 3.4;
+        const ay = b.y + (h2 - 0.5) * b.r * 2.6;
+        const bx = b.x - (h2 - 0.5) * b.r * 3;
+        const by = b.y - (h1 - 0.5) * b.r * 2.2;
+        const br = rr * 0.7;
+        ctx.beginPath();
+        // moveTo between arcs, or the two droplets are joined by a hair.
+        ctx.moveTo(ax + rr, ay);
+        ctx.arc(ax, ay, rr, 0, TAU);
+        ctx.moveTo(bx + br, by);
+        ctx.arc(bx, by, br, 0, TAU);
+        ctx.fill();
+      }
+
+      ctx.globalAlpha = a * 0.4;
+      ctx.fillStyle = LENS_RIM;
+      ctx.beginPath();
+      ctx.ellipse(b.x - b.r * 0.3, b.y - b.r * 0.34, b.r * 0.34, b.r * 0.22, -0.6, 0, TAU);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
 
   private allocText(): FloatingText {
     for (let i = 0; i < MAX_TEXTS; i++) {
@@ -537,6 +1058,42 @@ export class Fx implements FxBus {
     ctx.drawImage(canvas, dx0, dy0, dw, dh, x0 - g, y0 - g, size + g * 2, size + g * 2);
     ctx.restore();
   }
+}
+
+/**
+ * Gore intensity, normalised to roughly 0..1.6.
+ *
+ * Callers hold one of two things: a small dial (0..1, sometimes pushed to 2 or
+ * so for a marquee kill) or raw damage points. Insisting on one of them at
+ * every call site is how you end up with a jab that sprays like a decapitation,
+ * so both are accepted and told apart by magnitude — no move in the game deals
+ * three points of damage.
+ */
+function intensity(amount: number): number {
+  if (!(amount > 0)) return 0;
+  return amount <= 3 ? Math.min(amount, 1.6) : clamp(amount / 26, 0.3, 1.6);
+}
+
+/**
+ * Emission angle from whatever the caller had to hand.
+ *
+ * Facings (±1) and world angles both turn up: a fighter knows which way it is
+ * pointing, the combat resolver has already worked out a cone. Anything inside
+ * ±1 is a facing and gets the lift applied; anything outside it is already an
+ * angle in radians and is used as it stands.
+ */
+function sprayAngle(dir: number, lift: number): number {
+  if (dir > 1.05 || dir < -1.05) return dir;
+  return dir >= 0 ? lift : Math.PI - lift;
+}
+
+/** Stable pseudo-random in 0..1 from an integer, for per-blob detail. */
+function hash01(n: number): number {
+  let h = (n | 0) * 1103515245 + 12345;
+  h ^= h >>> 15;
+  h = Math.imul(h, 0x2c1b3c6d);
+  h ^= h >>> 12;
+  return ((h >>> 8) & 0xffff) / 65535;
 }
 
 function styleCode(s: FloatingTextSpec['style']): number {

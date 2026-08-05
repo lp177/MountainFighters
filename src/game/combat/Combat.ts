@@ -24,6 +24,14 @@
  * direction the blow travelled, the impact ring, and the KO shockwave. Nothing
  * here duplicates a cue the victim already plays.
  *
+ * The same split governs the gore: contact is where blood comes from, so the
+ * spray, the oil and the gibs are thrown from here, along the line the blow
+ * travelled and scaled by what it took out of the victim. And because contact
+ * is also where a life ends, the killing blow is offered to the fatality
+ * director through `setFatalityHook` — the resolver never decides WHICH kills
+ * deserve a finisher, it only asks and then keeps its hands off the KO if the
+ * answer is yes.
+ *
  * Everything runs inside the deterministic sim: randomness comes from `ctx.rng`
  * only, and the FxBus/AudioBus calls are dropped during rollback.
  */
@@ -32,12 +40,16 @@ import { PARRY_FRAMES, Z_HIT_TOLERANCE } from '@/core/constants';
 import { boxOverlap, clamp } from '@/core/math';
 import { MOVES } from '@/game/combat/Moves';
 import type { Fighter } from '@/game/Fighter';
+// One definition of who bleeds and how much of it the player asked for. Both
+// belong to the body, not to the hit that lands on it.
+import { goreLevel, isMechanicalArchetype } from '@/game/Fighter';
 import type {
   AudioBus,
   Box3,
   FighterState,
   FxBus,
   HitProperties,
+  HitReaction,
   HitWindow,
   MoveDef,
   SimContext,
@@ -48,6 +60,26 @@ export interface PendingHit {
   attackerId: number;
   window: HitWindow;
   frame: number;
+}
+
+/**
+ * The killing-blow handoff.
+ *
+ * The resolver knows a hit was lethal; it has no business knowing whether this
+ * particular corpse deserves a finisher. It offers every kill to the director
+ * and believes the answer: `true` means "I have taken over, keep your hands
+ * off the KO", `false` means "just kill him normally".
+ *
+ * Which kills are worth a fatality — the dice roll on a mook, the guarantee on
+ * a boss's last breath or on a player going down — is the fight scene's call,
+ * because only it knows what the fight is.
+ */
+export type FatalityHook = (killer: Fighter, victim: Fighter) => boolean;
+
+let fatalityHook: FatalityHook | null = null;
+
+export function setFatalityHook(fn: FatalityHook | null): void {
+  fatalityHook = fn;
 }
 
 /**
@@ -95,21 +127,14 @@ const BLOOD = ['#e8514f', '#b6262c', '#f2a3a0', '#ffffff'];
 const SPARK = ['#fff6cf', '#ffc247', '#ff8a2b', '#9fd8ff'];
 const GUARD = ['#dff1ff', '#7fc4ff', '#ffffff'];
 const PARRY = ['#ffffff', '#ffe9a0', '#8ff0ff'];
-
-/** Archetype fragments that throw sparks and oil instead of blood. */
-const MECHANICAL = [
-  'bot',
-  'drone',
-  'robot',
-  'iot',
-  'fridge',
-  'speaker',
-  'vacuum',
-  'truck',
-  'rocket',
-  'machine',
-  'turret',
-];
+/** Hydraulic fluid. A machine bleeds too, it just bleeds black. */
+const OIL = ['#2b2731', '#181419', '#4a3f2c', '#6b5a3a'];
+/** Meat. Gibs are chunkier and darker than spray. */
+const GIB = ['#c33a3f', '#8e1f26', '#f0b7b1', '#5c2a2f'];
+/** Machine gibs: casing, board, wire. */
+const SCRAP = ['#8f96a3', '#5a5f6b', '#c9d3e0', '#3ad07a'];
+/** What a hit throws when the player asked for no blood at all. */
+const DUST = ['#f4f0e6', '#cfc6b8', '#a89e90'];
 
 /** States in which a fighter is definitely not swinging at anybody. */
 const IDLE_STATES = new Set<FighterState>([
@@ -130,16 +155,28 @@ const IDLE_STATES = new Set<FighterState>([
 /** States in which a fighter cannot be struck at all. */
 const UNHITTABLE = new Set<FighterState>(['dead', 'entering', 'victory']);
 
+/** Reactions violent enough to take something off the body with them. */
+const BRUTAL = new Set<HitReaction>(['launch', 'crumple', 'blowback']);
+
+type SprayKind = 'blood' | 'oil';
+
+/**
+ * The gore emitters the Fx layer owns.
+ *
+ * `SimContext.fx` is typed as the base `FxBus` contract in `core/types.ts`,
+ * which this module may not edit, so the extensions are declared here as
+ * optional members and probed at the call site. When they are absent — an old
+ * Fx, or a stub bus in a test — the resolver draws the same gore out of the
+ * plain particle emitter instead, so nothing about the feature is conditional
+ * on that module having landed.
+ */
+interface GoreFxExt {
+  blood?: (...args: unknown[]) => void;
+  gibs?: (...args: unknown[]) => void;
+}
+
 const STAND_HURT: Box3 = { ox: 0, oy: 25, oz: 0, hw: 10, hh: 26, hd: 10 };
 const LOW_HURT: Box3 = { ox: 0, oy: 11, oz: 0, hw: 12, hh: 12, hd: 10 };
-
-function isMechanical(archetype: string): boolean {
-  const a = archetype.toLowerCase();
-  for (let i = 0; i < MECHANICAL.length; i++) {
-    if (a.indexOf(MECHANICAL[i]) >= 0) return true;
-  }
-  return false;
-}
 
 function hurtboxOf(f: CombatBody): Box3 {
   const hb = f.hurtbox;
@@ -200,12 +237,15 @@ function moveForWindow(w: HitWindow): MoveDef | null {
 
 export class CombatResolver {
   private readonly fx: FxBus;
+  /** The same bus, seen through the gore extensions it may or may not have. */
+  private readonly gfx: FxBus & GoreFxExt;
   private readonly audio: AudioBus;
   private readonly reg = new Map<number, AttackRecord>();
   private readonly pending: PendingHit[] = [];
 
   constructor(fx: FxBus, audio: AudioBus) {
     this.fx = fx;
+    this.gfx = fx as FxBus & GoreFxExt;
     this.audio = audio;
   }
 
@@ -416,7 +456,25 @@ export class CombatResolver {
 
     const dealt = Math.max(0, before - b.health);
     this.impactJuice(b, props, dealt, cx, cy, cz, dir);
-    if (!b.alive) this.koJuice(b, cx, cy, cz);
+    if (b.alive) return;
+
+    // Offer the corpse to the director. If it takes it, everything from here —
+    // the shockwave, the lens pull, the whole KO — belongs to the finisher.
+    if (this.offerFatality(a, b)) return;
+    this.koJuice(b, cx, cy, cz);
+  }
+
+  /**
+   * Hands a killing blow to the fatality director. Returns true when the
+   * director has taken the kill over.
+   *
+   * `gore: 'off'` means no finishers at all, and the cleanest place to enforce
+   * that is here — the director is never even asked, so it cannot start one.
+   */
+  private offerFatality(a: CombatBody, b: CombatBody): boolean {
+    if (!fatalityHook) return false;
+    if (goreLevel() === 'off') return false;
+    return fatalityHook(a as unknown as Fighter, b as unknown as Fighter) === true;
   }
 
   // ── Presentation ───────────────────────────────────────────────────────────
@@ -436,29 +494,19 @@ export class CombatResolver {
     dir: 1 | -1,
   ): void {
     const heavy = props.reaction !== 'light';
-    const metal = isMechanical(b.archetype);
+    const brutal = BRUTAL.has(props.reaction);
+    const metal = isMechanicalArchetype(b.archetype);
     const d = damage > 0 ? damage : props.damage;
+    // The blow keeps travelling, and so does what it knocks out of you.
+    const angle = dir > 0 ? 0.3 : Math.PI - 0.3;
+    const power = clamp(d / 16, 0.3, 2.4) * (brutal ? 1.6 : heavy ? 1.2 : 1);
 
-    this.fx.particles({
-      count: Math.round(clamp(4 + d * 0.7, 4, 22)),
-      x: cx,
-      y: cy,
-      z: cz,
-      angle: dir > 0 ? 0.3 : Math.PI - 0.3,
-      spread: 1.45,
-      speed: [1.1 + d * 0.05, 2.4 + d * 0.16],
-      life: [6, 18],
-      size: [1, 1.2 + d * 0.07],
-      colors: metal ? SPARK : BLOOD,
-      gravity: metal ? 0.2 : 0.28,
-      drag: 0.9,
-      shape: metal ? 'spark' : 'blood',
-      additive: metal,
-      fade: 'ease',
-      spin: 0.25,
-    });
+    this.spray(metal ? 'oil' : 'blood', cx, cy, cz, angle, power);
 
     if (!heavy) return;
+
+    // A launch, a crumple or a blowback takes pieces with it.
+    if (brutal) this.gibs(metal ? 'oil' : 'blood', cx, cy, cz, angle, power);
 
     // Expanding ring at the point of contact, plus a directional nudge on the
     // shake so the camera leans the way the punch went.
@@ -488,35 +536,181 @@ export class CombatResolver {
     });
     this.fx.aberration(clamp(d * 0.02, 0.1, 0.5), 8);
     if (d >= 18) this.fx.shockwave(cx, cy, cz, 26 + d, 12);
+    // A heavy landing on meat has a wet crack under it, and at 'max' you hear
+    // it. The victim already plays the hit itself, so this sits underneath.
+    if (brutal && !metal && goreLevel() === 'max') {
+      this.audio.play('bone_crack', { gain: 0.35, pitch: 1.15 });
+    }
+  }
+
+  // ── Gore ───────────────────────────────────────────────────────────────────
+
+  /**
+   * Blood off the point of contact, thrown along the line of the blow.
+   *
+   * `power` is the hit scaled by how much it hurt: roughly 0.3 for a jab, over
+   * 2 for something that ends a life. Machines get oil and sparks instead —
+   * they are appliances, and an appliance does not bleed.
+   */
+  private spray(
+    kind: SprayKind,
+    x: number,
+    y: number,
+    z: number,
+    angle: number,
+    power: number,
+  ): void {
+    const gore = goreLevel();
+    const oil = kind === 'oil';
+
+    // Sparks are machine damage rather than viscera, so a robot still throws
+    // them with gore off; flesh gets dust, so the hit still reads dry.
+    if (oil) {
+      this.fx.particles({
+        count: Math.round(clamp(4 + power * 6, 4, 20)),
+        x,
+        y,
+        z,
+        angle,
+        spread: 1.45,
+        speed: [1.1 + power, 2.4 + power * 2.6],
+        life: [6, 18],
+        size: [1, 1.2 + power],
+        colors: SPARK,
+        gravity: 0.2,
+        drag: 0.9,
+        shape: 'spark',
+        additive: true,
+        fade: 'ease',
+        spin: 0.25,
+      });
+    }
+    if (gore === 'off') {
+      if (!oil) this.dryPuff(x, y, z, angle, power);
+      return;
+    }
+
+    const amount = power * (gore === 'max' ? 1.8 : 1);
+    if (this.emitGore('blood', kind, x, y, z, angle, amount)) return;
+
+    this.fx.particles({
+      count: Math.round(clamp(4 + amount * 8, 4, 26)),
+      x,
+      y,
+      z,
+      angle,
+      spread: 1.45,
+      speed: [1.1 + amount * 0.8, 2.6 + amount * 2.8],
+      life: [8, 24],
+      size: [1, 1.4 + amount],
+      colors: oil ? OIL : BLOOD,
+      gravity: oil ? 0.22 : 0.3,
+      drag: 0.9,
+      shape: 'blood',
+      additive: false,
+      fade: 'ease',
+      spin: 0.25,
+    });
   }
 
   /**
-   * The victim already announces its own death. What it cannot do is describe
-   * the space around it, so the resolver adds the pressure wave and the lens
-   * pull — and only for a kill that is worth the theatre.
+   * The pieces. Heavier, slower and dirtier than spray — this is the half that
+   * hits the floor and stays there.
+   */
+  private gibs(
+    kind: SprayKind,
+    x: number,
+    y: number,
+    z: number,
+    angle: number,
+    power: number,
+  ): void {
+    const gore = goreLevel();
+    if (gore === 'off') return;
+    const amount = power * (gore === 'max' ? 1.9 : 1);
+    if (this.emitGore('gibs', kind, x, y, z, angle, amount)) return;
+
+    this.fx.particles({
+      count: Math.round(clamp(2 + amount * 4, 2, 16)),
+      x,
+      y,
+      z,
+      angle,
+      // Wide, because a chunk does not care which way the fist went.
+      spread: 2.3,
+      speed: [1.6, 3.4 + amount * 2.2],
+      life: [22, 54],
+      size: [1.6, 2.4 + amount * 1.4],
+      colors: kind === 'oil' ? SCRAP : GIB,
+      gravity: 0.34,
+      drag: 0.95,
+      shape: 'shard',
+      fade: 'ease',
+      spin: 0.5,
+    });
+  }
+
+  /** The bloodless stand-in: impact dust, so a hit still lands visually. */
+  private dryPuff(x: number, y: number, z: number, angle: number, power: number): void {
+    this.fx.particles({
+      count: Math.round(clamp(3 + power * 3, 3, 12)),
+      x,
+      y,
+      z,
+      angle,
+      spread: 1.6,
+      speed: [0.8, 1.8 + power],
+      life: [6, 16],
+      size: [1, 1.6 + power * 0.5],
+      colors: DUST,
+      gravity: 0.05,
+      drag: 0.9,
+      shape: 'smoke',
+      fade: 'ease',
+    });
+  }
+
+  /**
+   * Asks the Fx layer for one of its gore recipes. Returns false when this bus
+   * has no such emitter, which is the caller's cue to draw it out of particles.
+   *
+   * Fx may declare these positionally or as a spec object; optional parameters
+   * do not count toward `Function.length`, so anything expecting a coordinate
+   * list reports two or more and anything taking one spec reports at most one.
+   */
+  private emitGore(
+    name: 'blood' | 'gibs',
+    kind: SprayKind,
+    x: number,
+    y: number,
+    z: number,
+    angle: number,
+    amount: number,
+  ): boolean {
+    const fn = this.gfx[name];
+    if (typeof fn !== 'function') return false;
+    if (fn.length >= 2) fn.call(this.gfx, x, y, z, angle, amount, kind);
+    else fn.call(this.gfx, { x, y, z, angle, amount, kind });
+    return true;
+  }
+
+  /**
+   * A death the director did not want. The victim already announces its own;
+   * what it cannot do is describe the space around it, so the resolver adds the
+   * pressure wave, the lens pull and the last of what was inside it — sized to
+   * whether this kill was worth the theatre.
    */
   private koJuice(b: CombatBody, cx: number, cy: number, cz: number): void {
     const marquee = b.isBoss === true || b.team === 'player';
     this.fx.shockwave(cx, cy, cz, marquee ? 110 : 46, marquee ? 30 : 14);
     this.fx.aberration(marquee ? 0.95 : 0.35, marquee ? 26 : 10);
-    if (!marquee) return;
-    this.fx.particles({
-      count: 20,
-      x: cx,
-      y: cy,
-      z: cz,
-      angle: Math.PI * 0.5,
-      spread: Math.PI * 2,
-      speed: [2, 6.5],
-      life: [18, 44],
-      size: [1.6, 4.2],
-      colors: isMechanical(b.archetype) ? SPARK : BLOOD,
-      gravity: 0.26,
-      drag: 0.93,
-      shape: isMechanical(b.archetype) ? 'shard' : 'blood',
-      fade: 'ease',
-      spin: 0.35,
-    });
+
+    // A death with nobody to finish it still empties out. Straight up, because
+    // there is no blow left to carry it sideways.
+    const metal = isMechanicalArchetype(b.archetype);
+    const kind: SprayKind = metal ? 'oil' : 'blood';
+    this.spray(kind, cx, cy, cz, Math.PI * 0.5, marquee ? 2.4 : 1.1);
+    this.gibs(kind, cx, cy, cz, Math.PI * 0.5, marquee ? 2.2 : 0.9);
   }
 
   private blockJuice(

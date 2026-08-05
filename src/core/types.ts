@@ -431,6 +431,18 @@ export interface RigStyle {
   /** Extra flourishes. */
   tattoo?: 'none' | 'anchor' | 'skull' | 'heart' | 'barcode';
   cigar?: boolean;
+  /**
+   * Cybernetic conversion, 0..1.
+   *
+   * On 'musk' difficulty every dwarf is replaced by the factory copy — the same
+   * silhouette machined out of panelled metal, seams and rivets at the joints,
+   * and an antenna through the hat. Which is, after all, exactly what he has
+   * been trying to build for seventy maps.
+   *
+   * A blend rather than a flag so the select screen can weld one together in
+   * front of you, the same way `outfit` tweens the leather on.
+   */
+  chrome?: number;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -893,6 +905,25 @@ export interface NetConfig {
   port?: number;
   path?: string;
   secure?: boolean;
+  /**
+   * ICE servers for the peer connection.
+   *
+   * STUN alone only works when at least one side can accept an inbound packet
+   * at a predictable address. Behind symmetric NAT or carrier-grade NAT — most
+   * mobile networks and plenty of home ISPs — no STUN candidate will ever pair,
+   * ICE fails, and the connection dies with no relay candidate to fall back on.
+   * A TURN server is the only fix; it relays the traffic when P2P cannot be
+   * established.
+   *
+   * Left undefined, this falls back to STUN-only, which is fine on a LAN and a
+   * coin flip across the internet.
+   */
+  iceServers?: RTCIceServer[];
+  /**
+   * Force every connection through the relay instead of trying P2P first.
+   * Slower and costs relay bandwidth; useful only for testing that TURN works.
+   */
+  forceRelay?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -919,6 +950,66 @@ export interface Settings {
   reducedMotion: boolean;
   showHitboxes: boolean;
   difficulty: 'easy' | 'normal' | 'hard' | 'musk';
+  /**
+   * How much viscera. 'off' keeps the hits and the wear but no blood or
+   * finishers, for streaming and for people who would rather not.
+   */
+  gore: 'off' | 'on' | 'max';
   /** Keyboard bindings per local player slot. */
   bindings: Record<number, Record<string, number>>;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Damage state — how chewed up a fighter looks
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type FaceState =
+  | 'calm'
+  | 'strained' // taking punishment, jaw set
+  | 'angry' // low health, furious
+  | 'exhausted' // nearly out, gasping
+  | 'dazed' // stunned
+  | 'dead';
+
+/**
+ * Everything the rig needs to draw a fighter as the fight wears them down.
+ * Handed to drawCharacter so the SAME character can look untouched, bloodied
+ * or barely standing without a second set of art.
+ */
+export interface RigDamage {
+  /** 0 = fresh, 1 = about to go down. Drives cloth tearing and bruising. */
+  wear: number;
+  /** 0..1 breathing effort. Drives the chest heave and the shoulder sag. */
+  breath: number;
+  face: FaceState;
+  /** Stable per fighter, so stains and tears do not crawl between frames. */
+  seed: number;
+  /** Blood picked up from hits, 0..1. Independent of wear: a clean KO is rare. */
+  blood: number;
+  /** True once the hat has been knocked off, stolen or eaten. */
+  hatless: boolean;
+}
+
+/**
+ * A finisher. Deliberately over the top — this game is a cartoon about hitting
+ * billionaires with a chain, and the fatalities are the punchline.
+ */
+export interface FatalityDef {
+  id: string;
+  /** Shown on the banner: 'ORGAN HARVEST', 'SEVERANCE PACKAGE'. */
+  name: string;
+  /** The line under it. Crude is correct. */
+  banner: string;
+  /** Frames the finisher runs for. */
+  duration: number;
+  /** Who performs it. */
+  by: 'player' | 'enemy' | 'boss';
+  /** When set, only this boss id performs it — the Shiba bites, the car rolls. */
+  boss?: string;
+  /** Relative odds of being chosen. Rare ones are the surprise. */
+  weight: number;
+  gore: 'light' | 'heavy' | 'absurd';
+  /** Bespoke renderer id, resolved by the fatality director. */
+  visual: string;
+  sfx: SfxCue[];
 }

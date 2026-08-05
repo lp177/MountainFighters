@@ -23,10 +23,19 @@
  *
  * Presentation — camera shake, particles, floating text, audio — is routed
  * through Fx/AudioSystem and never feeds back into the simulation.
+ *
+ * FINISHERS. This scene owns the `FatalityDirector` and is the only thing that
+ * decides WHEN one fires: the combat resolver hands over every killing blow
+ * through `setFatalityHook` and asks nothing about it. While a finisher is on
+ * stage the whole fight is frozen — no fighter update, no level update, no
+ * combat pass — and the director gets the frame to itself. See `startFatality`
+ * for the policy and `stepFatality` for the way back out, which is written so
+ * that it cannot fail to happen.
  */
 
 import type {
   DwarfDef,
+  FatalityDef,
   HitProperties,
   NetMessage,
   ParticleSpec,
@@ -68,16 +77,18 @@ import { ParticleSystem } from '@/juice/Particles';
 import { Fx } from '@/juice/Fx';
 import type { AudioSystem } from '@/audio/AudioSystem';
 
-import { Fighter } from '@/game/Fighter';
+import { Fighter, setGoreLevel } from '@/game/Fighter';
 import type { FighterInit } from '@/game/Fighter';
 import { Level } from '@/game/Level';
 import { drawBackdrop } from '@/game/Backdrop';
-import { CombatResolver } from '@/game/combat/Combat';
+import { CombatResolver, setFatalityHook } from '@/game/combat/Combat';
 import { registerMove } from '@/game/combat/Moves';
+import { FatalityDirector } from '@/game/Fatality';
 
 import { DWARFS, getDwarf } from '@/content/dwarfs';
 import { getMap } from '@/content/maps';
 import { BOSS_INTROS } from '@/content/story';
+import { pickFatality, resetFatalityHistory } from '@/content/fatalities';
 
 import type { NetSession } from '@/net/NetSession';
 import type { Lockstep } from '@/net/Lockstep';
@@ -196,6 +207,26 @@ const METER_CARRY = 0.5;
 /** Health handed back at the start of each new map, as a fraction of the bar. */
 const MAP_HEAL = 0.4;
 
+/**
+ * Odds an ordinary enemy kill earns a finisher.
+ *
+ * A boss and a player die with one every single time — those are the moments
+ * the book was written for. A guard does not: a beat-em-up kills forty of them
+ * an hour, and a three-second cutscene on every one of them stops being a treat
+ * and becomes a tax on the pace of the wave.
+ */
+const FATALITY_CHANCE = 0.35;
+
+/**
+ * Frames of grace past a finisher's own duration before it is shot.
+ *
+ * The director retires itself on the frame after `duration` and there is no
+ * known way for it not to. This is here because "the fight never resumes" is
+ * the single worst bug this feature could have, and a watchdog costs one
+ * integer compare per frame.
+ */
+const FATALITY_GRACE = 120;
+
 const DIFFICULTY_HEALTH: Record<Settings['difficulty'], number> = {
   easy: 1.35,
   normal: 1,
@@ -285,6 +316,28 @@ class PlayerFighter extends Fighter {
     priv.flash = 0;
     // Long enough that nobody gets bodied the instant they blink back in.
     priv.invulnFrames = 96;
+
+    /*
+     * A new life is a clean one.
+     *
+     * The damage channel only ever climbs — that is deliberate, so healing
+     * patches the health bar and not the jacket — which means without this a
+     * dwarf who came back from the dead would walk on soaked in his own blood,
+     * wheezing, and with no hat, for the next sixty-nine maps. The health floor
+     * puts the wear straight back on the next frame if he is still hurt, so a
+     * map transition that carries damage still looks like it carried damage.
+     */
+    priv.wearAccum = 0;
+    priv.bloodAccum = 0;
+    priv.breathBase = 0;
+    priv.breathSpike = 0;
+    priv.strainTimer = 0;
+    const d = this.damage;
+    d.wear = 0;
+    d.blood = 0;
+    d.breath = 0;
+    d.face = 'calm';
+    d.hatless = false;
 
     this.meter = clamp(keepMeter, 0, this.meter);
   }
@@ -694,6 +747,14 @@ export class FightScene implements Scene {
   private rng: Rng;
   private readonly sim: SimContext;
 
+  private fatality: FatalityDirector;
+  /** Frames the current performance has run for, and its hard ceiling. */
+  private fatalityFrames = 0;
+  private fatalityLimit = 0;
+  /** Last values pushed downstream, so a change from the pause menu is noticed. */
+  private goreSeen: Settings['gore'];
+  private motionSeen: boolean;
+
   private picks: FightPlayerPick[] = [];
   private players: PlayerFighter[] = [];
   private localSlots: number[] = [];
@@ -742,6 +803,29 @@ export class FightScene implements Scene {
     this.combat = new CombatResolver(this.fx, host.audio);
     this.rng = makeRng(1);
     this.sim = this.makeSim();
+
+    this.goreSeen = this.settings.gore;
+    this.motionSeen = this.settings.reducedMotion === true;
+    this.fatality = this.makeDirector();
+  }
+
+  /**
+   * A director bound to the presentation systems as they stand right now.
+   *
+   * Rebuilt in `enter()` for the same reason the CombatResolver is: the camera,
+   * the Fx bus and the RNG are all resolved there, and a director still holding
+   * the placeholders from the constructor would zoom a camera nobody is looking
+   * through.
+   */
+  private makeDirector(): FatalityDirector {
+    return new FatalityDirector({
+      fx: this.fx,
+      audio: this.host.audio,
+      cam: this.cam,
+      rng: this.rng,
+      gore: this.settings.gore,
+      reducedMotion: this.settings.reducedMotion === true,
+    });
   }
 
   // ── lifecycle ──────────────────────────────────────────────────────────────
@@ -773,6 +857,18 @@ export class FightScene implements Scene {
     if (!Number.isFinite(seed) || seed === 0) seed = randomSeed();
     this.seed = seed >>> 0;
     this.rng = makeRng(this.seed);
+
+    // The gore setting is global to the fight — Fighter and the combat resolver
+    // read it from one module-level value rather than each holding a Settings
+    // reference — so push it out before anything is built.
+    setGoreLevel(this.settings.gore);
+    this.goreSeen = this.settings.gore;
+    this.motionSeen = this.settings.reducedMotion === true;
+    this.fatality = this.makeDirector();
+    this.fatalityFrames = 0;
+    this.fatalityLimit = 0;
+    resetFatalityHistory();
+    setFatalityHook(this.onFatality);
 
     this.mapIndex = clamp(Math.round(p.mapIndex ?? 1), 1, TOTAL_MAPS);
     this.score = Math.max(0, Math.round(p.score ?? 0));
@@ -811,6 +907,13 @@ export class FightScene implements Scene {
   }
 
   exit(): void {
+    // Ours only while we are the fight. Leaving it installed would hand the
+    // next scene's kills — a demo attract loop, a replay — to a director whose
+    // camera is no longer on screen.
+    setFatalityHook(null);
+    this.endFatality();
+    resetFatalityHistory();
+
     this.host.loop.timeScale = 1;
     this.host.loop.hitstop = 0;
     this.particles.clear();
@@ -855,10 +958,20 @@ export class FightScene implements Scene {
   update(_dt: number): void {
     if (this.paused || this.finished || !this.level) return;
 
+    this.syncSettings();
+
     const ls = this.lockstep;
     if (ls?.desynced) {
       // A desync is not something to play through. Freeze, and say so loudly.
       this.netError = 'DESYNC';
+      return;
+    }
+
+    // A finisher owns the frame outright: no input, no fighters, no level, no
+    // combat pass. Everything the player can see for the next few seconds is
+    // being drawn by the director.
+    if (this.fatality.active) {
+      this.stepFatality();
       return;
     }
 
@@ -930,6 +1043,159 @@ export class FightScene implements Scene {
     }
 
     this.advancePhase();
+  }
+
+  // ── finishers ──────────────────────────────────────────────────────────────
+
+  /**
+   * The killing blow, offered by the combat resolver.
+   *
+   * Returning true means "I have taken this kill": the resolver drops its own
+   * K.O. juice on the floor and everything the player sees from here is the
+   * finisher. Returning false leaves the ordinary death exactly as it was, which
+   * is what makes every guard clause below safe to write.
+   */
+  private readonly onFatality = (killer: Fighter, victim: Fighter): boolean =>
+    this.startFatality(killer, victim);
+
+  private startFatality(killer: Fighter, victim: Fighter): boolean {
+    const level = this.level;
+    if (!level) return false;
+    // 'off' means off. The resolver checks it too; this is the other end of the
+    // same promise, and the one a hand-written test would reach past.
+    if (this.settings.gore === 'off') return false;
+    if (this.fatality.active) return false;
+    if (this.finished || this.paused) return false;
+    // The map is already over, or has not started. A finisher played across a
+    // MAP CLEAR banner is a finisher nobody is watching.
+    if (this.phase !== 'fight' && this.phase !== 'intro') return false;
+    if (killer.id === victim.id) return false;
+
+    /*
+     * Not over the wire.
+     *
+     * A finisher freezes the simulation for two or three seconds, and the gore
+     * setting is a LOCAL preference — the fatality director says so itself, and
+     * the resolver already refuses to even ask when this end has gore off. Two
+     * peers who disagree about it would therefore freeze for different lengths
+     * of time, and lockstep would spend the difference showing both of them a
+     * "waiting for the other side" banner. Rather than smuggle a local
+     * preference into a shared clock, a match with somebody else in it simply
+     * gets the ordinary K.O. A room nobody has joined yet is still a solo fight,
+     * and keeps its finishers.
+     */
+    if (this.lockstep?.active) return false;
+    if (this.net && this.net.players.length > 1) return false;
+
+    let by: FatalityDef['by'];
+    let bossId: string | undefined;
+
+    if (victim.team === 'player') {
+      // Losing is where the best of the book lives: the hat gets eaten, the
+      // Shiba takes a leg, the car parks on you. A player never dies quietly.
+      if (killer.team === 'player') return false;
+      by = killer.isBoss ? 'boss' : 'enemy';
+      if (killer.isBoss) bossId = killer.archetype;
+    } else {
+      if (killer.team !== 'player') return false;
+      by = 'player';
+      // A boss always. A guard sometimes — see FATALITY_CHANCE.
+      if (!victim.isBoss && !this.rng.chance(FATALITY_CHANCE)) return false;
+    }
+
+    let def = pickFatality(by, this.rng, bossId, this.settings.gore);
+    // A boss with nothing of its own left in the book at this gore setting still
+    // gets a send-off, rather than silently dropping back to a plain K.O.
+    if (!def && bossId !== undefined) {
+      def = pickFatality('enemy', this.rng, undefined, this.settings.gore);
+    }
+    if (!def) return false;
+
+    if (!this.fatality.start(def, killer, victim)) return false;
+
+    this.fatalityFrames = 0;
+    this.fatalityLimit = Math.max(30, Math.round(def.duration)) + FATALITY_GRACE;
+    level.beginFatality(killer.id, victim.id);
+    return true;
+  }
+
+  /**
+   * One frame of a performance.
+   *
+   * The sim is not running, so the presentation systems are stepped here by
+   * exactly the same rule the fight uses: only when nobody else owns them.
+   */
+  private stepFatality(): void {
+    const fd = this.fatality;
+
+    /*
+     * Pause still works.
+     *
+     * Escape arrives through the DOM and needs nothing from us, but Start on a
+     * pad only exists if somebody samples the pad — and the sim clock is frozen,
+     * so we sample against the LOOP's frame instead. It is not the netcode's
+     * clock and it must not be: `simFrame` is what lockstep counts, and this
+     * path deliberately never runs in a netplay fight.
+     */
+    const sampled =
+      (this.host.input as unknown as { frame?: number }).frame === this.host.loop.frame;
+    if (!sampled) this.host.input.sampleAll(this.host.loop.frame);
+    if (this.wantsPause()) {
+      this.openPause();
+      return;
+    }
+
+    fd.update();
+    this.fatalityFrames++;
+
+    if (this.ownsPresentation) {
+      this.cam.update();
+      this.particles.update();
+      this.fx.update();
+    }
+
+    // The director retires itself on the frame after its own duration. If it
+    // ever does not, this does it for it — a fight that never resumes is the
+    // one failure this feature is not allowed to have.
+    if (this.fatalityFrames > this.fatalityLimit) fd.cancel();
+    if (fd.done || !fd.active) this.endFatality();
+  }
+
+  /** Give the fight its camera, its map and its framing back. Idempotent. */
+  private endFatality(): void {
+    // `fatalityLimit` is set the moment one starts and cleared here, so it is
+    // also the answer to "was there a show at all", which keeps this safe to
+    // call from enter(), exit() and every map transition.
+    const had = this.fatality.active || this.fatalityLimit > 0;
+    if (this.fatality.active) this.fatality.cancel();
+    this.fatalityFrames = 0;
+    this.fatalityLimit = 0;
+    this.level?.endFatality();
+    // `cancel()` restores the zoom it borrowed, but only the one it saved; this
+    // is what a cancel from anywhere else lands on.
+    if (had) this.cam.zoom = FIGHT_ZOOM;
+  }
+
+  /**
+   * Settings the player can change from the pause menu, pushed out on the first
+   * frame after they change and never re-pushed. Three compares a frame.
+   */
+  private syncSettings(): void {
+    const gore = this.settings.gore;
+    if (gore !== this.goreSeen) {
+      this.goreSeen = gore;
+      setGoreLevel(gore);
+      this.fatality.setGore(gore);
+      // Turning it off mid-performance stops the performance. That is the whole
+      // point of the switch.
+      if (gore === 'off' && this.fatality.active) this.endFatality();
+    }
+
+    const reduced = this.settings.reducedMotion === true;
+    if (reduced !== this.motionSeen) {
+      this.motionSeen = reduced;
+      this.fatality.setReducedMotion(reduced);
+    }
   }
 
   private advancePhase(): void {
@@ -1072,6 +1338,12 @@ export class FightScene implements Scene {
 
   private buildLevel(carry: boolean): void {
     const def = getMap(this.mapIndex);
+
+    // Whatever was on stage belonged to the map we are leaving, and the joke
+    // history with it: a new map should not open with the three finishers the
+    // last one just banned.
+    this.endFatality();
+    resetFatalityHistory();
 
     for (let i = 0; i < this.players.length; i++) {
       const f = this.players[i];
@@ -1393,6 +1665,10 @@ export class FightScene implements Scene {
       // stays registered with the scenery above. See FIGHT_FRAME_Y.
       if (FIGHT_FRAME_Y !== 0) ctx.translate(0, FIGHT_FRAME_Y);
       level.render(ctx, this.cam, alpha);
+      // Between the map and the juice: the performance stands where the two
+      // fighters stood — the Level has struck them from its own draw list — and
+      // the blood it throws lands in front of it.
+      this.fatality.render(ctx, this.cam);
       if (this.host.renderWorldFx) {
         this.host.renderWorldFx(ctx);
       } else {
@@ -1410,6 +1686,10 @@ export class FightScene implements Scene {
         mapTotal: TOTAL_MAPS,
         names: this.nameMap(),
       });
+      // Over the HUD on purpose: the letterbox and the title card are the frame
+      // around the shot, and a health bar poking through the black is exactly
+      // the sort of thing that says "this is a game" at the wrong moment.
+      this.fatality.renderOverlay(ctx);
       this.drawIntro(ctx);
       this.drawBossIntro(ctx);
       this.drawClear(ctx);

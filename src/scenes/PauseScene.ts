@@ -30,6 +30,8 @@ import { Ui, setReducedMotion } from '@/ui/Ui';
 import { keyBindingEditor } from '@/ui/KeyBindingEditor';
 import { button, panel, slider, toggle } from '@/ui/Widgets';
 
+import { setGoreLevel } from '@/game/Fighter';
+
 import { NetSession } from '@/net/NetSession';
 import { inviteLink } from '@/net/Room';
 
@@ -400,6 +402,27 @@ const DISPLAY = 'Impact, "Arial Black", "Helvetica Neue", system-ui, sans-serif'
  * way the player's own keyboard names it. The pad cannot be remapped here, so
  * it stays a table.
  */
+/**
+ * The gore control, as a three-stop slider.
+ *
+ * A slider rather than three radio buttons because the setting really is a
+ * dial — off, on, more — and because it then behaves exactly like the screen
+ * shake row sitting above it: same widget, same keyboard, same left/right on a
+ * d-pad through `MenuInput.adjust`. The labels are what the player reads; the
+ * index is an implementation detail that never leaves this file.
+ */
+const GORE_LEVELS: readonly Settings['gore'][] = ['off', 'on', 'max'];
+const GORE_LABELS: readonly string[] = ['Off', 'On', 'Maximum'];
+
+function goreIndex(level: Settings['gore']): number {
+  const i = GORE_LEVELS.indexOf(level);
+  return i < 0 ? 1 : i;
+}
+
+function goreAt(v: number): Settings['gore'] {
+  return GORE_LEVELS[clamp(Math.round(v), 0, GORE_LEVELS.length - 1)] ?? 'on';
+}
+
 const PAD_ROWS: readonly (readonly [string, string])[] = [
   ['Move', 'Left stick / d-pad'],
   ['Light attack', 'A / ✕'],
@@ -643,6 +666,32 @@ export class PauseScene implements Scene {
           step: 0.1,
           format: (v) => `${Math.round(v * 100)}%`,
           help: 'Zero turns the camera kick off completely.',
+        },
+      ),
+    );
+    body.appendChild(
+      slider(
+        'Gore',
+        0,
+        GORE_LEVELS.length - 1,
+        goreIndex(s.gore),
+        (v) => {
+          const level = goreAt(v);
+          if (level === s.gore) return;
+          s.gore = level;
+          // One module-level value drives the fighters, the combat resolver and
+          // the fatality director, so this lands on the fight frozen behind this
+          // menu rather than on the next one.
+          setGoreLevel(level);
+          this.host.audio.play(level === 'off' ? 'ui_back' : 'hit_flesh', { gain: 0.7 });
+          this.persist();
+        },
+        {
+          step: 1,
+          format: (v) => GORE_LABELS[clamp(Math.round(v), 0, GORE_LABELS.length - 1)] ?? 'On',
+          help:
+            'Off keeps the punches, the torn clothes and the wheezing — no blood, no finishers. ' +
+            'Maximum is a decision you are making on purpose.',
         },
       ),
     );

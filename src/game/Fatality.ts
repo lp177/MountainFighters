@@ -269,17 +269,6 @@ function posePlank(i: number, k: number): Pose {
   return p;
 }
 
-/** Hanging from something above: shoulders up, feet dangling. */
-function poseDangle(i: number, sway: number): Pose {
-  const p = P(i);
-  spine(p, -0.1 + sway * 0.1, -0.08, 0.12, 0.3);
-  arms(p, -0.35 + sway * 0.2, 0.4, -0.3 - sway * 0.2, 0.38);
-  legs(p, 0.35 + sway * 0.25, 0.55, 0.15 - sway * 0.25, 0.7, 0.3, 0.25);
-  hips(p, -0.05, 0, 0);
-  head2(p, 0.2, 0.35);
-  return p;
-}
-
 /** Both arms up, grasping at something out of reach. */
 function poseReach(i: number, up: number): Pose {
   const p = P(i);
@@ -374,7 +363,7 @@ function poseSmug(i: number, bob: number): Pose {
 interface Stage {
   ctx: C2D;
   fx: Fx;
-  audio: AudioBus;
+  /** Cues and shakes go through the director, which is what schedules them. */
   d: FatalityDirector;
   def: FatalityDef;
   killer: Fighter;
@@ -402,6 +391,8 @@ interface Stage {
   mx: number;
   /** 0 when gore is off, 1 on, 1.8 at max. Multiplies every emission. */
   gore: number;
+  /** Victim is metal: draw sparks and oil, never blood. */
+  mechanical: boolean;
   reduced: boolean;
   seed: number;
 }
@@ -416,12 +407,6 @@ interface Visual {
 /** 0 before `a`, 1 after `b`, linear between. The spine of every renderer. */
 function seg(t: number, a: number, b: number): number {
   return b <= a ? (t >= b ? 1 : 0) : clamp((t - a) / (b - a), 0, 1);
-}
-
-/** A 0→1→0 hump across [a, b]. Impacts, flashes, squashes. */
-function pulse(t: number, a: number, b: number): number {
-  const u = seg(t, a, b);
-  return Math.sin(u * Math.PI);
 }
 
 /** Deterministic value noise so a wobble is the same wobble on every peer. */
@@ -443,12 +428,18 @@ function depthScale(z: number): number {
   return clamp(1 - (Z_DEPTH - z) * Z_PERSPECTIVE, 0.75, 1);
 }
 
-/** Standing height of a skeleton in rig units, feet to crown. */
+/**
+ * Standing height of a skeleton in rig units, feet to crown.
+ *
+ * Walked rather than hard-coded: the dwarf skeleton and the human one are 46
+ * and 72 units tall, bosses scale on top of that, and a prop sized off the
+ * wrong one lands at the wrong height on half the cast.
+ */
 function rigHeight(f: Fighter): number {
   let h = 0;
   for (const b of f.skeleton) {
-    if (b.name === 'pelvis') h += b.y + b.length * 0;
-    if (b.name === 'torso' || b.name === 'chest' || b.name === 'neck' || b.name === 'head') {
+    if (b.name === 'pelvis') h += b.y;
+    else if (b.name === 'torso' || b.name === 'chest' || b.name === 'neck' || b.name === 'head') {
       h += b.length;
     }
   }
@@ -489,6 +480,7 @@ function vict(
   alpha = 1,
   flash = 0,
   facing?: Facing,
+  tint?: string,
 ): void {
   actor(
     s,
@@ -500,6 +492,7 @@ function vict(
     s.vs,
     alpha,
     flash,
+    tint,
   );
 }
 
@@ -529,8 +522,6 @@ function clipRect(s: Stage, x: number, y: number, w: number, h: number, fn: () =
   fn();
   ctx.restore();
 }
-
-const TEXT_SCRATCH: number[] = [];
 
 function label(
   s: Stage,
@@ -653,6 +644,10 @@ function spray(
   spread: number,
   speed = 3.4,
 ): void {
+  if (s.mechanical) {
+    sparks(s, sx, sy, Math.max(4, Math.round(count * 0.7)), angle);
+    return;
+  }
   if (s.gore <= 0) return;
   emit(s, sx, sy, count * s.gore, angle, spread, speed * 0.35, speed, BLOOD_COLORS, 'blood', 0.36, 2.8, 46);
 }
@@ -875,8 +870,8 @@ export class FatalityDirector {
     this.stage = {
       ctx: null as unknown as C2D,
       fx: this.fx,
-      audio: this.audio,
       d: this,
+      mechanical: false,
       def: null as unknown as FatalityDef,
       killer: null as unknown as Fighter,
       victim: null as unknown as Fighter,
@@ -950,6 +945,12 @@ export class FatalityDirector {
     s.f = 0;
     s.t = 0;
     s.gore = goreMul(this.gore);
+    // Machines do not bleed. The blood helpers all fall through to their dry
+    // variants at gore 0, so zeroing it here routes a vacuum bot or a
+    // Cybertruck down the sparks-and-oil path instead of spraying arterial red
+    // out of a chassis. Combat already did this; the finishers never did.
+    s.mechanical = victim.mechanical;
+    if (s.mechanical) s.gore = 0;
     s.reduced = this.reduced;
     // Seeded from the pair and the RNG's CURRENT state — read, never advanced.
     s.seed = ((killer.id * 73856093) ^ (victim.id * 19349663) ^ this.rng.getState()) >>> 0;
@@ -1197,8 +1198,6 @@ export class FatalityDirector {
     ctx.fillStyle = '#e8e2ff';
     ctx.fillText(def.banner, 0, 10);
     ctx.restore();
-
-    if (TEXT_SCRATCH.length > 0) TEXT_SCRATCH.length = 0;
   }
 }
 
@@ -1671,7 +1670,10 @@ VISUALS.eula_scroll = {
       vict(s, 0, 0, p, 1 - dustK * 0.9);
       // Grey creeps up the beard, because nothing else on the rig can age.
       if (age > 0.3) {
-        s.ctx.globalAlpha *= (age - 0.3) * 1.2;
+        // save/restore rather than multiply-and-divide: this factor starts at
+        // zero, and dividing an alpha back out by ~0 loses the alpha entirely.
+        s.ctx.save();
+        s.ctx.globalAlpha *= clamp((age - 0.3) * 1.2, 0, 1);
         capsule(
           s.ctx,
           px - dir * 1, py + s.vh * 0.08,
@@ -1680,7 +1682,7 @@ VISUALS.eula_scroll = {
           '#e6e2ea',
           'none',
         );
-        s.ctx.globalAlpha /= (age - 0.3) * 1.2;
+        s.ctx.restore();
       }
     }
     if (dustK > 0) {
@@ -1766,12 +1768,23 @@ VISUALS.off_frame_toss = {
     const splat = seg(t, 0.72, 0.8);
     const dir = s.dir;
 
-    const kp = splat > 0
-      ? poseSmug(1, Math.sin(t * 5))
-      : wait > 0
-        ? poseStand(1, Math.sin(t * 4))
-        : poseSwing(1, release);
-    kill(s, 0, 0, kp);
+    if (splat >= 1) {
+      // He wipes his face. He does not look at what he is wiping off.
+      const wipe = seg(t, 0.82, 0.94);
+      const p = P(1);
+      arms(p, -0.3, 0.4, -1.9 + wipe * 0.6, 1.7);
+      hands(p, 0, -0.4);
+      spine(p, -0.05, -0.05, 0.05, 0.1);
+      legs(p, 0.05, 0.1, -0.05, 0.1);
+      kill(s, 0, 0, p);
+    } else {
+      const kp = splat > 0
+        ? poseSmug(1, Math.sin(t * 5))
+        : wait > 0
+          ? poseStand(1, Math.sin(t * 4))
+          : poseSwing(1, release);
+      kill(s, 0, 0, kp);
+    }
 
     if (gone < 1) {
       const u = easeOut(release);
@@ -1801,16 +1814,6 @@ VISUALS.off_frame_toss = {
       } else {
         ellipse(s.ctx, x, y, 5, 3.4, 0, '#6d6470', INK, 1);
       }
-    }
-    if (splat >= 1) {
-      // He wipes his face. He does not look at what he is wiping off.
-      const wipe = seg(t, 0.82, 0.94);
-      const p = P(1);
-      arms(p, -0.3, 0.4, -1.9 + wipe * 0.6, 1.7);
-      hands(p, 0, -0.4);
-      spine(p, -0.05, -0.05, 0.05, 0.1);
-      legs(p, 0.05, 0.1, -0.05, 0.1);
-      kill(s, 0, 0, p);
     }
   },
   tick(s) {
@@ -2029,4 +2032,2116 @@ VISUALS.cubicle_seal = {
   },
 };
 
-// APPEND-POINT
+// ── ENEMY — the damage type is humiliation ───────────────────────────────────
+
+/** Where a fighter's mouth is, near enough, on both skeletons. */
+function mouthX(s: Stage): number {
+  return s.kx + s.dir * s.kh * 0.11;
+}
+function mouthY(s: Stage): number {
+  return s.ky - s.kh * 0.87;
+}
+
+/**
+ * HAT TRICK — he takes the hat and he EATS it.
+ *
+ * This one is the whole brief in miniature and it is allowed to be slow. The
+ * beats that make it work are the ones with no violence in them at all: the
+ * reach, the chewing, the swallow travelling down the neck, and the small
+ * satisfied belch afterwards. The dwarf is not killed. He is bareheaded, in
+ * public, and that turns out to be enough.
+ */
+VISUALS.hat_eat = {
+  banner: 0.72,
+  draw(s) {
+    const t = s.t;
+    const snatch = seg(t, 0.04, 0.14);
+    const reach = seg(t, 0.14, 0.3);
+    const raise = seg(t, 0.3, 0.38);
+    const chew = seg(t, 0.38, 0.6);
+    const gulp = seg(t, 0.6, 0.7);
+    const belch = seg(t, 0.72, 0.82);
+    const die = seg(t, 0.82, 1);
+    const dir = s.dir;
+
+    // The eater. Head tips back for the last of it, jaw working throughout.
+    const kp = P(1);
+    const jaw = chew > 0 && chew < 1 ? Math.sin(chew * 46) * 0.16 : 0;
+    const back = raise * 0.5 - gulp * 0.2;
+    spine(kp, -0.06 - back * 0.2, -0.05, -0.2 * back + jaw * 0.3, -0.45 * back + jaw);
+    arms(
+      kp,
+      -0.3,
+      0.5,
+      snatch > 0 ? lerp(-0.2, -1.55, easeOut(raise + snatch * 0.35)) : 0,
+      lerp(0.2, 1.5, easeOut(raise)),
+    );
+    hands(kp, 0, -0.3);
+    legs(kp, 0.05, 0.12, -0.05, 0.12);
+    kill(s, 0, 0, kp);
+
+    // The bulge going down. Ridiculous, and the frame it happens on is the one
+    // people remember.
+    if (gulp > 0 && gulp < 1) {
+      const u = easeInOut(gulp);
+      const bx = s.kx + dir * s.kh * 0.04;
+      const by = lerp(mouthY(s) + 3, s.ky - s.kh * 0.62, u);
+      ellipse(s.ctx, bx, by, s.kh * 0.07, s.kh * 0.055, 0, s.killer.style.skin, INK, 1.2);
+    }
+    if (belch > 0 && belch < 1) {
+      shout(s, 'BURP', mouthX(s) + dir * 12, mouthY(s) - 10, belch, 10, '#c8f5d8');
+      // One pom-pom scrap escapes, and floats.
+      ellipse(
+        s.ctx,
+        mouthX(s) + dir * (6 + belch * 16),
+        mouthY(s) - belch * 22,
+        1.8, 1.8, 0,
+        s.victim.style.hatColor,
+        INK, 0.8,
+      );
+    }
+
+    // The hat: on the head, in the hand, then in stages, gone.
+    if (snatch < 1 || chew < 1) {
+      const u = easeOut(snatch);
+      const hx = lerp(s.vx, mouthX(s), Math.max(u, chew > 0 ? 1 : 0));
+      const hy = lerp(s.vy - s.vh * 1.02, mouthY(s), Math.max(u, chew > 0 ? 1 : 0));
+      const bites = Math.floor(chew * 4);
+      const left = clamp(1 - bites * 0.25 - (chew >= 1 ? 1 : 0), 0, 1);
+      if (left > 0.02) {
+        drawLooseHat(
+          s.ctx,
+          s.victim.style,
+          hx + dir * chew * 3,
+          hy,
+          (0.5 + snatch * 0.9) * dir + Math.sin(t * 18) * 0.05 * chew,
+          s.vs * left,
+        );
+      }
+    }
+
+    // The dwarf: reaches for it, does not get it, and folds.
+    const vp = P(0);
+    hatGone(vp);
+    if (die > 0) {
+      const k = easeIn(die);
+      if (k < 0.55) {
+        const kp2 = poseKneel(0, k / 0.55);
+        hatGone(kp2);
+        vict(s, 0, 0, kp2);
+      } else {
+        const pp = posePlank(0, (k - 0.55) / 0.45);
+        hatGone(pp);
+        vict(s, 0, 0, pp);
+      }
+    } else {
+      const up = reach * (1 - raise * 0.4);
+      const r = poseReach(0, up);
+      hatGone(r);
+      body(r, dir * up * 2, up > 0.6 ? Math.abs(Math.sin(t * 20)) * 2 : 0);
+      vict(s, 0, 0, r);
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (at(0.05)) {
+      s.d.cue('pickup', 0.9);
+      s.victim.damage.hatless = true;
+    }
+    if (at(0.16)) s.d.cue('grunt', 1.3, 0.5);
+    // Four bites, each with its own crunch and a puff of felt.
+    for (let i = 0; i < 4; i++) {
+      if (at(0.4 + i * 0.05)) {
+        s.d.cue('hit_flesh', 1.5 + i * 0.1, 0.45);
+        emit(
+          s, mouthX(s), mouthY(s), 5, -Math.PI * 0.5, 2.2, 0.6, 1.8,
+          [s.victim.style.hatColor, '#f2ecdc'], 'dot', 0.16, 1.6, 30,
+        );
+      }
+    }
+    if (at(0.62)) s.d.cue('drop', 0.5, 0.8);
+    if (at(0.73)) s.d.cue('laugh', 0.8, 0.7);
+    if (at(0.95)) {
+      s.d.cue('ko', 0.9);
+      s.d.hit(4, 12);
+      dust(s, s.vx, s.gy, 10, 1.6);
+    }
+  },
+};
+
+/** ROOF TOSS — the hat goes up. The dwarf does not. */
+VISUALS.hat_roof = {
+  banner: 0.74,
+  draw(s) {
+    const t = s.t;
+    const snatch = seg(t, 0.04, 0.12);
+    const wind = seg(t, 0.12, 0.2);
+    const throwK = seg(t, 0.2, 0.28);
+    const reach = seg(t, 0.3, 0.66);
+    const give = seg(t, 0.7, 0.8);
+    const fall = seg(t, 0.82, 1);
+    const dir = s.dir;
+
+    const kp = throwK > 0 ? poseSwing(1, throwK) : poseThrust(1, snatch + wind * 0.4, 0.5);
+    kill(s, 0, 0, throwK >= 1 ? poseSmug(1, Math.sin(t * 5)) : kp);
+
+    if (throwK < 1) {
+      const u = easeOut(Math.max(snatch, throwK));
+      const hx = lerp(s.vx, s.kx + dir * s.kh * 0.3, easeOut(snatch));
+      const hy = lerp(s.vy - s.vh * 1.02, s.ky - s.kh * 1.3, easeOut(snatch));
+      const fx = lerp(hx, hx + dir * 40, easeOut(throwK));
+      const fy = lerp(hy, hy - 240, easeIn(throwK));
+      drawLooseHat(s.ctx, s.victim.style, fx, fy, t * 14 * dir, s.vs * (1 - u * 0.1));
+    } else {
+      // The ledge, and the hat on it, exactly as unreachable as it looks.
+      const ly = s.gy - s.vh * 3.4;
+      roundRect(s.ctx, s.vx - 90, ly, 180, 8, 1, '#3a3f4a', INK, 1.6);
+      drawLooseHat(s.ctx, s.victim.style, s.vx + dir * 24, ly, -0.15 * dir, s.vs * 0.9);
+    }
+
+    const vp = P(0);
+    hatGone(vp);
+    if (fall > 0) {
+      const pp = posePlank(0, easeIn(fall));
+      hatGone(pp);
+      vict(s, 0, 0, pp);
+    } else {
+      const up = reach * (1 - give);
+      const hop = up > 0.4 && give < 0.5 ? Math.max(0, Math.sin(t * 26)) * 5 : 0;
+      const r = poseReach(0, up);
+      hatGone(r);
+      body(r, 0, hop);
+      // The arm gets a little higher every time, which is the sad bit.
+      if (up > 0.3) r.armR_upper!.rot = (r.armR_upper!.rot ?? 0) - 0.15 * Math.sin(t * 13);
+      vict(s, 0, -hop, r);
+      if (give > 0.2) shout(s, '. . .', s.vx + dir * 16, s.vy - s.vh * 1.3, give, 9, '#cfc8e0');
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (at(0.05)) {
+      s.d.cue('pickup', 0.9);
+      s.victim.damage.hatless = true;
+    }
+    if (at(0.22)) s.d.cue('whiff', 1.2);
+    if (at(0.36)) s.d.cue('ui_error', 0.8, 0.4);
+    if (at(0.72)) s.d.cue('ui_error', 0.6, 0.5);
+    if (at(0.9)) {
+      s.d.cue('land', 0.7);
+      s.d.hit(5, 14);
+      dust(s, s.vx, s.gy, 12, 1.8);
+    }
+  },
+};
+
+/** PERFORMANCE IMPROVEMENT PLAN — beaten with a rolled-up document. */
+VISUALS.pip_beating = {
+  banner: 0.68,
+  draw(s) {
+    const t = s.t;
+    const produce = seg(t, 0.04, 0.16);
+    const beat = seg(t, 0.18, 0.72);
+    const dir = s.dir;
+    const HITS = 7;
+    const phase = beat * HITS;
+    const idx = Math.min(HITS - 1, Math.floor(phase));
+    const swingK = phase - idx;
+    const landing = swingK > 0.55 && beat > 0 && beat < 1;
+
+    kill(s, 0, 0, beat > 0 && beat < 1 ? poseSwing(1, clamp((swingK - 0.2) / 0.6, 0, 1)) : posePresent(1, produce));
+
+    // The document: a rolled tube, held at one end, arriving at a head.
+    const hx = s.kx + dir * s.kh * (0.16 + swingK * 0.5);
+    const hy = s.ky - s.kh * (1.3 - swingK * 0.5);
+    if (produce > 0.2) {
+      const ang = (beat > 0 ? lerp(-2.2, 0.4, swingK) : -1.6) * dir;
+      const ex = hx + Math.sin(ang) * s.kh * 0.42;
+      const ey = hy + Math.cos(ang) * s.kh * 0.42;
+      capsule(s.ctx, hx, hy, ex, ey, s.kh * 0.05, PAPER, INK, 1.4);
+      ellipse(s.ctx, ex, ey, s.kh * 0.05, s.kh * 0.05, ang, '#d8cdb4', INK, 1);
+    }
+
+    const wob = landing ? 1 : 0;
+    const vp = P(0);
+    const wear = clamp(beat * 1.2, 0, 1);
+    spine(vp, 0.25 + wear * 0.5, 0.2 + wear * 0.3, 0.1, 0.3 + wear * 0.4);
+    arms(vp, 0.6 + wear * 0.6, 1.4, 0.55 + wear * 0.6, 1.45);
+    hands(vp, -0.3, -0.3);
+    legs(vp, 0.12, 0.4 + wear * 0.9, -0.1, 0.42 + wear * 0.9);
+    hips(vp, 0.2 * wear, 0, -3 * wear);
+    head2(vp, 0.4 + wear * 0.3, 0.5 + wear * 0.5);
+    if (wob) tilt(vp, 0.12 * dir);
+    if (beat >= 1) {
+      const pp = posePlank(0, easeIn(seg(t, 0.74, 0.9)));
+      vict(s, 0, 0, pp);
+    } else {
+      vict(s, wob ? -dir * 2 : 0, 0, vp, 1, wob ? 0.35 : 0);
+    }
+    if (landing) {
+      burst(s.ctx, s.vx, s.vy - s.vh * 0.9, s.vh * 0.26, 7, '#fff3c4', idx);
+      if (idx === HITS - 1) shout(s, 'THIRTY DAYS', s.vx, s.vy - s.vh * 1.5, 0.4, 8, '#ffe14a');
+    }
+  },
+  tick(s) {
+    const HITS = 7;
+    const a = 0.18;
+    const b = 0.72;
+    for (let i = 0; i < HITS; i++) {
+      const at = Math.round(s.dur * (a + ((b - a) * (i + 0.62)) / HITS));
+      if (s.f === at) {
+        s.d.cue('punch_light', 1.3 - i * 0.04, 0.7);
+        s.d.hit(3 + i * 0.4, 8);
+        emit(
+          s, s.vx, s.vy - s.vh * 0.9, 4, -Math.PI * 0.5, 2.4, 0.8, 2.2,
+          [PAPER, '#d8cdb4'], 'shard', 0.12, 2.2, 34,
+        );
+        if (i >= 4) spray(s, s.vx, s.vy - s.vh * 0.88, 5, -Math.PI * 0.5, 2, 2.2);
+      }
+    }
+    if (s.f === Math.round(s.dur * 0.76)) {
+      s.d.cue('ko', 0.9);
+      s.d.hit(5, 14);
+    }
+  },
+};
+
+/** NON-DISCLOSURE — mouth stapled shut, then flicked over. */
+VISUALS.staple_mouth = {
+  banner: 0.66,
+  draw(s) {
+    const t = s.t;
+    const grab = seg(t, 0.04, 0.18);
+    const staple = seg(t, 0.2, 0.58);
+    const flick = seg(t, 0.66, 0.72);
+    const topple = seg(t, 0.72, 0.94);
+    const dir = s.dir;
+    const shots = 3;
+    const si = Math.min(shots - 1, Math.floor(staple * shots));
+    const sk = staple * shots - si;
+
+    const kp = P(1);
+    arms(kp, -0.2, 0.5, flick > 0 ? 1.7 - flick * 0.3 : 1.35 - sk * 0.25, flick > 0 ? 0.1 : 0.5);
+    hands(kp, 0, -0.2);
+    spine(kp, 0.08, 0.06, 0, 0.04);
+    legs(kp, -0.08, 0.12, 0.1, 0.14);
+    kill(s, 0, 0, kp);
+
+    const mx = s.vx - dir * s.vh * 0.06;
+    const my = s.vy - s.vh * 0.84;
+    if (grab > 0.5 && flick <= 0) {
+      // The stapler, in hand, at the height of a mouth.
+      const sx = lerp(s.kx + dir * s.kh * 0.4, mx + dir * 6, easeOut(clamp(staple * 3, 0, 1)));
+      const sy = lerp(s.ky - s.kh * 0.85, my, easeOut(clamp(staple * 3, 0, 1)));
+      roundRect(s.ctx, sx - 5, sy - 3, 10, 5, 1.4, '#2f3742', INK, 1.3);
+      roundRect(s.ctx, sx - 5, sy - 5 + sk * 1.6, 10, 3, 1.2, STEEL, INK, 1.2);
+    }
+
+    const vp = P(0);
+    if (topple > 0) {
+      const k = easeIn(topple);
+      tilt(vp, -1.5 * k);
+      body(vp, 2.3 * k, 3 * k);
+      arms(vp, -1.4 * k, 0.2, -1.3 * k, 0.2);
+      legs(vp, 0.5 * k, 0.3, 0.5 * k, 0.3);
+    } else {
+      const fear = grab;
+      spine(vp, -0.05, -0.05, -0.15 * fear, -0.25 * fear);
+      arms(vp, 0.5 * fear, 1.2, 0.45 * fear, 1.2);
+      legs(vp, 0.05, 0.2 + fear * 0.2, -0.05, 0.2 + fear * 0.2);
+    }
+    vict(s, 0, 0, vp, 1, staple > 0 && sk < 0.25 ? 0.4 : 0);
+
+    // The staples stay put. Three of them, in a neat line, because whoever did
+    // this has done it before.
+    const placed = staple >= 1 ? shots : si + (sk > 0.4 ? 1 : 0);
+    for (let i = 0; i < placed; i++) {
+      const ox = (i - 1) * s.vh * 0.05;
+      const ang = topple > 0 ? -1.5 * easeIn(topple) : 0;
+      const px = mx + ox * Math.cos(ang) - (topple > 0 ? easeIn(topple) * s.vh * 0.7 * dir : 0);
+      const py = my + ox * Math.sin(ang) + (topple > 0 ? easeIn(topple) * s.vh * 0.62 : 0);
+      capsule(s.ctx, px - 1.4, py, px + 1.4, py, 0.7, STEEL, INK, 0.6);
+      if (s.gore > 0) ellipse(s.ctx, px + 1.6, py + 1.2, 0.9, 1.4, 0, BLOOD, 'none');
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    for (let i = 0; i < 3; i++) {
+      if (at(0.24 + i * 0.13)) {
+        s.d.cue('hit_metal', 1.6 - i * 0.1, 0.6);
+        s.d.cue('grunt', 1.2 + i * 0.1, 0.4);
+        s.d.hit(3, 8, 1);
+        spray(s, s.vx - s.dir * s.vh * 0.06, s.vy - s.vh * 0.84, 5, -Math.PI * 0.5, 2.4, 1.8);
+      }
+    }
+    if (at(0.67)) s.d.cue('drop', 1.6, 0.4);
+    if (at(0.9)) {
+      s.d.cue('drop', 0.6);
+      s.d.hit(6, 16, 3);
+      dust(s, s.vx, s.gy, 12, 2);
+    }
+  },
+};
+
+/** GROOMING POLICY — the beard goes. So does he. */
+VISUALS.beard_shave = {
+  banner: 0.7,
+  draw(s) {
+    const t = s.t;
+    const produce = seg(t, 0.04, 0.16);
+    const buzz = seg(t, 0.2, 0.62);
+    const look = seg(t, 0.66, 0.82);
+    const stop = seg(t, 0.84, 1);
+    const dir = s.dir;
+
+    const kp = P(1);
+    arms(kp, -0.2, 0.5, 1.3 - buzz * 0.15, 0.55);
+    hands(kp, 0, -0.25);
+    spine(kp, 0.06, 0.05, 0, 0.03);
+    legs(kp, -0.06, 0.12, 0.08, 0.14);
+    kill(s, 0, 0, buzz >= 1 ? poseSmug(1, Math.sin(t * 6)) : kp);
+
+    const cx = s.vx - dir * s.vh * 0.04;
+    const cy = s.vy - s.vh * 0.76;
+    if (produce > 0.3 && buzz < 1) {
+      // Clippers, doing a job a taser was not designed for.
+      const bx = lerp(s.kx + dir * s.kh * 0.4, cx + dir * 5, easeOut(clamp(buzz * 4, 0, 1)));
+      const by = lerp(s.ky - s.kh * 0.8, cy + buzz * s.vh * 0.1, easeOut(clamp(buzz * 4, 0, 1)));
+      roundRect(s.ctx, bx - 5, by - 2.4, 10, 5, 1.6, '#3a4250', INK, 1.3);
+      if (buzz > 0 && buzz < 1) {
+        zigzag(s.ctx, bx - dir * 5, by, cx, cy + s.vh * 0.06, 2, 5, '#9fe8ff', 1);
+      }
+    }
+
+    const vp = P(0);
+    const shame = look;
+    if (stop > 0) {
+      const pp = posePlank(0, easeIn(stop));
+      pp.beard!.scale = 0.05;
+      vict(s, 0, 0, pp);
+    } else {
+      spine(vp, 0.05 + shame * 0.3, 0.05 + shame * 0.2, -0.1, 0.15 + shame * 0.35);
+      arms(vp, 0.2 + shame * 0.5, 0.9, 0.15 + shame * 0.5, 0.9);
+      legs(vp, 0.05, 0.2 + shame * 0.3, -0.05, 0.2 + shame * 0.3);
+      // The beard goes in one continuous take.
+      vp.beard!.scale = clamp(1 - buzz, 0.05, 1);
+      vict(s, 0, 0, vp);
+    }
+    // The pile on the floor, which he is looking at.
+    if (buzz > 0.2) {
+      const pile = clamp(buzz, 0, 1);
+      ellipse(s.ctx, cx + dir * 2, s.gy - 1, s.vh * 0.16 * pile, s.vh * 0.05 * pile, 0, s.victim.style.hair, INK, 1);
+    }
+    if (look > 0.2 && stop <= 0) shout(s, '. . .', s.vx + dir * 14, s.vy - s.vh * 1.2, look, 9, '#cfc8e0');
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (at(0.2)) s.d.cue('taser', 1.4, 0.5);
+    if (s.f > s.dur * 0.2 && s.f < s.dur * 0.62 && s.f % 9 === 0) {
+      s.d.cue('taser', 1.7, 0.18);
+      emit(
+        s, s.vx - s.dir * s.vh * 0.04, s.vy - s.vh * 0.74, 4, -Math.PI * 0.5, 2.6, 0.5, 1.6,
+        [s.victim.style.hair, '#8c8078'], 'dot', 0.2, 1.4, 34,
+      );
+    }
+    if (at(0.68)) s.d.cue('ui_error', 0.7, 0.5);
+    if (at(0.9)) {
+      s.d.cue('drop', 0.7);
+      s.d.hit(4, 12);
+    }
+  },
+};
+
+/** ESCORTED FROM THE BUILDING — off frame, and back alone. */
+VISUALS.escort_out = {
+  banner: 0.7,
+  draw(s) {
+    const t = s.t;
+    const grab = seg(t, 0.04, 0.16);
+    const walk = seg(t, 0.16, 0.5);
+    const pause = seg(t, 0.5, 0.62);
+    const back = seg(t, 0.62, 0.8);
+    const dust2 = seg(t, 0.82, 0.94);
+    const dir = s.dir;
+    const away = easeInOut(walk) * 240;
+
+    if (walk < 1) {
+      // Marched off by the collar, heels dragging two lines in the floor.
+      const step = Math.sin(t * 30) * 0.35;
+      const kp = P(1);
+      arms(kp, -0.2, 0.4, 1.5, 0.3);
+      hands(kp, 0, -0.2);
+      spine(kp, 0.06, 0.05, 0, 0.04);
+      legs(kp, step, 0.2, -step, 0.2);
+      kill(s, dir * away, 0, kp);
+
+      const vp = P(0);
+      const drag = grab;
+      spine(vp, -0.15 * drag, -0.1, 0.2 * drag, 0.35 * drag);
+      arms(vp, -1.2 * drag, 0.9, 0.6 * drag, 1.0);
+      legs(vp, -0.5 * drag, 0.9 * drag, -0.65 * drag, 1.1 * drag, 0.5, 0.6);
+      hips(vp, -0.1 * drag, 0, -1.4 * drag);
+      vict(s, dir * away - dir * s.vh * 0.1, -grab * s.vh * 0.06, vp);
+      if (drag > 0.5) {
+        s.ctx.globalAlpha *= 0.4;
+        for (let i = 0; i < 2; i++) {
+          const y = s.gy - 1 + i * 2;
+          capsule(s.ctx, s.vx + dir * away - dir * 60, y, s.vx + dir * away - dir * s.vh * 0.2, y, 0.7, '#8a8090', 'none');
+        }
+        s.ctx.globalAlpha /= 0.4;
+      }
+    } else if (back > 0) {
+      // He comes back alone, dusts his hands, straightens his tie.
+      const u = easeOut(back);
+      const x = lerp(s.kx + dir * 240, s.kx, u);
+      const kp = P(1);
+      const step = Math.sin(t * 26) * 0.3 * (1 - u);
+      if (dust2 > 0) {
+        arms(kp, -1.0 + Math.sin(t * 40) * 0.2, 1.3, -1.0 - Math.sin(t * 40) * 0.2, 1.3);
+        hands(kp, -0.3, -0.3);
+      } else {
+        arms(kp, step, 0.2, -step, 0.2);
+      }
+      legs(kp, step, 0.2, -step, 0.2);
+      spine(kp, -0.04, -0.04, 0.02, 0.03);
+      kill(s, x - s.kx, 0, kp);
+    }
+    if (pause > 0.1 && back <= 0) {
+      shout(s, '. . .', s.kx + dir * 10, s.ky - s.kh * 1.3, pause, 10, '#cfc8e0');
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (at(0.06)) s.d.cue('grunt', 0.9);
+    if (at(0.54)) {
+      s.d.cue('drop', 0.7, 0.7);
+      s.d.hit(4, 14);
+    }
+    if (at(0.58)) s.d.cue('ui_back', 0.9, 0.5);
+    if (at(0.84)) dust(s, s.kx, s.ky - s.kh * 0.8, 8, 1.2);
+  },
+};
+
+// ── BOSSES ───────────────────────────────────────────────────────────────────
+
+/** CRUNCH, PRINCIPAL ENGINEER — closes the ticket. */
+VISUALS.wontfix = {
+  banner: 0.62,
+  draw(s) {
+    const t = s.t;
+    const open = seg(t, 0.05, 0.2);
+    const read = seg(t, 0.2, 0.4);
+    const click = seg(t, 0.44, 0.5);
+    const stamp = seg(t, 0.52, 0.6);
+    const fade = seg(t, 0.62, 0.86);
+    const shut = seg(t, 0.9, 1);
+    const dir = s.dir;
+
+    kill(s, 0, 0, click > 0 && click < 1 ? poseThrust(1, 1, 0.9) : poseSmug(1, Math.sin(t * 5)));
+
+    // The dwarf de-renders bottom-up: the floor eats him a band at a time, and
+    // he watches it happen.
+    const gone = easeInOut(fade);
+    const keep = s.vh * (1 - gone) + 2;
+    if (gone < 1) {
+      clipRect(s, s.vx - 60, s.gy - keep, 120, keep, () => {
+        const p = P(0);
+        const alarm = read;
+        spine(p, -0.1 * alarm, -0.1, -0.2 * alarm, -0.3 * alarm);
+        arms(p, 0.6 * alarm, 1.1, 0.55 * alarm, 1.1);
+        legs(p, 0.05, 0.2, -0.05, 0.2);
+        actor(s, s.victim, s.vx, s.gy, p, (-dir) as Facing, s.vs, 1, click > 0 && click < 1 ? 0.5 : 0);
+      });
+      if (fade > 0 && fade < 1) {
+        emit(
+          s, s.vx, s.gy - keep, 3, -Math.PI * 0.5, 2.8, 0.3, 1.2,
+          [NEON, '#8be0c8'], 'dot', -0.02, 1.6, 26,
+        );
+      }
+    }
+
+    // The ticket window, hanging in the air where a manager can reach it.
+    if (open > 0.02 && shut < 1) {
+      const w = 128 * easeOut(open) * (1 - shut);
+      const h = 52 * easeOut(open) * (1 - shut);
+      const cx = s.vx + dir * 14;
+      const cy = s.gy - s.vh * 1.9;
+      roundRect(s.ctx, cx - w * 0.5, cy - h * 0.5, w, h, 3, '#182230', INK, 1.8);
+      roundRect(s.ctx, cx - w * 0.5, cy - h * 0.5, w, 11, 3, '#22303f', 'none');
+      if (w > 60) {
+        label(s, 'MF-1937', cx - w * 0.5 + 6, cy - h * 0.5 + 6, 7, '#8be0c8', 'left');
+        label(s, 'dwarf keeps hitting me', cx - w * 0.5 + 6, cy - h * 0.5 + 20, 6.5, '#cfe4dd', 'left', '700');
+        label(s, 'severity: 1  reporter: security', cx - w * 0.5 + 6, cy - h * 0.5 + 30, 5.5, '#7d8f96', 'left', '700');
+        const btn = click > 0 ? '#c0242b' : '#2e4152';
+        roundRect(s.ctx, cx + w * 0.5 - 44, cy + h * 0.5 - 15, 38, 11, 2, btn, INK, 1.2);
+        label(s, 'CLOSE', cx + w * 0.5 - 25, cy + h * 0.5 - 9.5, 6.5, '#e8f6f2');
+      }
+      if (stamp > 0) {
+        const sc = 1 + (1 - easeOut(stamp)) * 1.8;
+        s.ctx.save();
+        s.ctx.translate(cx, cy);
+        s.ctx.rotate(-0.18);
+        s.ctx.scale(sc, sc);
+        s.ctx.globalAlpha *= clamp(stamp * 3, 0, 1);
+        label(s, 'WONTFIX', 0, 0, 15, '#ff5d5d');
+        roundRect(s.ctx, -34, -9, 68, 18, 2, 'none', '#ff5d5d', 1.4);
+        s.ctx.restore();
+      }
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (at(0.06)) s.d.cue('ui_move', 0.9, 0.5);
+    if (at(0.45)) s.d.cue('ui_select', 0.8);
+    if (at(0.53)) {
+      s.d.cue('ui_error', 0.6);
+      s.d.hit(4, 12);
+    }
+    if (at(0.92)) s.d.cue('ui_back', 0.8, 0.6);
+  },
+};
+
+/** FLOKI — takes the leg, trots off with it, tail going the whole time. */
+VISUALS.shiba_leg = {
+  banner: 0.6,
+  draw(s) {
+    const t = s.t;
+    const crouch = seg(t, 0.04, 0.16);
+    const lunge = seg(t, 0.16, 0.24);
+    const rip = seg(t, 0.26, 0.36);
+    const trot = seg(t, 0.4, 0.78);
+    const hop = seg(t, 0.4, 0.66);
+    const fall = seg(t, 0.7, 0.9);
+    const dir = s.dir;
+
+    // The dog. Low, then forward, then away, and the tail never stops.
+    const away = easeInOut(trot) * -dir * 190;
+    const dp = P(1);
+    const bounce = trot > 0 && trot < 1 ? Math.abs(Math.sin(t * 34)) : 0;
+    tilt(dp, 0.5 + crouch * 0.3 - lunge * 0.2);
+    body(dp, lunge * 8, -crouch * 4 + bounce * 3);
+    arms(dp, 1.1 - lunge * 0.5, 0.9, 1.0 - lunge * 0.5, 0.85);
+    legs(dp, 0.7 + bounce * 0.4, 0.9, 0.5 - bounce * 0.4, 0.95, 0.3, 0.3);
+    spine(dp, 0.3, 0.2, -0.5 - lunge * 0.3, -0.3);
+    kill(s, away + dir * lunge * 14, 0, dp);
+
+    // A tail, because the rig has none and the wag is half the joke.
+    const tx = s.kx + away + dir * lunge * 14 - dir * s.kh * 0.42;
+    const ty = s.ky - s.kh * 0.62;
+    const wag = Math.sin(t * 26) * 0.5;
+    capsule(
+      s.ctx, tx, ty,
+      tx - dir * s.kh * 0.18 + wag * 6, ty - s.kh * 0.26,
+      s.kh * 0.075, s.killer.style.hair, INK, 1.4,
+    );
+
+    // The leg, in the mouth, going with him.
+    if (rip > 0.1) {
+      const mx2 = s.kx + away + dir * (lunge * 14 + s.kh * 0.34);
+      const my2 = s.ky - s.kh * 0.72;
+      const ang = 0.35 * dir + Math.sin(t * 12) * 0.06;
+      capsule(
+        s.ctx, mx2, my2,
+        mx2 + Math.cos(ang) * s.vh * 0.34 * -dir, my2 + Math.sin(ang) * s.vh * 0.34,
+        s.vh * 0.06, s.victim.style.tunicColor, INK, 1.4,
+      );
+      roundRect(s.ctx, mx2 - Math.cos(ang) * 4 - dir * s.vh * 0.34 - 4, my2 + Math.sin(ang) * s.vh * 0.34, 9, 4.5, 1.4, '#2a2530', INK, 1.2);
+      drawStump(s, mx2, my2, s.vh * 0.055, ang);
+    }
+
+    // The dwarf: one leg, one hop, one conclusion.
+    const vp = P(0);
+    if (fall > 0) {
+      const k = easeIn(fall);
+      tilt(vp, -1.45 * k);
+      body(vp, 2.2 * k, 3 * k);
+      arms(vp, -1.5 * k, 0.3, -1.3 * k, 0.3);
+      legs(vp, 0.6 * k, 0.4, 0, 0.2);
+    } else {
+      const h = hop > 0 ? Math.max(0, Math.sin(t * 17)) : 0;
+      body(vp, 0, h * 6);
+      spine(vp, 0.25, 0.2, 0.1, 0.3);
+      arms(vp, -1.3 - h * 0.4, 0.8, -1.2 - h * 0.4, 0.8);
+      legs(vp, 0.1, 0.3, 0, 0.2);
+    }
+    if (rip > 0.4) {
+      vp.legR_lower!.scale = 0.01;
+      vp.footR!.scale = 0.01;
+    }
+    vict(s, 0, 0, vp, 1, lunge > 0.4 && rip < 0.2 ? 0.5 : 0);
+    if (rip > 0.4) {
+      const kneeX = s.vx + s.vh * 0.06 * dir;
+      const kneeY = s.vy - s.vh * (fall > 0 ? 0.1 : 0.18);
+      drawStump(s, kneeX, kneeY, s.vh * 0.055, 0.2);
+    }
+    bloodPool(s, s.vx, s.gy, s.vh * 0.44, seg(t, 0.36, 0.9));
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (at(0.17)) s.d.cue('dash', 1.2, 0.6);
+    if (at(0.27)) {
+      s.d.cue('bone_crack', 0.75);
+      s.d.cue('hit_flesh', 0.9);
+      s.d.hit(9, 20, 9);
+      spray(s, s.vx, s.vy - s.vh * 0.2, 28, -Math.PI * 0.4, 2.2, 4.4);
+    }
+    if (s.f > s.dur * 0.36 && s.f < s.dur * 0.72 && (s.f & 7) === 0) {
+      spray(s, s.vx, s.vy - s.vh * 0.16, 4, -Math.PI * 0.5, 1.6, 2.2);
+    }
+    if (at(0.44)) s.d.cue('laugh', 1.4, 0.4);
+    if (at(0.86)) {
+      s.d.cue('drop', 0.8);
+      s.d.hit(5, 14);
+    }
+  },
+};
+
+/** FLOKI — digs, deposits, backfills, pats it down. */
+VISUALS.shiba_bury = {
+  banner: 0.68,
+  draw(s) {
+    const t = s.t;
+    const dig = seg(t, 0.04, 0.34);
+    const drop = seg(t, 0.36, 0.5);
+    const fill = seg(t, 0.52, 0.76);
+    const pat = seg(t, 0.78, 0.88);
+    const leave = seg(t, 0.9, 1);
+    const dir = s.dir;
+    const holeX = s.vx;
+
+    // The hole, then the mound, in the same ellipse.
+    const depth = easeOut(dig) * (1 - fill);
+    ellipse(s.ctx, holeX, s.gy, s.vh * 0.34, s.vh * 0.12 * (0.4 + depth), 0, '#2a2018', INK, 1.2);
+    if (fill > 0) {
+      const m = easeOut(fill) * (1 - pat * 0.4);
+      ellipse(s.ctx, holeX, s.gy - m * s.vh * 0.1, s.vh * 0.36, s.vh * 0.13 * m, 0, '#6b5744', INK, 1.3);
+    }
+
+    // The dwarf goes in head first. Two boots stay out, as is traditional.
+    const sink = easeInOut(drop);
+    if (fill < 0.9) {
+      clipRect(s, holeX - 60, s.gy - 200, 120, 200 - sink * 4, () => {
+        const p = P(0);
+        tilt(p, 3.0);
+        arms(p, -1.4, 0.5, -1.3, 0.5);
+        legs(p, 0.4 + Math.sin(t * 20) * 0.2 * (1 - fill), 0.5, 0.2 - Math.sin(t * 20) * 0.2 * (1 - fill), 0.6);
+        actor(s, s.victim, holeX, s.gy - sink * s.vh * 0.9 + s.vh, p, (-dir) as Facing, s.vs);
+      });
+    } else {
+      for (let i = -1; i <= 1; i += 2) {
+        const bx = holeX + i * s.vh * 0.1;
+        roundRect(s.ctx, bx - 3.5, s.gy - s.vh * 0.16, 7, 8, 1.6, '#2a2530', INK, 1.2);
+      }
+    }
+
+    // The dog: digging, nosing, patting, then gone without a backward glance.
+    const dp = P(1);
+    const paw = dig > 0 && dig < 1 ? Math.sin(t * 40) : pat > 0 && pat < 1 ? Math.sin(t * 24) : 0;
+    tilt(dp, 0.55);
+    spine(dp, 0.35, 0.25, -0.4, -0.25);
+    arms(dp, 1.4 + paw * 0.7, 0.8, 1.3 - paw * 0.7, 0.8);
+    legs(dp, 0.6, 0.9, 0.4, 0.95, 0.3, 0.3);
+    body(dp, 0, 0);
+    const kx = leave > 0 ? easeIn(leave) * -dir * 150 : 0;
+    kill(s, kx + dir * 4, 0, dp);
+    const tx = s.kx + kx + dir * 4 - dir * s.kh * 0.42;
+    const ty = s.ky - s.kh * 0.62;
+    capsule(s.ctx, tx, ty, tx - dir * s.kh * 0.18 + Math.sin(t * 26) * 6, ty - s.kh * 0.26, s.kh * 0.075, s.killer.style.hair, INK, 1.4);
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (s.f > s.dur * 0.05 && s.f < s.dur * 0.34 && s.f % 6 === 0) {
+      s.d.cue('dash', 1.6, 0.16);
+      emit(
+        s, s.vx, s.gy, 6, Math.PI * (s.dir > 0 ? 0.15 : 0.85), 0.8, 1.4, 3.4,
+        ['#6b5744', '#8a7256', '#3a2e22'], 'dot', 0.3, 2.2, 30,
+      );
+    }
+    if (at(0.4)) s.d.cue('drop', 0.7);
+    if (s.f > s.dur * 0.52 && s.f < s.dur * 0.76 && s.f % 7 === 0) {
+      emit(s, s.vx, s.gy - 4, 5, -Math.PI * 0.5, 1.6, 0.6, 2.2, ['#6b5744', '#8a7256'], 'dot', 0.34, 2, 26);
+    }
+    if (at(0.8)) {
+      s.d.cue('land', 1.3, 0.5);
+      s.d.hit(3, 10);
+    }
+  },
+};
+
+/** THE BLUE TICK — buried under replies, then noted. */
+VISUALS.ratio_crush = {
+  banner: 0.66,
+  draw(s) {
+    const t = s.t;
+    const post = seg(t, 0.04, 0.16);
+    const pile = seg(t, 0.16, 0.66);
+    const note = seg(t, 0.7, 0.8);
+    const dir = s.dir;
+    const N = 9;
+
+    kill(s, 0, 0, post < 1 ? poseThrust(1, post, 0.7) : poseSmug(1, Math.sin(t * 6)));
+
+    // Every reply presses him a little further into the floor. The stack gets
+    // faster because that is how it actually feels.
+    const shown = Math.min(N, Math.floor(easeIn(pile) * N + 0.001));
+    const press = easeIn(pile);
+    squash(s, s.vx, s.gy, 1 + press * 0.5, 1 - press * 0.72, () => {
+      const p = P(0);
+      const k = press;
+      spine(p, 0.5 * k, 0.4 * k, 0.2, 0.5 * k);
+      arms(p, 0.7 * k, 1.4, 0.65 * k, 1.4);
+      legs(p, 0.2 * k, 1.3 * k, -0.15 * k, 1.3 * k, 0.4, 0.4);
+      hips(p, 0.3 * k, 0, -5 * k);
+      vict(s, 0, 0, p);
+    });
+
+    for (let i = 0; i < shown; i++) {
+      const u = i / N;
+      const w = 60 + hash(i * 5.1) * 42;
+      const h = 11;
+      const y = s.gy - 6 - i * (h + 1.6) - press * 2;
+      const x = s.vx + (hash(i * 2.7) - 0.5) * 26;
+      roundRect(s.ctx, x - w * 0.5, y - h, w, h, 3, i & 1 ? '#16222e' : '#12283a', INK, 1.2);
+      ellipse(s.ctx, x - w * 0.5 + 6, y - h * 0.5, 3, 3, 0, '#1d9bf0', 'none');
+      s.ctx.fillStyle = 'rgba(210,226,240,0.55)';
+      s.ctx.fillRect(x - w * 0.5 + 11, y - h * 0.66, w * 0.5 + hash(i) * 14, 1.4);
+      s.ctx.fillRect(x - w * 0.5 + 11, y - h * 0.38, w * 0.34, 1.4);
+      if (u > 0.7) label(s, 'ratio', x + w * 0.5 - 12, y - h * 0.5, 5.5, '#7fd8ff');
+    }
+    if (note > 0) {
+      const w = 132;
+      const y = s.gy - 8 - N * 12.6 - 14;
+      s.ctx.save();
+      s.ctx.globalAlpha *= clamp(note * 2, 0, 1);
+      roundRect(s.ctx, s.vx - w * 0.5, y - 22, w, 22, 3, '#f2ecdc', INK, 1.4);
+      label(s, 'Readers added context', s.vx, y - 15, 6.5, '#2a2f38');
+      label(s, 'He is dead.', s.vx, y - 6, 6.5, '#2a2f38');
+      s.ctx.restore();
+    }
+  },
+  tick(s) {
+    const N = 9;
+    for (let i = 0; i < N; i++) {
+      const at = Math.round(s.dur * (0.16 + 0.5 * easeOut((i + 1) / N)));
+      if (s.f === at) {
+        s.d.cue('ui_move', 1 + i * 0.06, 0.32);
+        s.d.hit(1.6 + i * 0.5, 7);
+      }
+    }
+    if (s.f === Math.round(s.dur * 0.67)) {
+      s.d.cue('explosion', 1.4, 0.5);
+      s.d.hit(7, 18, 3);
+      spray(s, s.vx, s.gy - 4, 14, -Math.PI * 0.5, 2.9, 2.6);
+    }
+    if (s.f === Math.round(s.dur * 0.71)) s.d.cue('ui_error', 0.7, 0.6);
+  },
+};
+
+/** LANE ASSIST — forwards, backwards, forwards, and then it parks. */
+VISUALS.car_roll = {
+  banner: 0.74,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    // Four passes over one dwarf, with a polite pause between each.
+    const p1 = seg(t, 0.08, 0.26);
+    const rev = seg(t, 0.3, 0.48);
+    const p2 = seg(t, 0.52, 0.68);
+    const park = seg(t, 0.72, 0.88);
+    const carW = s.kh * 1.9;
+    const carH = s.kh * 0.62;
+
+    let cx: number;
+    if (park > 0) cx = lerp(s.vx + dir * carW * 0.2, s.vx + dir * carW * 0.75, easeOut(park));
+    else if (p2 > 0) cx = lerp(s.vx - dir * carW * 0.85, s.vx + dir * carW * 0.2, easeInOut(p2));
+    else if (rev > 0) cx = lerp(s.vx + dir * carW * 0.9, s.vx - dir * carW * 0.85, easeInOut(rev));
+    else cx = lerp(s.vx - dir * carW * 1.4, s.vx + dir * carW * 0.9, easeInOut(p1));
+
+    // How flat he is right now: the wheel is over him whenever the body is.
+    const over = clamp(1 - Math.abs(cx - s.vx) / (carW * 0.5), 0, 1);
+    const flat = clamp(Math.max(p1 > 0 ? over : 0, rev > 0 ? over : 0, p2 > 0 ? over : 0), 0, 1);
+    const pressed = clamp(Math.max(seg(t, 0.14, 0.2), seg(t, 0.36, 0.42), seg(t, 0.56, 0.62)), 0, 1);
+    const squashK = Math.max(flat, pressed * 0.9);
+
+    squash(s, s.vx, s.gy, 1 + squashK * 0.85, 1 - squashK * 0.86, () => {
+      const p = P(0);
+      const k = squashK;
+      tilt(p, -1.5 * clamp(k * 1.4, 0, 1));
+      body(p, 2.2 * k, 3 * k);
+      arms(p, -1.9 * k, 0.2, -1.7 * k, 0.2);
+      legs(p, 0.7 * k, 0.4, 0.6 * k, 0.4);
+      vict(s, 0, 0, p);
+    });
+    bloodPool(s, s.vx, s.gy, s.vh * 0.7, seg(t, 0.2, 0.7));
+
+    // Tyre tracks, laid down once there is something to lay them down in.
+    if (s.gore > 0 && t > 0.24) {
+      s.ctx.globalAlpha *= 0.55;
+      const spread2 = clamp((t - 0.24) * 3, 0, 1) * carW * 0.9;
+      capsule(s.ctx, s.vx - spread2, s.gy - 1, s.vx + spread2 * 0.4, s.gy - 1, 2.2, BLOOD_DARK, 'none');
+      s.ctx.globalAlpha /= 0.55;
+    }
+
+    // The vehicle. An angular wedge, because that is the entire design.
+    const bodyY = s.gy - carH * 0.4;
+    poly(
+      s.ctx,
+      [
+        cx - carW * 0.5, bodyY,
+        cx - carW * 0.34, bodyY - carH * 0.62,
+        cx + carW * 0.06, bodyY - carH * 1.05,
+        cx + carW * 0.5, bodyY - carH * 0.34,
+        cx + carW * 0.5, bodyY,
+      ],
+      '#c6ccd4',
+      INK,
+      2,
+    );
+    poly(
+      s.ctx,
+      [
+        cx - carW * 0.24, bodyY - carH * 0.6,
+        cx + carW * 0.04, bodyY - carH * 0.92,
+        cx + carW * 0.3, bodyY - carH * 0.5,
+        cx - carW * 0.2, bodyY - carH * 0.5,
+      ],
+      '#25303c',
+      INK,
+      1.4,
+    );
+    for (let i = -1; i <= 1; i += 2) {
+      const wx = cx + i * carW * 0.3;
+      ellipse(s.ctx, wx, s.gy - carH * 0.16, carH * 0.3, carH * 0.3, 0, '#1b1f26', INK, 1.6);
+      ellipse(s.ctx, wx, s.gy - carH * 0.16, carH * 0.13, carH * 0.13, 0, STEEL, INK, 1);
+    }
+    // Reversing lights, and then the hazards, blinking at nobody.
+    const blink = (s.f % 30) < 15;
+    if (rev > 0 && rev < 1) {
+      ellipse(s.ctx, cx + dir * carW * 0.48, bodyY - carH * 0.2, 2.4, 2.4, 0, '#ffffff', 'none');
+    }
+    if (park > 0.4 && blink) {
+      ellipse(s.ctx, cx - carW * 0.46, bodyY - carH * 0.22, 2.6, 2.6, 0, '#ffb03a', 'none');
+      ellipse(s.ctx, cx + carW * 0.46, bodyY - carH * 0.22, 2.6, 2.6, 0, '#ffb03a', 'none');
+    }
+    if (park > 0.9) label(s, 'PARKED', cx, bodyY - carH * 1.5, 8, '#c6ccd4');
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (at(0.08)) s.d.cue('engine', 0.8, 0.7);
+    for (const u of [0.17, 0.39, 0.59]) {
+      if (at(u)) {
+        s.d.cue('hit_flesh', 0.7);
+        s.d.cue('tyres', 0.9, 0.6);
+        s.d.hit(10, 20, 8);
+        spray(s, s.vx, s.gy - 2, 24, -Math.PI * 0.5, 2.9, 4.2);
+      }
+    }
+    if (s.f > s.dur * 0.3 && s.f < s.dur * 0.48 && s.f % 18 === 0) s.d.cue('ui_move', 1.8, 0.3);
+    if (at(0.74)) s.d.cue('tyres', 0.7, 0.5);
+    if (at(0.9)) s.d.cue('engine', 0.5, 0.4);
+  },
+};
+
+/** LANE ASSIST — the door closes. The sensor is confident. */
+VISUALS.falcon_door = {
+  banner: 0.66,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    const open = seg(t, 0.04, 0.16);
+    const c1 = seg(t, 0.2, 0.28);
+    const c2 = seg(t, 0.38, 0.46);
+    const c3 = seg(t, 0.56, 0.66);
+    const held = seg(t, 0.7, 1);
+    const w = s.vh * 0.9;
+    const h = s.vh * 1.5;
+
+    // Body pillar and sill: enough car to make the door mean something.
+    roundRect(s.ctx, s.vx - w * 0.9, s.gy - h * 0.2, w * 1.9, h * 0.22, 2, '#aeb5bd', INK, 1.8);
+
+    const closeK = Math.max(
+      c1 > 0 && c1 < 1 ? Math.sin(c1 * Math.PI) : 0,
+      c2 > 0 && c2 < 1 ? Math.sin(c2 * Math.PI) : 0,
+      c3 > 0 ? (c3 < 1 ? Math.sin(c3 * Math.PI) : 1) : 0,
+    );
+    const crush = Math.max(c1 >= 1 ? 0.35 : 0, c2 >= 1 ? 0.6 : 0, held > 0 ? 0.85 : 0, closeK * 0.9);
+
+    squash(s, s.vx, s.gy, 1 - crush * 0.42, 1 + crush * 0.12, () => {
+      const p = P(0);
+      const k = crush;
+      spine(p, 0.2 * k, 0.2 * k, 0.1, 0.3 * k);
+      arms(p, 1.2 * k, 0.6, 1.1 * k, 0.6);
+      legs(p, 0.2 * k, 0.5 * k, -0.15 * k, 0.5 * k);
+      hips(p, 0, 0, -2 * k);
+      vict(s, 0, 0, p, 1, closeK > 0.8 ? 0.4 : 0);
+    });
+
+    // The door itself, hinged at the roof, coming down like a bird's wing.
+    const ang = lerp(-1.15, -0.12, closeK) * dir;
+    const hx = s.vx + dir * w * 0.62;
+    const hy = s.gy - h;
+    s.ctx.save();
+    s.ctx.translate(hx, hy);
+    s.ctx.rotate(ang);
+    roundRect(s.ctx, -w * 0.86, 0, w * 0.86, h * 0.86, 3, '#c6ccd4', INK, 2);
+    roundRect(s.ctx, -w * 0.74, h * 0.08, w * 0.6, h * 0.34, 2, '#25303c', INK, 1.4);
+    if (c2 >= 1) {
+      // The glass gives up before the sensor does.
+      zigzag(s.ctx, -w * 0.7, h * 0.12, -w * 0.2, h * 0.38, 3, 6, '#dff2ff', 1.1);
+      zigzag(s.ctx, -w * 0.44, h * 0.1, -w * 0.6, h * 0.4, 2.4, 5, '#dff2ff', 0.9);
+    }
+    s.ctx.restore();
+    bloodPool(s, s.vx, s.gy, s.vh * 0.4, seg(t, 0.4, 0.9));
+
+    if (open > 0.4) {
+      const flash = (s.f % 24) < 12;
+      if (flash || held > 0) {
+        label(s, 'OBSTRUCTION DETECTED', s.vx, s.gy - h - 12, 7, '#ff5d5d');
+      }
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (at(0.06)) s.d.cue('ui_error', 1.1, 0.4);
+    for (let i = 0; i < 3; i++) {
+      if (at(0.24 + i * 0.18)) {
+        s.d.cue('hit_metal', 0.8 - i * 0.08);
+        if (i > 0) s.d.cue('glass', 1.1 + i * 0.1, 0.6);
+        s.d.hit(7 + i * 2, 16, 4 + i * 3);
+        spray(s, s.vx, s.vy - s.vh * 0.5, 12 + i * 8, -Math.PI * 0.5, 2.6, 3.6);
+      }
+    }
+  },
+};
+
+/** THE BORING MACHINE — ground down, extruded, sold as landscaping. */
+VISUALS.muck_brick = {
+  banner: 0.7,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    const down = seg(t, 0.06, 0.24);
+    const grind = seg(t, 0.24, 0.56);
+    const belt = seg(t, 0.6, 0.82);
+    const stamp = seg(t, 0.86, 0.94);
+    const headR = s.vh * 0.72;
+    const hy = lerp(s.gy - s.vh * 2.6, s.gy - s.vh * 0.34, easeIn(down));
+
+    if (grind < 1) {
+      const eaten = easeIn(grind);
+      clipRect(s, s.vx - 60, s.gy - s.vh * (1 - eaten) - 2, 120, s.vh * (1 - eaten) + 4, () => {
+        const p = P(0);
+        const k = grind;
+        arms(p, 0.8 * k, 1.2, 0.75 * k, 1.2);
+        spine(p, -0.1, -0.1, -0.2 * k, -0.3 * k);
+        legs(p, 0.1, 0.3 * k, -0.1, 0.3 * k);
+        actor(s, s.victim, s.vx, s.gy, p, (-dir) as Facing, s.vs);
+      });
+    }
+
+    // The cutterhead: a disc of teeth that does not care what it is cutting.
+    if (down > 0.02 && belt < 0.5) {
+      const rot = t * 26;
+      ellipse(s.ctx, s.vx, hy, headR, headR * 0.95, 0, '#5f5142', INK, 2);
+      for (let i = 0; i < 10; i++) {
+        const a = rot + (i * TAU) / 10;
+        const px = s.vx + Math.cos(a) * headR * 0.72;
+        const py = hy + Math.sin(a) * headR * 0.68;
+        ellipse(s.ctx, px, py, headR * 0.15, headR * 0.15, 0, i & 1 ? STEEL : '#c2743a', INK, 1.2);
+      }
+      ellipse(s.ctx, s.vx, hy, headR * 0.24, headR * 0.24, 0, '#3e3428', INK, 1.4);
+    }
+
+    // Out the other end: one brick, one hat, no ceremony.
+    if (belt > 0.05) {
+      const bx = lerp(s.vx - dir * s.vh * 0.9, s.vx + dir * s.vh * 0.6, easeOut(belt));
+      const bw = s.vh * 0.5;
+      const bh = s.vh * 0.28;
+      roundRect(s.ctx, bx - bw * 0.5, s.gy - bh, bw, bh, 1.5, s.gore > 0 ? '#8a3b34' : '#6f6154', INK, 1.8);
+      s.ctx.globalAlpha *= 0.4;
+      roundRect(s.ctx, bx - bw * 0.42, s.gy - bh * 0.7, bw * 0.84, 1.4, 0.5, '#c98a74', 'none');
+      s.ctx.globalAlpha /= 0.4;
+      drawLooseHat(s.ctx, s.victim.style, bx + dir * bw * 0.2, s.gy - bh, 0.4 * dir, s.vs * 0.6);
+      if (stamp > 0) {
+        s.ctx.save();
+        s.ctx.globalAlpha *= clamp(stamp * 3, 0, 1);
+        s.ctx.translate(bx, s.gy - bh - 12);
+        s.ctx.rotate(-0.12);
+        label(s, 'GRADE A FILL', 0, 0, 8, '#ffb347');
+        s.ctx.restore();
+      }
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (at(0.08)) s.d.cue('engine', 0.6, 0.8);
+    if (at(0.25)) {
+      s.d.cue('hit_flesh', 0.6);
+      s.d.hit(9, 22, 10);
+    }
+    if (s.f > s.dur * 0.24 && s.f < s.dur * 0.56 && s.f % 5 === 0) {
+      s.d.hit(3, 6);
+      spray(s, s.vx, s.gy - s.vh * 0.4, 9, -Math.PI * 0.5, 2.9, 4.6);
+    }
+    if (at(0.62)) s.d.cue('drop', 0.6, 0.7);
+    if (at(0.88)) s.d.cue('drop', 1.4, 0.5);
+  },
+};
+
+/** THE BORING MACHINE — the floor opens. Traffic, solved. */
+VISUALS.tube_drop = {
+  banner: 0.68,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    const open = seg(t, 0.08, 0.28);
+    const fall = seg(t, 0.3, 0.5);
+    const shut = seg(t, 0.56, 0.72);
+    const w = s.vh * 0.8;
+
+    kill(s, 0, 0, poseSmug(1, Math.sin(t * 5)));
+
+    // The hole, then the man in it, then no hole.
+    const hole = easeOut(open) * (1 - easeIn(shut));
+    if (hole > 0.02) {
+      ellipse(s.ctx, s.vx, s.gy, w * 0.5 * hole, w * 0.16 * hole, 0, '#06080c', INK, 1.4);
+      s.ctx.globalAlpha *= 0.5;
+      ellipse(s.ctx, s.vx, s.gy - 1, w * 0.4 * hole, w * 0.1 * hole, 0, '#1b2430', 'none');
+      s.ctx.globalAlpha /= 0.5;
+    }
+    if (fall < 1) {
+      const drop = easeIn(fall);
+      clipRect(s, s.vx - 60, s.gy - 220, 120, 220, () => {
+        const p = P(0);
+        const k = fall;
+        arms(p, -1.7 * k, 0.4, -1.6 * k, 0.4);
+        legs(p, 0.6 * k, 0.7 * k, 0.4 * k, 0.8 * k);
+        spine(p, -0.2 * k, -0.15 * k, -0.1, -0.2 * k);
+        actor(s, s.victim, s.vx, s.gy + drop * s.vh * 1.7, p, (-dir) as Facing, s.vs, 1 - drop * 0.3);
+      });
+    }
+    // Hatch flaps, closing over it.
+    const flap = 1 - hole;
+    for (let i = -1; i <= 1; i += 2) {
+      const fx = s.vx + i * w * 0.5;
+      poly(
+        s.ctx,
+        [
+          fx, s.gy - 1,
+          fx - i * w * 0.5 * flap, s.gy - 1 - w * 0.06 * flap,
+          fx - i * w * 0.5 * flap, s.gy + 1,
+          fx, s.gy + 1,
+        ],
+        '#3f4652',
+        INK,
+        1.4,
+      );
+    }
+    if (shut > 0.6) {
+      roundRect(s.ctx, s.vx - 34, s.gy - s.vh * 0.5, 68, 13, 2, '#ffb347', INK, 1.4);
+      label(s, 'PLEASE STAND CLEAR', s.vx, s.gy - s.vh * 0.5 + 6.5, 6, '#3e3428');
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (at(0.1)) {
+      s.d.cue('drop', 0.5, 0.7);
+      dust(s, s.vx, s.gy, 14, 2.2);
+    }
+    if (at(0.32)) s.d.cue('whiff', 0.7);
+    if (at(0.52)) s.d.cue('land', 0.4, 0.35);
+    if (at(0.58)) {
+      s.d.cue('drop', 0.8);
+      s.d.hit(5, 14);
+    }
+  },
+};
+
+/** SUBJECT P-47 — a clinical trial with one participant. */
+VISUALS.implant_fit = {
+  banner: 0.66,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    const lower = seg(t, 0.06, 0.24);
+    const drill = seg(t, 0.26, 0.44);
+    const fit = seg(t, 0.46, 0.56);
+    const twitch = seg(t, 0.58, 0.74);
+    const salute = seg(t, 0.76, 0.86);
+    const off = seg(t, 0.88, 1);
+
+    kill(s, 0, 0, posePresent(1, Math.sin(t * 9) * (1 - fit)));
+
+    const hx = s.vx;
+    const hy = s.vy - s.vh * 0.95;
+    // The arm comes down from above, because of course it does.
+    if (lower > 0.02 && off < 0.6) {
+      const ay = lerp(s.gy - s.vh * 3, hy - s.vh * 0.14, easeOut(lower));
+      capsule(s.ctx, hx, s.gy - s.vh * 3.4, hx, ay, s.vh * 0.05, STEEL, INK, 1.4);
+      roundRect(s.ctx, hx - s.vh * 0.09, ay - s.vh * 0.06, s.vh * 0.18, s.vh * 0.14, 1.4, '#7f8794', INK, 1.4);
+      if (drill > 0 && drill < 1) {
+        capsule(s.ctx, hx, ay + s.vh * 0.06, hx, ay + s.vh * 0.16, s.vh * 0.018, '#e6ebf5', INK, 0.8);
+      }
+    }
+
+    const vp = P(0);
+    if (off > 0) {
+      const k = easeIn(off);
+      tilt(vp, -1.4 * k);
+      body(vp, 2 * k, 2.8 * k);
+      arms(vp, -1.4 * k, 0.2, -1.3 * k, 0.2);
+      legs(vp, 0.6 * k, 0.4, 0.5 * k, 0.4);
+    } else if (salute > 0) {
+      spine(vp, -0.12, -0.1, -0.05, -0.08);
+      arms(vp, -0.1, 0.2, -1.5 * salute, 2.2 * salute);
+      hands(vp, 0, -0.4);
+      legs(vp, 0, 0.05, 0, 0.05);
+    } else {
+      const shake2 = twitch > 0 ? Math.sin(t * 60) * twitch * 0.14 : 0;
+      spine(vp, 0.1 + shake2, 0.1 - shake2, -0.2 * drill + shake2, -0.35 * drill);
+      arms(vp, 0.5 + shake2 * 2, 1.0, 0.45 - shake2 * 2, 1.0);
+      legs(vp, 0.05, 0.3 + drill * 0.4, -0.05, 0.3 + drill * 0.4);
+      hips(vp, 0, 0, -2 * drill);
+    }
+    vict(s, twitch > 0 ? Math.sin(t * 70) * twitch * 1.2 : 0, 0, vp, 1, drill > 0 && drill < 1 && (s.f & 3) < 2 ? 0.4 : 0);
+
+    // The implant. A neat little disc with a light on it.
+    if (fit > 0.2) {
+      const on = off > 0.3 ? false : (s.f % 40) < 20 || twitch > 0;
+      ellipse(s.ctx, hx - dir * s.vh * 0.04, hy - (off > 0 ? -s.vh * 0.5 : 0), s.vh * 0.07, s.vh * 0.05, 0, '#9aa4b2', INK, 1.2);
+      ellipse(s.ctx, hx - dir * s.vh * 0.04, hy - (off > 0 ? -s.vh * 0.5 : 0), s.vh * 0.025, s.vh * 0.025, 0, on ? '#6ee4ff' : '#3a2020', 'none');
+    }
+    if (twitch > 0 && twitch < 1 && !s.reduced) {
+      zigzag(s.ctx, hx - 10, hy - 6, hx + 10, hy - 10, 3, 6, '#6ee4ff', 1);
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (at(0.08)) s.d.cue('robot_death', 1.6, 0.3);
+    if (at(0.28)) s.d.cue('taser', 0.9, 0.7);
+    if (s.f > s.dur * 0.26 && s.f < s.dur * 0.44 && s.f % 6 === 0) {
+      sparks(s, s.vx, s.vy - s.vh * 0.95, 6, -Math.PI * 0.5);
+      spray(s, s.vx, s.vy - s.vh * 0.95, 4, -Math.PI * 0.5, 2.2, 2.4);
+    }
+    if (at(0.46)) {
+      s.d.cue('bone_crack', 1.1, 0.7);
+      s.d.hit(5, 12, 3);
+    }
+    if (at(0.6)) s.d.cue('taser', 1.5, 0.5);
+    if (at(0.9)) {
+      s.d.cue('robot_death', 0.7);
+      s.d.hit(5, 14);
+    }
+  },
+};
+
+/** THE REGULATOR — one gavel, from a great height. */
+VISUALS.gavel_stamp = {
+  banner: 0.64,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    const rise = seg(t, 0.06, 0.3);
+    const fall = seg(t, 0.32, 0.4);
+    const hold = seg(t, 0.4, 0.52);
+    const lift = seg(t, 0.54, 0.68);
+    const sign = seg(t, 0.74, 0.9);
+    const gw = s.vh * 1.1;
+
+    kill(s, 0, 0, posePresent(1, rise * Math.sin(t * 10)));
+
+    const flat = clamp(Math.max(hold, lift), 0, 1);
+    if (lift < 0.4) {
+      squash(s, s.vx, s.gy, 1 + flat * 1.1, 1 - flat * 0.94, () => {
+        const p = P(0);
+        const k = flat;
+        tilt(p, -1.5 * k);
+        body(p, 2.2 * k, 3 * k);
+        arms(p, -1.9 * k, 0.2, -1.7 * k, 0.2);
+        legs(p, 0.7 * k, 0.3, 0.6 * k, 0.3);
+        vict(s, 0, 0, p);
+      });
+    } else {
+      // What is left is filed rather than buried.
+      const u = easeOut(lift);
+      const py = lerp(s.gy - 2, s.gy - s.vh * 1.1, u);
+      const px = lerp(s.vx, s.vx + dir * s.vh * 0.4, u);
+      s.ctx.save();
+      s.ctx.translate(px, py);
+      s.ctx.rotate(-0.12 * dir * u);
+      drawPaper(s.ctx, 0, -s.vh * 0.34, s.vh * 0.62, s.vh * 0.7, 6, s.gore > 0 ? '#f0dcd8' : PAPER);
+      if (s.gore > 0) {
+        ellipse(s.ctx, s.vh * 0.06, -s.vh * 0.06, s.vh * 0.12, s.vh * 0.05, 0.2, BLOOD, 'none');
+      }
+      if (sign > 0) {
+        s.ctx.save();
+        s.ctx.globalAlpha *= clamp(sign * 3, 0, 1);
+        s.ctx.rotate(-0.16);
+        label(s, 'DISMISSED', 0, -s.vh * 0.3, 9, '#c0242b');
+        roundRect(s.ctx, -s.vh * 0.28, -s.vh * 0.42, s.vh * 0.56, s.vh * 0.22, 2, 'none', '#c0242b', 1.3);
+        s.ctx.restore();
+      }
+      s.ctx.restore();
+    }
+
+    // The gavel: up, then very much down.
+    if (lift < 0.5) {
+      const gy2 = fall > 0
+        ? lerp(s.gy - s.vh * 2.6, s.gy - s.vh * 0.12, easeIn(fall))
+        : lerp(s.gy - s.vh * 1.2, s.gy - s.vh * 2.6, easeOut(rise));
+      const back = hold > 0 ? easeOut(hold) * s.vh * 0.18 : 0;
+      roundRect(s.ctx, s.vx - gw * 0.5, gy2 - gw * 0.24 - back, gw, gw * 0.42, 4, '#8a5a34', INK, 2);
+      roundRect(s.ctx, s.vx - gw * 0.08, gy2 - gw * 0.24 - back - gw * 0.75, gw * 0.16, gw * 0.75, 2.4, '#a06a3e', INK, 1.6);
+      s.ctx.globalAlpha *= 0.45;
+      roundRect(s.ctx, s.vx - gw * 0.44, gy2 - gw * 0.16 - back, gw * 0.88, 2.4, 1, '#c78d54', 'none');
+      s.ctx.globalAlpha /= 0.45;
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (at(0.3)) s.d.cue('whiff', 0.7);
+    if (at(0.38)) {
+      s.d.cue('explosion', 1.2, 0.7);
+      s.d.hit(13, 26, 9);
+      dust(s, s.vx, s.gy, 24, 3.6);
+      spray(s, s.vx, s.gy - 2, 26, -Math.PI * 0.5, 2.9, 4.2);
+    }
+    if (at(0.76)) s.d.cue('drop', 1.3, 0.5);
+  },
+};
+
+/** DONALD J. TRUMP — does not do this personally. Has never done this personally. */
+VISUALS.delegate_drag = {
+  banner: 0.7,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    const point = seg(t, 0.06, 0.22);
+    const arrive = seg(t, 0.24, 0.44);
+    const grab = seg(t, 0.44, 0.54);
+    const drag = seg(t, 0.56, 0.88);
+    const thumb = seg(t, 0.9, 1);
+
+    // He points. That is the entire contribution.
+    const kp = P(1);
+    arms(kp, -0.2, 0.4, thumb > 0 ? -1.2 : 1.5 * point, thumb > 0 ? 1.6 : 0.15);
+    hands(kp, 0, thumb > 0 ? -0.6 : -0.1);
+    spine(kp, 0.06, 0.05, 0, 0.04);
+    legs(kp, -0.06, 0.12, 0.08, 0.14);
+    kill(s, 0, 0, kp);
+    if (thumb > 0.3) shout(s, 'TREMENDOUS', s.kx + dir * 8, s.ky - s.kh * 1.45, thumb, 8, '#ffe14a');
+
+    const pull = easeInOut(drag) * dir * 250;
+    const vp = P(0);
+    if (grab > 0.2) {
+      const k = grab;
+      spine(vp, -0.2 * k, -0.12, 0.25 * k, 0.4 * k);
+      arms(vp, -1.9 * k, 0.5, -1.85 * k, 0.5);
+      legs(vp, -0.55 * k, 0.85 * k, -0.7 * k, 1.05 * k, 0.55, 0.6);
+      hips(vp, -0.12 * k, 0, -1.6 * k);
+    } else {
+      const p2 = posePlank(0, 0.9);
+      vict(s, 0, 0, p2);
+    }
+    if (grab > 0.2) {
+      vict(s, pull, -grab * s.vh * 0.1, vp);
+      if (drag > 0.05) {
+        s.ctx.globalAlpha *= 0.4;
+        for (let i = 0; i < 2; i++) {
+          const y = s.gy - 1 + i * 2.4;
+          capsule(s.ctx, s.vx, y, s.vx + pull, y, 0.8, '#8a8090', 'none');
+        }
+        s.ctx.globalAlpha /= 0.4;
+      }
+    }
+
+    // Two goons, drawn as silhouettes: they are staff, not characters.
+    if (arrive > 0.02 && drag < 1) {
+      const gx = lerp(s.vx + dir * 260, s.vx + dir * s.vh * 0.55, easeOut(arrive)) + pull;
+      for (let i = 0; i < 2; i++) {
+        const ox = gx + i * dir * s.vh * 0.34;
+        const bob = Math.sin(t * 24 + i) * 1.4 * (drag > 0 ? 1 : 0);
+        const h = s.vh * (1.45 + i * 0.06);
+        s.ctx.globalAlpha *= 0.92;
+        capsule(s.ctx, ox, s.gy - h * 0.1, ox, s.gy - h * 0.72 + bob, s.vh * 0.16, '#171b24', INK, 1.6);
+        ellipse(s.ctx, ox, s.gy - h * 0.86 + bob, s.vh * 0.13, s.vh * 0.15, 0, '#1d222c', INK, 1.4);
+        capsule(s.ctx, ox, s.gy - h * 0.6 + bob, ox - dir * s.vh * 0.3, s.gy - h * 0.38 + bob, s.vh * 0.05, '#1d222c', INK, 1.2);
+        // Earpiece. Nobody is on the other end.
+        ellipse(s.ctx, ox + dir * s.vh * 0.09, s.gy - h * 0.86 + bob, 1.5, 1.5, 0, '#4a5260', 'none');
+        s.ctx.globalAlpha /= 0.92;
+      }
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (at(0.1)) s.d.cue('ui_select', 0.7, 0.5);
+    if (at(0.46)) {
+      s.d.cue('grunt', 0.8);
+      s.d.hit(4, 12);
+    }
+    if (at(0.58)) s.d.cue('drop', 0.9, 0.5);
+    if (at(0.9)) s.d.cue('ui_back', 0.8, 0.5);
+  },
+};
+
+/** DONALD J. TRUMP — the wall, and the invoice for the wall. */
+VISUALS.wall_drop = {
+  banner: 0.62,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    const point = seg(t, 0.06, 0.24);
+    const fall = seg(t, 0.28, 0.38);
+    const land = seg(t, 0.38, 0.46);
+    const bill = seg(t, 0.6, 0.86);
+    const w = s.vh * 1.5;
+    const h = s.vh * 1.05;
+
+    kill(s, 0, 0, fall > 0.5 ? poseSmug(1, Math.sin(t * 6)) : posePresent(1, point));
+
+    if (fall < 0.6) {
+      const p = P(0);
+      const look = point;
+      spine(p, -0.1 * look, -0.14 * look, -0.4 * look, -0.7 * look);
+      arms(p, -0.35 * look, 0.5, -0.3 * look, 0.5);
+      legs(p, 0.05, 0.12, -0.05, 0.12);
+      vict(s, 0, 0, p);
+    }
+
+    const y = lerp(s.gy - 300, s.gy, easeIn(fall)) - (land > 0 ? Math.sin(land * Math.PI) * 3 : 0);
+    // Brick, laid in courses, because a wall that is one rectangle is a slab.
+    roundRect(s.ctx, s.vx - w * 0.5, y - h, w, h, 1.5, '#9c5b3e', INK, 2);
+    s.ctx.globalAlpha *= 0.45;
+    for (let r = 0; r < 6; r++) {
+      const by = y - h + (h / 6) * r;
+      s.ctx.fillStyle = '#6d3a26';
+      s.ctx.fillRect(s.vx - w * 0.5, by, w, 1.2);
+      for (let c = 0; c < 6; c++) {
+        const bx = s.vx - w * 0.5 + (w / 6) * c + (r & 1 ? w / 12 : 0);
+        s.ctx.fillRect(bx, by, 1.2, h / 6);
+      }
+    }
+    s.ctx.globalAlpha /= 0.45;
+    if (land > 0.3) bloodPool(s, s.vx, s.gy, w * 0.55, seg(t, 0.46, 0.8));
+
+    if (bill > 0.02) {
+      // The invoice, arriving by air, face up, addressed to the deceased.
+      const u = easeOut(bill);
+      const bx = s.vx + Math.sin(t * 7) * 12 * (1 - u);
+      const by = lerp(s.gy - s.vh * 2.4, y - h - 3, u);
+      s.ctx.save();
+      s.ctx.translate(bx, by);
+      s.ctx.rotate((1 - u) * 0.6 * dir - 0.1);
+      drawPaper(s.ctx, 0, 0, s.vh * 0.7, s.vh * 0.42, 3);
+      label(s, 'INVOICE', 0, s.vh * 0.1, 7, '#2a2f38');
+      s.ctx.restore();
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (at(0.28)) s.d.cue('whiff', 0.6);
+    if (at(0.38)) {
+      s.d.cue('explosion', 0.8);
+      s.d.hit(13, 26, 8);
+      dust(s, s.vx, s.gy, 30, 4.4);
+      spray(s, s.vx, s.gy - 3, 20, -Math.PI * 0.5, 2.9, 4);
+    }
+    if (at(0.62)) s.d.cue('coin', 1.2, 0.5);
+  },
+};
+
+/** OPTIMUS — folds him. Neatly. It was built to do exactly this. */
+VISUALS.fold_stack = {
+  banner: 0.72,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    const lift = seg(t, 0.05, 0.2);
+    const f1 = seg(t, 0.24, 0.36);
+    const f2 = seg(t, 0.4, 0.52);
+    const f3 = seg(t, 0.56, 0.68);
+    const place = seg(t, 0.74, 0.9);
+
+    kill(s, 0, 0, place > 0.5 ? poseSmug(1, 0) : poseThrust(1, lift, 0.5));
+
+    // Three folds: each one halves him and squares off the corners.
+    const folds = f1 * 1 + f2 * 1 + f3 * 1;
+    const hover = easeOut(lift) * s.vh * 0.7;
+    const stackY = s.gy - (place > 0 ? easeInOut(place) * 0 : 0);
+    const cx = s.vx + (place > 0 ? easeInOut(place) * dir * s.vh * 0.7 : 0);
+    const cy = stackY - hover + (place > 0 ? easeInOut(place) * (hover - s.vh * 0.26) : 0);
+
+    const sx = 1 - clamp(folds, 0, 3) * 0.28;
+    const sy = 1 - clamp(folds, 0, 3) * 0.22;
+    squash(s, cx, cy, sx, sy, () => {
+      const p = P(0);
+      const k = clamp(folds / 3, 0, 1);
+      tilt(p, 0.2 * k);
+      spine(p, 1.2 * k, 0.9 * k, 0.4 * k, 0.9 * k);
+      arms(p, 1.7 * k - 0.2, 2.4 * k, 1.65 * k - 0.2, 2.4 * k);
+      legs(p, 1.8 * k, 2.5 * k, 1.7 * k, 2.5 * k, 0.6 * k, 0.6 * k);
+      hips(p, 0.5 * k, 0, -3 * k);
+      actor(s, s.victim, cx, cy + s.vh * (1 - sy * 0.2), p, (-dir) as Facing, s.vs * (1 - k * 0.1));
+    });
+    // Crisp edges, drawn over the top: laundry, not a body.
+    if (folds > 1.4) {
+      const w = s.vh * 0.5 * (1 - (folds - 1.4) * 0.16);
+      const h = s.vh * 0.22;
+      s.ctx.save();
+      s.ctx.globalAlpha *= clamp((folds - 1.4) * 1.2, 0, 0.85);
+      roundRect(s.ctx, cx - w * 0.5, cy - h, w, h, 1.2, 'none', INK, 1.4);
+      s.ctx.restore();
+    }
+    if (place > 0.6) {
+      drawLooseHat(s.ctx, s.victim.style, cx, cy - s.vh * 0.22, 0, s.vs * 0.42);
+    }
+    // The two he did earlier.
+    for (let i = 0; i < 2; i++) {
+      const w = s.vh * 0.5;
+      const h = s.vh * 0.13;
+      const y = s.gy - i * (h + 1.4);
+      roundRect(s.ctx, s.vx + dir * s.vh * 0.7 - w * 0.5, y - h, w, h, 1.4, i ? '#c9d2dc' : '#dfe4ea', INK, 1.5);
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (at(0.07)) s.d.cue('robot_death', 1.7, 0.25);
+    for (let i = 0; i < 3; i++) {
+      if (at(0.3 + i * 0.16)) {
+        s.d.cue('bone_crack', 0.9 - i * 0.08);
+        s.d.cue('robot_death', 1.4, 0.2);
+        s.d.hit(6 + i * 2, 14, 2 + i * 2);
+        spray(s, s.vx, s.vy - s.vh * 0.6, 8 + i * 5, -Math.PI * 0.5, 2.6, 2.8);
+      }
+    }
+    if (at(0.78)) s.d.cue('drop', 1.1, 0.5);
+  },
+};
+
+/** GROK — confidently reports that he was never here. */
+VISUALS.hallucinated = {
+  banner: 0.68,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    const scan = seg(t, 0.06, 0.3);
+    const label2 = seg(t, 0.32, 0.44);
+    const glitch = seg(t, 0.48, 0.74);
+    const gone = seg(t, 0.74, 0.86);
+    const foot = seg(t, 0.88, 1);
+
+    kill(s, 0, 0, posePresent(1, Math.sin(t * 7)));
+
+    if (gone < 1) {
+      // He de-renders in bands, which is what an answer looks like when it is
+      // being made up as it goes.
+      const bands = 9;
+      const p = P(0);
+      const alarm = clamp(label2 + glitch, 0, 1);
+      spine(p, -0.08, -0.08, -0.18 * alarm, -0.3 * alarm);
+      arms(p, 0.55 * alarm, 1.1, 0.5 * alarm, 1.1);
+      legs(p, 0.05, 0.2, -0.05, 0.2);
+      for (let i = 0; i < bands; i++) {
+        const u = i / bands;
+        const drop = clamp((gone - u * 0.5) * 3, 0, 1);
+        if (drop >= 1) continue;
+        const y0 = s.gy - s.vh * 1.15 + (s.vh * 1.2 * i) / bands;
+        const off2 = glitch > 0 && !s.reduced ? jitter(s.seed + i, Math.floor(s.f * 0.25)) * glitch * 7 : 0;
+        clipRect(s, s.vx - 60, y0, 120, s.vh * 1.2 / bands + 0.6, () => {
+          s.ctx.globalAlpha *= 1 - drop;
+          actor(s, s.victim, s.vx + off2, s.gy, p, (-dir) as Facing, s.vs);
+        });
+      }
+    }
+
+    // The annotation. Extremely confident, slightly to the left of correct.
+    if (scan > 0.3) {
+      const w = s.vh * 0.9;
+      const h = s.vh * 1.3;
+      s.ctx.globalAlpha *= clamp(scan * 2, 0, 1) * (1 - gone * 0.8);
+      roundRect(s.ctx, s.vx - w * 0.5 + 6, s.gy - h, w, h, 1, 'none', NEON, 1.1);
+      for (let i = 0; i < 4; i++) {
+        const cxx = s.vx - w * 0.5 + 6 + (i & 1 ? w : 0);
+        const cyy = s.gy - h + (i > 1 ? h : 0);
+        capsule(s.ctx, cxx - 3, cyy, cxx + 3, cyy, 1, NEON, 'none');
+      }
+      s.ctx.globalAlpha /= clamp(scan * 2, 0, 1) * (1 - gone * 0.8);
+    }
+    if (label2 > 0.05) {
+      const bx = s.vx + dir * s.vh * 0.8;
+      const by = s.gy - s.vh * 1.35;
+      s.ctx.globalAlpha *= clamp(label2 * 3, 0, 1);
+      roundRect(s.ctx, bx - 46, by - 9, 92, 18, 2, '#101a24', NEON, 1.2);
+      label(s, 'NOT IN TRAINING DATA', bx, by, 6.5, NEON);
+      s.ctx.globalAlpha /= clamp(label2 * 3, 0, 1);
+    }
+    if (foot > 0.02) {
+      label(s, '[1]', s.vx, s.gy - s.vh * 0.5, 12 * easeOutBack(clamp(foot * 3, 0, 1)), '#8be0c8');
+      label(s, 'source: itself', s.vx, s.gy - s.vh * 0.2, 5.5, '#4e6a66');
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (at(0.08)) s.d.cue('ui_move', 1.4, 0.4);
+    if (at(0.33)) s.d.cue('ui_error', 1.2, 0.6);
+    if (s.f > s.dur * 0.48 && s.f < s.dur * 0.74 && s.f % 7 === 0) {
+      s.d.cue('glass', 1.8, 0.16);
+      emit(
+        s, s.vx, s.vy - s.vh * 0.6, 4, -Math.PI * 0.5, 2.8, 0.4, 2,
+        [NEON, '#8be0c8', '#ffffff'], 'shard', -0.04, 1.8, 24,
+      );
+    }
+    if (at(0.76)) {
+      s.d.cue('ui_back', 0.7);
+      s.d.hit(4, 12);
+    }
+  },
+};
+
+/** STARSHIP — strapped to the nose. A successful test. */
+VISUALS.rud_launch = {
+  banner: 0.78,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    const strap = seg(t, 0.05, 0.22);
+    const ign = seg(t, 0.26, 0.36);
+    const climb = seg(t, 0.36, 0.6);
+    const boom = seg(t, 0.62, 0.68);
+    const rain = seg(t, 0.68, 0.92);
+    const rw = s.vh * 0.4;
+    const rh = s.vh * 1.6;
+
+    const rise = easeIn(climb) * 420;
+    const rx = s.vx;
+    const ry = s.gy - rise - (ign > 0 ? Math.sin(t * 90) * 1.4 : 0);
+
+    if (boom < 0.5) {
+      // Rocket: a tube, a nose cone, three fins, one passenger.
+      capsule(s.ctx, rx, ry - rh * 0.15, rx, ry - rh, rw * 0.5, '#cfd6de', INK, 1.8);
+      poly(s.ctx, [rx - rw * 0.5, ry - rh, rx + rw * 0.5, ry - rh, rx, ry - rh - rw * 0.9], '#e4eaf0', INK, 1.6);
+      for (let i = -1; i <= 1; i += 2) {
+        poly(
+          s.ctx,
+          [rx + i * rw * 0.45, ry - rh * 0.28, rx + i * rw * 1.05, ry - rh * 0.02, rx + i * rw * 0.45, ry - rh * 0.02],
+          '#aab2bb',
+          INK,
+          1.4,
+        );
+      }
+      const p = P(0);
+      const panic = clamp(strap + climb, 0, 1);
+      tilt(p, 0);
+      arms(p, -1.4 * panic, 0.7, -1.35 * panic, 0.7);
+      legs(p, 0.3 * panic, 0.6, 0.2 * panic, 0.6);
+      spine(p, -0.1, -0.1, -0.2 * panic, -0.35 * panic);
+      actor(s, s.victim, rx + dir * rw * 0.5, ry - rh * 0.62 + s.vh, p, (-dir) as Facing, s.vs * 0.9);
+      // Strapping, which is one ratchet strap and a great deal of confidence.
+      capsule(s.ctx, rx - rw * 0.2, ry - rh * 0.5, rx + rw * 0.9, ry - rh * 0.5, 1.2, '#ff6a2a', INK, 0.9);
+
+      if (ign > 0.1) {
+        const fl = (1 + Math.sin(t * 70) * 0.14) * (0.4 + climb);
+        poly(
+          s.ctx,
+          [
+            rx - rw * 0.42, ry - rh * 0.14,
+            rx + rw * 0.42, ry - rh * 0.14,
+            rx + rw * 0.2, ry + rh * 0.5 * fl,
+            rx, ry + rh * 0.8 * fl,
+            rx - rw * 0.2, ry + rh * 0.5 * fl,
+          ],
+          '#ffb03a',
+          'none',
+        );
+        poly(
+          s.ctx,
+          [
+            rx - rw * 0.22, ry - rh * 0.12,
+            rx + rw * 0.22, ry - rh * 0.12,
+            rx, ry + rh * 0.5 * fl,
+          ],
+          '#fff6d8',
+          'none',
+        );
+      }
+    }
+    if (boom > 0 && boom < 1) {
+      burst(s.ctx, rx, s.gy - 460, 120 * easeOut(boom), 12, '#ffd166', 0.3);
+      burst(s.ctx, rx, s.gy - 460, 78 * easeOut(boom), 9, '#fff6d8', 1.1);
+    }
+    // What comes back down: one boot, and a great deal of confetti.
+    if (rain > 0.05) {
+      const u = easeIn(clamp(rain * 1.4, 0, 1));
+      const bx = rx + dir * 26;
+      const by = lerp(s.gy - 300, s.gy - 3, u);
+      s.ctx.save();
+      s.ctx.translate(bx, by);
+      s.ctx.rotate(u < 1 ? t * 12 : 0.4);
+      roundRect(s.ctx, -5, -3, 10, 6, 1.8, '#2a2530', INK, 1.3);
+      s.ctx.restore();
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (at(0.06)) s.d.cue('drop', 1.2, 0.5);
+    if (at(0.27)) {
+      s.d.cue('super_charge', 0.7);
+      dust(s, s.vx, s.gy, 30, 4);
+      s.d.hit(6, 30);
+    }
+    if (s.f > s.dur * 0.3 && s.f < s.dur * 0.6 && s.f % 4 === 0) {
+      emit(s, s.vx, s.gy, 8, Math.PI * 0.5, 1.6, 1.5, 4, SPARK_COLORS, 'smoke', -0.02, 5, 40);
+    }
+    if (at(0.63)) {
+      s.d.cue('explosion', 0.6);
+      s.d.hit(16, 34, 14);
+      s.d.splatter(8);
+      confetti(s, s.vx, s.gy - 260, 70);
+      spray(s, s.vx, s.gy - 200, 34, -Math.PI * 0.5, 3.0, 5.4);
+    }
+    if (at(0.93)) {
+      s.d.cue('land', 1.6, 0.5);
+      s.d.hit(3, 10);
+    }
+  },
+};
+
+/** STARSHIP — held in the exhaust. A shadow is left on the floor. */
+VISUALS.static_fire = {
+  banner: 0.7,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    const hold = seg(t, 0.05, 0.2);
+    const fire = seg(t, 0.24, 0.62);
+    const ash = seg(t, 0.62, 0.76);
+    const hat = seg(t, 0.78, 0.96);
+    const ex = s.vx - dir * s.vh * 1.5;
+    const ey = s.gy - s.vh * 0.6;
+
+    // The engine bell, off to one side, pointed at a man.
+    poly(
+      s.ctx,
+      [
+        ex - dir * s.vh * 0.5, ey - s.vh * 0.4,
+        ex - dir * s.vh * 0.5, ey + s.vh * 0.4,
+        ex + dir * s.vh * 0.1, ey + s.vh * 0.55,
+        ex + dir * s.vh * 0.1, ey - s.vh * 0.55,
+      ],
+      '#aab2bb',
+      INK,
+      1.8,
+    );
+    if (fire > 0 && ash < 1) {
+      const fl = 1 + Math.sin(t * 80) * 0.1;
+      const len = s.vh * 2.2 * fl * clamp(fire * 2, 0, 1);
+      poly(
+        s.ctx,
+        [
+          ex + dir * s.vh * 0.1, ey - s.vh * 0.5,
+          ex + dir * s.vh * 0.1, ey + s.vh * 0.5,
+          ex + dir * len, ey + s.vh * 0.14,
+          ex + dir * len, ey - s.vh * 0.14,
+        ],
+        '#ff8a2a',
+        'none',
+      );
+      poly(
+        s.ctx,
+        [
+          ex + dir * s.vh * 0.12, ey - s.vh * 0.28,
+          ex + dir * s.vh * 0.12, ey + s.vh * 0.28,
+          ex + dir * len * 0.9, ey,
+        ],
+        '#fff6d8',
+        'none',
+      );
+    }
+
+    // He goes from a man, to a silhouette, to a mark on the floor.
+    const burn = clamp(fire, 0, 1);
+    if (ash < 1) {
+      const p = P(0);
+      const brace = clamp(hold + burn, 0, 1);
+      spine(p, 0.3 * brace, 0.25 * brace, 0.1, 0.2 * brace);
+      arms(p, 1.3 * brace, 1.0, 1.25 * brace, 1.0);
+      legs(p, -0.3 * brace, 0.5 * brace, 0.4 * brace, 0.6 * brace, 0.2, 0.2);
+      hips(p, 0.1 * brace, 0, -1.5 * brace);
+      const tintK = burn > 0.35 ? '#1a1520' : undefined;
+      actor(s, s.victim, s.vx, s.gy, p, (-dir) as Facing, s.vs, 1 - ash, 0, tintK);
+    }
+    if (ash > 0.1) {
+      // The stencil. Arms still up.
+      s.ctx.globalAlpha *= clamp(ash * 2, 0, 1) * 0.75;
+      const p = P(1);
+      spine(p, 0.3, 0.25, 0.1, 0.2);
+      arms(p, 1.3, 1.0, 1.25, 1.0);
+      legs(p, -0.3, 0.5, 0.4, 0.6, 0.2, 0.2);
+      squash(s, s.vx, s.gy, 1.1, 0.24, () => {
+        actor(s, s.victim, s.vx, s.gy, p, (-dir) as Facing, s.vs, 1, 0, '#0a0810');
+      });
+      s.ctx.globalAlpha /= clamp(ash * 2, 0, 1) * 0.75;
+    }
+    if (hat > 0.02) {
+      // The hat survives, because of course the hat survives.
+      const u = easeOut(hat);
+      const hy = lerp(s.gy - s.vh * 1.8, s.gy - 2, u);
+      drawLooseHat(s.ctx, s.victim.style, s.vx + Math.sin(t * 6) * 8 * (1 - u), hy, 0.4 * dir, s.vs);
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (at(0.24)) {
+      s.d.cue('engine', 0.5, 0.9);
+      s.d.hit(6, 40);
+    }
+    if (s.f > s.dur * 0.24 && s.f < s.dur * 0.62 && s.f % 5 === 0) {
+      emit(s, s.vx, s.vy - s.vh * 0.5, 7, Math.PI * (s.dir > 0 ? 0 : 1), 0.9, 2, 5, SPARK_COLORS, 'spark', -0.03, 2.2, 26);
+      if (s.f % 15 === 0) spray(s, s.vx, s.vy - s.vh * 0.55, 5, Math.PI * (s.dir > 0 ? 0 : 1), 1, 3.4);
+    }
+    if (at(0.63)) {
+      s.d.cue('explosion', 1.3, 0.6);
+      s.d.hit(9, 20, 6);
+      dust(s, s.vx, s.gy, 22, 3);
+    }
+    if (at(0.8)) s.d.cue('hit_flesh', 1.9, 0.2);
+  },
+};
+
+/** THE GOVERNOR OF MARS — the air subscription lapses. */
+VISUALS.airlock_vent = {
+  banner: 0.7,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    const seal = seg(t, 0.05, 0.22);
+    const cycle = seg(t, 0.26, 0.42);
+    const swell = seg(t, 0.42, 0.58);
+    const suck = seg(t, 0.58, 0.78);
+    const shut = seg(t, 0.82, 0.94);
+    const dw = s.vh * 1.1;
+    const dh = s.vh * 1.7;
+    const dx = s.vx + dir * s.vh * 0.9;
+
+    // He waves once the door has him. Until then he simply watches.
+    if (suck > 0.5) {
+      const wv = Math.sin(t * 22);
+      const p = P(1);
+      arms(p, -0.2, 0.4, -1.9, 0.5 + wv * 0.4);
+      hands(p, 0, wv * 0.4);
+      spine(p, -0.05, -0.05, 0.02, 0.04);
+      legs(p, 0.05, 0.1, -0.05, 0.1);
+      kill(s, 0, 0, p);
+    } else {
+      kill(s, 0, 0, poseSmug(1, Math.sin(t * 5)));
+    }
+
+    // The outer door and, once it is open, the part of Mars behind it.
+    const open = clamp(cycle - shut, 0, 1);
+    roundRect(s.ctx, dx - dw * 0.5, s.gy - dh, dw, dh, 4, '#3a3f4a', INK, 2);
+    if (open > 0.02) {
+      roundRect(s.ctx, dx - dw * 0.38, s.gy - dh * 0.92, dw * 0.76, dh * 0.86, 3, '#0a0912', INK, 1.4);
+      for (let i = 0; i < 7; i++) {
+        const px = dx - dw * 0.3 + hash(i * 3.1) * dw * 0.6;
+        const py = s.gy - dh * 0.9 + hash(i * 7.7) * dh * 0.8;
+        ellipse(s.ctx, px, py, 0.9, 0.9, 0, '#dfe6ff', 'none');
+      }
+      // The half-open leaf.
+      roundRect(s.ctx, dx - dw * 0.5 + dw * open * 0.86, s.gy - dh * 0.92, dw * 0.4, dh * 0.86, 2, '#4a505c', INK, 1.6);
+    }
+
+    const puff = 1 + easeOut(swell) * 0.5;
+    const away = easeIn(suck);
+    const px2 = s.vx + away * (dx - s.vx + dir * 60);
+    const py2 = s.gy - away * s.vh * 0.9 - easeOut(swell) * s.vh * 0.2;
+    if (away < 0.98) {
+      squash(s, px2, py2, puff, puff * (1 - away * 0.2), () => {
+        const p = P(0);
+        const k = clamp(swell + suck, 0, 1);
+        tilt(p, away * 1.2 * dir);
+        arms(p, -1.2 * k, 0.6, -1.1 * k, 0.6);
+        legs(p, 0.5 * k, 0.7 * k, 0.35 * k, 0.75 * k);
+        spine(p, -0.1, -0.1, -0.2 * k, -0.3 * k);
+        actor(s, s.victim, px2, py2 + s.vh, p, (-dir) as Facing, s.vs * (1 - away * 0.35), 1 - away * 0.6);
+      });
+    }
+    if (seal > 0.5 && cycle < 0.4) {
+      label(s, 'SUBSCRIPTION LAPSED', s.vx, s.gy - s.vh * 1.7, 7, '#ffb04a');
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (at(0.08)) s.d.cue('ui_error', 0.9, 0.5);
+    if (at(0.27)) {
+      s.d.cue('whiff', 0.4, 0.9);
+      s.d.hit(5, 30);
+    }
+    if (s.f > s.dur * 0.42 && s.f < s.dur * 0.78 && s.f % 6 === 0) {
+      emit(
+        s, s.vx, s.vy - s.vh * 0.5, 6, s.dir > 0 ? 0 : Math.PI, 0.7, 2, 4.6,
+        ['#dfe6ff', '#9fd8ff'], 'smoke', -0.05, 3.4, 30,
+      );
+    }
+    if (at(0.6)) s.d.cue('glass', 0.6, 0.5);
+    if (at(0.84)) {
+      s.d.cue('hit_metal', 0.6);
+      s.d.hit(7, 16);
+    }
+  },
+};
+
+/** SNOW WHITE MK. II — the kiss. Ninety-six percent of one. */
+VISUALS.kiss_shatter = {
+  banner: 0.68,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    const lean = seg(t, 0.06, 0.28);
+    const kiss = seg(t, 0.28, 0.4);
+    const frost = seg(t, 0.4, 0.62);
+    const crack = seg(t, 0.64, 0.72);
+    const shatter = seg(t, 0.72, 0.82);
+    const wipe = seg(t, 0.86, 1);
+
+    const kp = P(1);
+    const bend = kiss > 0 && shatter <= 0 ? 1 : easeOut(lean) * (1 - shatter);
+    if (wipe > 0) {
+      arms(kp, -0.3, 0.4, -1.8 + wipe * 0.5, 1.8);
+      hands(kp, 0, -0.4);
+      spine(kp, -0.05, -0.05, 0.04, 0.06);
+      legs(kp, 0.05, 0.1, -0.05, 0.1);
+    } else {
+      spine(kp, 0.28 * bend, 0.22 * bend, -0.1 * bend, -0.15 * bend);
+      arms(kp, 0.4 * bend, 0.6, 1.1 * bend, 0.9);
+      hands(kp, 0, -0.3 * bend);
+      legs(kp, -0.15 * bend, 0.25, 0.2 * bend, 0.3);
+      hips(kp, 0.1 * bend, 0, -1.2 * bend);
+    }
+    kill(s, bend * s.kh * 0.06 * 1, 0, kp);
+
+    if (shatter < 1) {
+      const ice = clamp(frost, 0, 1);
+      const p = P(0);
+      const stiff = ice;
+      spine(p, -0.05 - 0.1 * stiff, -0.05, -0.05, -0.1 * stiff);
+      arms(p, -0.1 - 0.5 * stiff, 0.3, -0.08 - 0.45 * stiff, 0.3);
+      legs(p, 0.02, 0.08, -0.02, 0.08);
+      const tintC = ice > 0.15 ? '#bfe6ff' : undefined;
+      vict(s, 0, 0, p, 1 - shatter * 0.4, kiss > 0 && frost < 0.1 ? 0.3 : 0, undefined, tintC);
+      if (ice > 0.2) {
+        // Frost creeping up, drawn as a rim of ice on the silhouette.
+        s.ctx.globalAlpha *= ice * 0.5;
+        for (let i = 0; i < 7; i++) {
+          const u = i / 7;
+          const y = s.gy - s.vh * 1.1 * u * ice * 1.3;
+          zigzag(s.ctx, s.vx - s.vh * 0.22, y, s.vx + s.vh * 0.22, y, 1.6, 4, '#dff2ff', 0.8);
+        }
+        s.ctx.globalAlpha /= ice * 0.5;
+      }
+      if (crack > 0) {
+        for (let i = 0; i < 5; i++) {
+          const x0 = s.vx + (hash(i * 4.1) - 0.5) * s.vh * 0.4;
+          zigzag(s.ctx, x0, s.gy - s.vh * (0.2 + hash(i) * 0.8), x0 + (hash(i * 2) - 0.5) * 14, s.gy - s.vh * (0.1 + hash(i * 3) * 0.9), 2.4, 4, '#ffffff', 1);
+        }
+      }
+    }
+    if (shatter > 0.05) {
+      // The pile. Sharp, blue, and knee height.
+      const k = easeOut(shatter);
+      for (let i = 0; i < 14; i++) {
+        const a = hash(i * 5.3) * TAU;
+        const r = hash(i * 9.1) * s.vh * 0.5 * k;
+        const px = s.vx + Math.cos(a) * r;
+        const py = s.gy - Math.abs(Math.sin(a)) * 5 * k;
+        poly(
+          s.ctx,
+          [px, py - 5 * k, px + 3 * k, py, px - 3 * k, py],
+          i & 1 ? '#cfe9ff' : '#a9d4f0',
+          INK,
+          0.9,
+        );
+      }
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (at(0.3)) s.d.cue('super_charge', 1.4, 0.35);
+    if (at(0.42)) s.d.cue('glass', 0.6, 0.5);
+    if (at(0.66)) {
+      s.d.cue('glass', 1.2, 0.7);
+      s.d.hit(5, 12);
+    }
+    if (at(0.73)) {
+      s.d.cue('ko', 1.1);
+      s.d.cue('glass', 0.8);
+      s.d.hit(11, 24, 4);
+      emit(
+        s, s.vx, s.vy - s.vh * 0.55, 40, -Math.PI * 0.5, 3.1, 1.4, 4.6,
+        ['#dff2ff', '#a9d4f0', '#ffffff'], 'shard', 0.3, 2.6, 50,
+      );
+      spray(s, s.vx, s.vy - s.vh * 0.5, 10, -Math.PI * 0.5, 3, 3);
+    }
+  },
+};
+
+/** ELON MUSK — at last, the exploded view. */
+VISUALS.exploded_view = {
+  banner: 0.76,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    const lift = seg(t, 0.06, 0.24);
+    const apart = seg(t, 0.26, 0.5);
+    const study = seg(t, 0.5, 0.72);
+    const file = seg(t, 0.78, 0.94);
+    const spread2 = easeOut(apart) * (1 - easeIn(file));
+    const hover = easeOut(lift) * s.vh * 0.5 * (1 - easeIn(file));
+
+    kill(s, study > 0.2 ? dir * 10 * easeInOut(seg(t, 0.5, 0.7)) : 0, 0, posePresent(1, Math.sin(t * 6)));
+
+    // Five clipped bands of one rig, pulled apart, labelled, and floating.
+    const parts = 5;
+    const cy = s.gy - hover;
+    for (let i = 0; i < parts; i++) {
+      const u = i / (parts - 1);
+      const bandH = (s.vh * 1.2) / parts;
+      const y0 = s.gy - s.vh * 1.15 + bandH * i;
+      const ox = (u - 0.5) * spread2 * s.vh * 1.5;
+      const oy = -spread2 * (parts - i) * bandH * 0.55;
+      const drift = s.reduced ? 0 : Math.sin(t * 5 + i) * 1.6 * spread2;
+      s.ctx.save();
+      s.ctx.translate(ox + drift, oy - hover);
+      clipRect(s, s.vx - 60, y0, 120, bandH + 0.6, () => {
+        const p = P(0);
+        arms(p, -0.4, 0.4, -0.35, 0.4);
+        legs(p, 0.05, 0.1, -0.05, 0.1);
+        actor(s, s.victim, s.vx, s.gy, p, (-dir) as Facing, s.vs, 1 - file * 0.6);
+      });
+      // Leader line and part number, in the style of a manual nobody reads.
+      if (spread2 > 0.4 && file < 0.5) {
+        const lx = s.vx + s.vh * 0.42;
+        const ly = y0 + bandH * 0.5;
+        s.ctx.globalAlpha *= 0.8;
+        capsule(s.ctx, lx, ly, lx + 16, ly - 4, 0.5, NEON, 'none');
+        ellipse(s.ctx, lx, ly, 1.3, 1.3, 0, NEON, 'none');
+        label(s, PART_IDS[i], lx + 20, ly - 4, 5.5, NEON, 'left');
+        s.ctx.globalAlpha /= 0.8;
+      }
+      s.ctx.restore();
+    }
+    if (spread2 > 0.5 && file < 0.4) {
+      label(s, 'FIG. 1 — DWARF, ASSEMBLY', s.vx, cy - s.vh * 1.5, 7, '#8be0c8');
+    }
+    // The drawer. It closes on the whole diagram.
+    if (file > 0.02) {
+      const k = easeInOut(file);
+      const w = s.vh * 1.6;
+      const h = s.vh * 0.5;
+      const y = s.gy - h * k;
+      roundRect(s.ctx, s.vx - w * 0.5, y, w, h, 2, '#4a505c', INK, 1.8);
+      roundRect(s.ctx, s.vx - w * 0.16, y + h * 0.4, w * 0.32, 3.2, 1.4, '#8f98a6', INK, 1.2);
+      if (k > 0.7) label(s, 'D-07', s.vx, y + h * 0.18, 6, '#c6ccd4');
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (at(0.08)) s.d.cue('super_charge', 1.2, 0.4);
+    if (at(0.28)) {
+      s.d.cue('bone_crack', 0.7);
+      s.d.hit(8, 20, 8);
+      spray(s, s.vx, s.vy - s.vh * 0.6, 30, -Math.PI * 0.5, 3.1, 4.4);
+    }
+    if (s.f > s.dur * 0.3 && s.f < s.dur * 0.5 && s.f % 9 === 0) {
+      spray(s, s.vx, s.vy - s.vh * 0.7, 6, -Math.PI * 0.5, 2.8, 2.6);
+      s.d.cue('bone_crack', 1.5, 0.25);
+    }
+    if (at(0.72)) s.d.cue('super_blast', 0.8, 0.6);
+    if (at(0.95)) {
+      s.d.cue('hit_metal', 0.7);
+      s.d.hit(6, 16);
+    }
+  },
+};
+
+const PART_IDS: readonly string[] = ['D-07-A', 'D-07-B', 'D-07-C', 'D-07-D', 'D-07-E'];
+
+/** ELON MUSK — undervalued, bought anyway, shut down on Friday. */
+VISUALS.acquired_box = {
+  banner: 0.72,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    const tag = seg(t, 0.06, 0.22);
+    const fold = seg(t, 0.26, 0.48);
+    const tape = seg(t, 0.52, 0.64);
+    const stamp = seg(t, 0.66, 0.76);
+    const away = seg(t, 0.84, 1);
+    const bw = s.vh * 0.78;
+    const bh = s.vh * 0.66;
+    const bx = s.vx + easeIn(away) * dir * 240;
+
+    kill(s, 0, 0, poseSmug(1, Math.sin(t * 6)));
+
+    // Into the box, knees first, hat last.
+    const inK = easeInOut(fold);
+    if (inK < 0.98) {
+      squash(s, s.vx, s.gy, 1 + inK * 0.2, 1 - inK * 0.45, () => {
+        const p = P(0);
+        const k = inK;
+        spine(p, 0.8 * k, 0.6 * k, 0.2, 0.6 * k);
+        arms(p, 1.4 * k - 0.1, 1.8 * k, 1.35 * k - 0.1, 1.8 * k);
+        legs(p, 1.5 * k, 2.0 * k, 1.35 * k, 2.0 * k, 0.5 * k, 0.5 * k);
+        hips(p, 0.4 * k, 0, -5 * k);
+        vict(s, 0, 0, p);
+      });
+    }
+    drawBox(s.ctx, bx, s.gy, bw, bh, clamp(tape, 0, 1));
+    if (tape > 0.4) {
+      s.ctx.globalAlpha *= 0.85;
+      roundRect(s.ctx, bx - bw * 0.5, s.gy - bh - 1.2, bw, 3, 0.6, '#e6dcc4', INK, 0.7);
+      s.ctx.globalAlpha /= 0.85;
+    }
+    if (stamp > 0) {
+      s.ctx.save();
+      s.ctx.globalAlpha *= clamp(stamp * 3, 0, 1);
+      s.ctx.translate(bx, s.gy - bh * 0.55);
+      s.ctx.rotate(-0.16);
+      const sc = 1 + (1 - easeOut(stamp)) * 1.6;
+      s.ctx.scale(sc, sc);
+      label(s, 'ACQUIRED', 0, 0, 10, '#c0242b');
+      roundRect(s.ctx, -30, -8, 60, 16, 2, 'none', '#c0242b', 1.3);
+      s.ctx.restore();
+    }
+    // The price tag, which is the insult.
+    if (tag > 0.05) {
+      const u = easeOutBack(clamp(tag, 0, 1));
+      const tx = bx + dir * bw * 0.5;
+      const ty = s.gy - bh * (fold > 0.5 ? 0.85 : 1.4);
+      s.ctx.save();
+      s.ctx.translate(tx, ty);
+      s.ctx.rotate(0.25 * dir);
+      s.ctx.scale(u, u);
+      roundRect(s.ctx, -13, -7, 26, 14, 2, '#f2ecdc', INK, 1.2);
+      ellipse(s.ctx, -9, 0, 1.4, 1.4, 0, '#2a2f38', 'none');
+      label(s, '$1', 3, 0, 8, '#2a2f38');
+      s.ctx.restore();
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (at(0.08)) s.d.cue('coin', 1.3, 0.6);
+    if (at(0.28)) {
+      s.d.cue('drop', 0.9);
+      s.d.hit(4, 12);
+    }
+    if (at(0.4)) {
+      s.d.cue('bone_crack', 1.3, 0.5);
+      spray(s, s.vx, s.gy - s.vh * 0.4, 8, -Math.PI * 0.5, 2.4, 2.2);
+    }
+    if (at(0.54)) s.d.cue('hit_metal', 1.8, 0.35);
+    if (at(0.68)) {
+      s.d.cue('hit_metal', 0.7);
+      s.d.hit(6, 14);
+    }
+    if (at(0.86)) s.d.cue('drop', 0.6, 0.5);
+  },
+};

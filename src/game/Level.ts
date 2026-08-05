@@ -16,6 +16,11 @@
  * `level.update(ctx)`. `render` draws everyone, players included, because the
  * whole point is that they interleave by depth.
  *
+ * FINISHERS — while the fatality director has a kill on stage the map is put on
+ * hold: see `beginFatality`. Nothing walks on, nothing shoots, nothing lands,
+ * and the two performers are struck from the draw list because the director is
+ * drawing them itself.
+ *
  * `renderBackground` and `render` both neutralise the camera translation where
  * they need screen space, so it does not matter whether the caller wrapped them
  * in `Renderer.withCamera`.
@@ -305,6 +310,14 @@ export class Level {
   private _failed = false;
   private _score = 0;
 
+  /** True while a finisher is on stage; see `beginFatality`. */
+  private finisher = false;
+  /** The two performers the director draws itself. -1 when there is no show. */
+  private stagedKiller = -1;
+  private stagedVictim = -1;
+  /** Enemy ids whose death was claimed by a finisher, pending their own step. */
+  private readonly fatalIds = new Set<number>();
+
   constructor(
     def: MapDef,
     players: Fighter[],
@@ -374,9 +387,70 @@ export class Level {
     return this.lives.get(id) ?? 0;
   }
 
+  // ── finishers ──────────────────────────────────────────────────────────────
+
+  /** True while the fatality director owns the frame. */
+  get finisherActive(): boolean {
+    return this.finisher;
+  }
+
+  /**
+   * Put the map on hold: a finisher has taken this kill.
+   *
+   * Two jobs, both of them about not being in the director's way.
+   *
+   * The performers are struck from the draw list, because the director draws
+   * them itself out of the same rig — leave them in and the frozen originals sit
+   * underneath the performance in their last combat pose, and every finisher
+   * reads as a duplication bug.
+   *
+   * And the map stops: `update` returns immediately, so no wave triggers, no
+   * queue drains, no boss phase turns over and no respawn timer ticks down
+   * behind the letterbox. Anything already in the air is dropped outright,
+   * because the director zooms to better than two times and a bullet hanging
+   * motionless across the shot is an artifact rather than a bullet.
+   *
+   * The victim is NOT removed here. A player has to stay on the roster to lose
+   * a life and come back; an enemy stays until its own `stepUnit` notices it is
+   * dead, books the score and the drop, and — because the joke has already
+   * disposed of the body far better than a corpse timer can — sweeps it on the
+   * very next frame instead of leaving it lying there for another two seconds.
+   */
+  beginFatality(killerId: number, victimId: number): void {
+    this.finisher = true;
+    this.stagedKiller = killerId;
+    this.stagedVictim = victimId;
+
+    for (const u of this.units) {
+      if (u.f.id === victimId && !u.dead) {
+        this.fatalIds.add(victimId);
+        break;
+      }
+    }
+
+    this.projectiles.length = 0;
+  }
+
+  /** The performance is over. Hand the map back. */
+  endFatality(): void {
+    this.finisher = false;
+    this.stagedKiller = -1;
+    this.stagedVictim = -1;
+  }
+
+  private isStaged(id: number): boolean {
+    return id === this.stagedKiller || id === this.stagedVictim;
+  }
+
   // ── simulation ─────────────────────────────────────────────────────────────
 
   update(ctx: SimContext): void {
+    // Nothing happens inside somebody else's punchline: no waves, no adds, no
+    // bullets in flight, no respawn clock, and above all no hits landing on two
+    // bodies the director has already moved somewhere else. The scene freezes
+    // us anyway while a finisher runs; this is the belt to that pair of braces.
+    if (this.finisher) return;
+
     this.tick++;
 
     this.updatePlayerLives();
@@ -413,6 +487,9 @@ export class Level {
    * through when building the context: `spawn: (k, x, y, z, d) => level.spawn(...)`.
    */
   spawn(kind: string, x: number, y: number, z: number, data?: unknown): void {
+    // A move that was mid-flight when the kill landed does not get to finish
+    // its thought during the finisher.
+    if (this.finisher) return;
     const d = (data ?? {}) as Record<string, unknown>;
     const zz = clamp(z, 0, this.def.depth);
 
@@ -738,22 +815,30 @@ export class Level {
     const p = u.f.pos;
     this._score += def ? def.points : 500;
 
-    this.fx.particles({
-      count: 14,
-      x: p.x,
-      y: 18,
-      z: p.z,
-      angle: Math.PI * 0.5,
-      spread: Math.PI * 1.4,
-      speed: [1.4, 4.6],
-      life: [18, 40],
-      size: [1, 2.6],
-      colors: ['#ffe14a', '#ff8a3d', '#ffffff'],
-      gravity: 0.24,
-      drag: 0.97,
-      shape: 'spark',
-      additive: true,
-    });
+    // A finisher already had its say about this body: it does not need a cloud
+    // of sparks on top, and the corpse goes on the next frame rather than lying
+    // in a combat pose the performance just contradicted.
+    const claimed = this.fatalIds.delete(u.f.id);
+    if (claimed) u.corpse = CORPSE_FRAMES;
+
+    if (!claimed) {
+      this.fx.particles({
+        count: 14,
+        x: p.x,
+        y: 18,
+        z: p.z,
+        angle: Math.PI * 0.5,
+        spread: Math.PI * 1.4,
+        speed: [1.4, 4.6],
+        life: [18, 40],
+        size: [1, 2.6],
+        colors: ['#ffe14a', '#ff8a3d', '#ffffff'],
+        gravity: 0.24,
+        drag: 0.97,
+        shape: 'spark',
+        additive: true,
+      });
+    }
     this.fx.text({
       text: `${def ? def.points : 500}`,
       x: p.x,
@@ -1396,7 +1481,11 @@ export class Level {
       push(pr.z, D_PROP, i);
     }
     for (let i = 0; i < this.pickups.length; i++) push(this.pickups[i].z, D_PICKUP, i);
-    for (let i = 0; i < this.fighters.length; i++) push(this.fighters[i].pos.z, D_FIGHTER, i);
+    for (let i = 0; i < this.fighters.length; i++) {
+      // The director draws its own two. See beginFatality().
+      if (this.finisher && this.isStaged(this.fighters[i].id)) continue;
+      push(this.fighters[i].pos.z, D_FIGHTER, i);
+    }
     for (let i = 0; i < this.projectiles.length; i++) push(this.projectiles[i].z, D_PROJ, i);
 
     const items = this.drawItems.slice(0, n);

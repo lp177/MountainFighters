@@ -365,7 +365,11 @@ export class Fighter implements FighterView {
   private readonly speedStat: number;
   private readonly powerStat: number;
   private readonly jumpStat: number;
-  private readonly mechanical: boolean;
+  /**
+   * Made of metal rather than meat. Public because the fatality director needs
+   * it too: a fridge should shower sparks when it is torn open, not blood.
+   */
+  readonly mechanical: boolean;
 
   private readonly prevPos: Vec3;
   private age = 0;

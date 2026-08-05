@@ -11,8 +11,11 @@
  * Each shot owns its length, its entry transition and its camera move; the only
  * per-shot code here is the painting, which is the one thing that genuinely
  * cannot be data. The note shot is the exception that proves the table works:
- * its length is `0`, meaning "measure INTRO_TEXT and size the shot to it", so
- * editing the crawl can never silently truncate the reveal.
+ * its length is `0`, meaning OPEN — it has no clock, it types a page and then
+ * waits for the player, and it is over when the player says it is. Everything
+ * downstream that used to want a total (the outro fade, the letterbox
+ * retraction, the end itself) asks `framesLeft()` instead, which answers
+ * "unknown" while an open shot is still in front of it.
  *
  * Presentation only. No sim, no netcode, no determinism contract — but the
  * randomness is hashed off indices rather than Math.random all the same, because
@@ -27,7 +30,7 @@ import type { SceneHost } from '@/scenes/FightScene';
 import { GROUND_Y, VIEW_H, VIEW_W } from '@/core/constants';
 import { TAU, clamp, easeIn, easeInOut, easeOut, easeOutBack, lerp } from '@/core/math';
 
-import { STORYBOARD, TITLE_LINES, TITLE_SUB, paginateIntro } from '@/content/story';
+import { STORYBOARD, TITLE_LINES, TITLE_SUB, paginateNote } from '@/content/story';
 import { DWARFS } from '@/content/dwarfs';
 import { ENEMIES } from '@/content/enemies';
 import { BOSSES } from '@/content/bosses';
@@ -62,6 +65,7 @@ const NO = 'none';
 
 const PAPER = '#e8ecf6';
 const GOLD = '#ffd23f';
+const GOLD_DEEP = '#e8a92a';
 const DIM = '#98a2b6';
 const FAINT = '#5c6474';
 const BLOOD = '#ff2e6e';
@@ -77,6 +81,26 @@ const STEEL = '#c9d2dc';
 const CLINIC = '#eaf4ff';
 const CYAN = '#37e6c8';
 const MOON = '#93b8e8';
+
+/**
+ * Her. The whole point of the palette is that it is READABLE — a black bob, a
+ * red bow, a blue bodice, a yellow skirt, in that order of importance. Take
+ * the bow away and she is a woman; leave it on and she is Snow White, which is
+ * the difference between a kidnapping and somebody's kidnapping.
+ */
+const SW_HAIR = '#151020';
+const SW_HAIR_LIT = '#2b2340';
+const SW_BOW = '#e8342e';
+const SW_BOW_LIT = '#ff5a4e';
+const SW_SKIN = '#ffe2d2';
+const SW_SKIN_SHADE = '#e8b8a4';
+const SW_BLUSH = '#ff9fa8';
+const SW_LIP = '#d81e46';
+const SW_BLUE = '#2f5fd0';
+const SW_BLUE_DARK = '#1e3f96';
+const SW_YELLOW = '#ffd447';
+const SW_YELLOW_DARK = '#d9a92c';
+const SW_WHITE = '#f6f8ff';
 
 const DISPLAY = '"Arial Black", "Helvetica Neue", Impact, system-ui, sans-serif';
 const SANS = 'ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif';
@@ -97,16 +121,29 @@ const HINT_AT = 132;
 const HINT_FADE = 40;
 
 // ── The note ────────────────────────────────────────────────────────────────
+//
+// Player-paced, which is the only pace that works: a page types itself out and
+// then STOPS, indefinitely, until the player asks for the next one. Pressing
+// during the type-on completes the page instead of advancing it, because the
+// alternative punishes exactly the player who is reading fastest.
 
 const NOTE_MAX_LINES = 8;
 const NOTE_LH = 15;
-const NOTE_MID = 158;
-/** Typewriter speed. Fast, because there are eleven hundred characters of it. */
-const CHARS_PER_FRAME = 2.4;
+const NOTE_MID = 152;
+/** Typewriter speed. A shade slower than before: there is no longer a queue. */
+const CHARS_PER_FRAME = 1.9;
 const PAGE_IN = 12;
-const PAGE_HOLD = 34;
 const PAGE_OUT = 16;
-const NOTE_TAIL = 20;
+/** Frames of black after the last page is dismissed, before the cut out. */
+const NOTE_TAIL = 22;
+/**
+ * The note shot has no length, but its camera move still needs one. This is
+ * the push-in's own duration, not the shot's: it completes in seven seconds
+ * and then holds, however long the player takes over the words.
+ */
+const NOTE_CAM_SPAN = 420;
+/** A shot with `frames: 0`. Resolved to a real length once it has closed. */
+const OPEN = -1;
 
 // ── Shot 7's transformation schedule ────────────────────────────────────────
 //
@@ -231,9 +268,16 @@ export class CutsceneScene implements Scene {
   private skippable = true;
   private reduced = false;
 
-  /** Resolved shot lengths. Everything but the note comes straight off the table. */
+  /**
+   * Resolved shot lengths. Everything but the note comes straight off the
+   * table; the note sits at OPEN until the player dismisses its last page, at
+   * which point the length it actually ran for is written back here so the
+   * dissolve out of it has a clock to run against.
+   */
   private readonly lengths: number[] = [];
-  private total = 0;
+  /** Frames until the cinematic ends, and whether that is knowable yet. */
+  private left = 0;
+  private leftKnown = false;
 
   /** Alpha the block currently being painted is composited at. */
   private a = 1;
@@ -242,15 +286,23 @@ export class CutsceneScene implements Scene {
   private flashA = 0;
   private flashC = '#ffffff';
 
-  // The note.
+  // The note. One page at a time, and the player owns the clock.
   private pages: NotePage[] = [];
-  private pageAt = new Int32Array(0);
-  private pageType = new Int32Array(0);
+  /** Block width per page, measured on first paint so the margin never crawls. */
   private pageW = new Float32Array(0);
-  private livePage = -1;
-  private typed = 0;
-  /** Measured from INTRO_TEXT in enter(), never guessed. */
-  private noteFrames = 600;
+  /** '2 / 3'. Built with the pages, never in the draw path. */
+  private readonly pageLabels: string[] = [];
+  private notePage = 0;
+  /** Frames since this page began arriving. */
+  private noteLocal = 0;
+  /** Characters revealed. Fractional; floored to draw. */
+  private noteChars = 0;
+  /** True once the page is fully typed: the shot is now waiting on a human. */
+  private noteWait = false;
+  /** Frames into the page's fade-out, or -1 while it is still on screen. */
+  private noteOut = -1;
+  /** Frames into the shot's tail after the last page, or -1. */
+  private noteEnd = -1;
 
   // Cast. Built once in enter() so content/ is never mutated and the draw path
   // never allocates a style object.
@@ -264,7 +316,10 @@ export class CutsceneScene implements Scene {
   private gLab: CanvasGradient | null = null;
   private gRoom: CanvasGradient | null = null;
 
-  // Skip.
+  // Input. Every source — DOM key, pointer, bound button, pad — folds into one
+  // edge-triggered request per frame, so a key that is both a DOM event and a
+  // bound action cannot turn two pages at once.
+  private pressReq = false;
   private pads: GamepadSource[] = [];
   private padPrev = 0;
   private padScan = 0;
@@ -292,8 +347,8 @@ export class CutsceneScene implements Scene {
     this.punch = 0;
     this.abr = 0;
     this.flashA = 0;
-    this.livePage = -1;
-    this.typed = 0;
+    this.pressReq = false;
+    this.padPrev = 0;
     this.particles.clear();
 
     this.skippable = this.opts.skippable !== false;
@@ -301,6 +356,7 @@ export class CutsceneScene implements Scene {
 
     this.buildNote();
     this.buildTimeline();
+    this.measureLeft();
 
     this.dwarfStyles.length = 0;
     for (const d of DWARFS) this.dwarfStyles.push({ ...d.style, outfit: 0, shades: false });
@@ -328,51 +384,99 @@ export class CutsceneScene implements Scene {
     this.host.loop.timeScale = 1;
   }
 
+  /**
+   * One key, two jobs, decided by what is on screen.
+   *
+   * Everywhere except the note, any key gets you out. On the note, any key is
+   * how you turn the page — so the way out moves to ESCAPE, which the hint in
+   * the bottom bar says out loud rather than leaving the player to guess. A
+   * held key repeats; repeats are dropped, so a page turn always costs a fresh
+   * press and nobody skims three pages by leaning on the spacebar.
+   */
   onKey(e: KeyboardEvent): void {
-    // Anything at all gets you out — except a browser chord, because losing
-    // Ctrl+R or Cmd+Shift+I to a cutscene is its own kind of trapped.
+    // Browser chords are left alone: losing Ctrl+R or Cmd+Shift+I to a
+    // cutscene is its own kind of trapped.
     if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
     e.preventDefault();
-    this.skip();
+    if (e.code === 'Escape') {
+      this.skip();
+      return;
+    }
+    this.pressReq = true;
   }
 
   private readonly onPointer = (): void => {
-    this.skip();
+    this.pressReq = true;
   };
 
   // ── Timeline ───────────────────────────────────────────────────────────────
 
   /**
-   * Pages INTRO_TEXT and works out how long the note shot has to be to deliver
-   * every character of it. Done once, here, so nothing downstream ever has to
-   * guess: `lengths[note]` is measured, not assumed.
+   * Pages the note text. No schedule is built: there is nothing to schedule,
+   * because the player is the schedule.
    */
   private buildNote(): void {
-    this.pages = paginateIntro(NOTE_MAX_LINES);
-    const n = this.pages.length;
-    this.pageAt = new Int32Array(n);
-    this.pageType = new Int32Array(n);
-    this.pageW = new Float32Array(n);
-
-    let at = 0;
-    for (let i = 0; i < n; i++) {
-      const type = Math.ceil(this.pages[i].chars / CHARS_PER_FRAME);
-      this.pageAt[i] = at;
-      this.pageType[i] = type;
+    this.pages = paginateNote(NOTE_MAX_LINES);
+    this.pageW = new Float32Array(this.pages.length);
+    this.pageLabels.length = 0;
+    for (let i = 0; i < this.pages.length; i++) {
       this.pageW[i] = -1;
-      at += PAGE_IN + type + PAGE_HOLD + PAGE_OUT;
+      this.pageLabels.push(`${i + 1} / ${this.pages.length}`);
     }
-    this.noteFrames = at + NOTE_TAIL;
+    this.resetNote();
+  }
+
+  private resetNote(): void {
+    this.notePage = 0;
+    this.noteLocal = 0;
+    this.noteChars = 0;
+    this.noteWait = false;
+    this.noteOut = -1;
+    this.noteEnd = -1;
   }
 
   private buildTimeline(): void {
     this.lengths.length = 0;
-    this.total = 0;
-    for (const s of STORYBOARD) {
-      const n = s.frames > 0 ? s.frames : s.id === 'note' ? this.noteFrames : 120;
-      this.lengths.push(n);
-      this.total += n;
+    for (const s of STORYBOARD) this.lengths.push(s.frames > 0 ? s.frames : OPEN);
+  }
+
+  /** True while the note shot is the live one and has not closed itself. */
+  private noteLive(): boolean {
+    return STORYBOARD[this.shotIndex].id === 'note' && this.lengths[this.shotIndex] === OPEN;
+  }
+
+  /**
+   * The span a shot's camera move runs over. Identical to its length for every
+   * closed shot; for an open one it is a fixed nominal, so the push-in neither
+   * snaps to its end pose while the shot is open nor pops when it closes.
+   */
+  private span(i: number): number {
+    return STORYBOARD[i].frames > 0 ? this.lengths[i] : NOTE_CAM_SPAN;
+  }
+
+  /**
+   * Frames until the last frame of the last shot. Unknowable while an open
+   * shot is still ahead of the playhead — and the outro fade, the letterbox
+   * retraction and the ending itself all simply do not begin until it is.
+   */
+  private measureLeft(): void {
+    let rem = 0;
+    for (let i = this.shotIndex; i < STORYBOARD.length; i++) {
+      const n = this.lengths[i];
+      if (n === OPEN) {
+        this.leftKnown = false;
+        this.left = 0;
+        return;
+      }
+      rem += i === this.shotIndex ? n - this.shotFrame : n;
     }
+    this.leftKnown = true;
+    this.left = rem;
+  }
+
+  /** Called by the note when its last page is gone: the open shot now has a length. */
+  private closeOpenShot(): void {
+    if (this.lengths[this.shotIndex] === OPEN) this.lengths[this.shotIndex] = this.shotFrame;
   }
 
   // ── Frame ──────────────────────────────────────────────────────────────────
@@ -384,13 +488,19 @@ export class CutsceneScene implements Scene {
     this.shotFrame++;
 
     // Advance the edit. A shot never runs short: the entry transition of the
-    // next one plays over the top of it rather than eating into it.
-    while (this.shotIndex < STORYBOARD.length - 1 && this.shotFrame >= this.lengths[this.shotIndex]) {
-      this.shotFrame -= this.lengths[this.shotIndex];
+    // next one plays over the top of it rather than eating into it. An open
+    // shot has no length to compare against and is never advanced past here —
+    // it leaves by writing its own length and letting the next frame see it.
+    while (this.shotIndex < STORYBOARD.length - 1) {
+      const n = this.lengths[this.shotIndex];
+      if (n === OPEN || this.shotFrame < n) break;
+      this.shotFrame -= n;
       this.shotIndex++;
-      this.livePage = -1;
-      this.typed = 0;
+      if (STORYBOARD[this.shotIndex].id === 'note') this.resetNote();
     }
+
+    this.handleInput();
+    if (this.done) return;
 
     this.beats(STORYBOARD[this.shotIndex].id, this.shotFrame, this.lengths[this.shotIndex]);
 
@@ -403,9 +513,8 @@ export class CutsceneScene implements Scene {
     this.flashA *= 0.82;
     if (this.flashA < 0.005) this.flashA = 0;
 
-    this.pollSkip();
-
-    if (this.frame >= this.total) this.finish();
+    this.measureLeft();
+    if (this.leftKnown && this.left <= 0) this.finish();
   }
 
   render(_alpha: number): void {
@@ -462,7 +571,7 @@ export class CutsceneScene implements Scene {
     const a = clamp(alpha, 0, 1);
     if (a <= 0.003) return;
     const shot = STORYBOARD[index];
-    const n = this.lengths[index];
+    const n = this.span(index);
     this.a = a;
 
     ctx.save();
@@ -514,7 +623,7 @@ export class CutsceneScene implements Scene {
 
   private paintOverlay(id: StoryShotId, f: number, n: number): void {
     const ctx = this.host.renderer.ctx;
-    if (id === 'note') this.noteText(ctx, f);
+    if (id === 'note') this.noteText(ctx);
     else if (id === 'title') this.titleCard(ctx, f, n);
   }
 
@@ -552,7 +661,7 @@ export class CutsceneScene implements Scene {
       case 'door': this.beatsDoor(f); break;
       case 'taken': this.beatsTaken(f, n); break;
       case 'lab': this.beatsLab(f); break;
-      case 'note': this.beatsNote(f); break;
+      case 'note': this.beatsNote(); break;
       case 'suiting': this.beatsSuiting(f, n); break;
       case 'title': this.beatsTitle(f, n); break;
       default: break;
@@ -1102,9 +1211,10 @@ export class CutsceneScene implements Scene {
   // ─────────────────────────────────────────────────────────────────────────
   // 4. TAKEN
   //
-  // She stays a shape. Partly because it is more frightening, and partly
-  // because designing a character who never appears in gameplay is a promise
-  // this game has no intention of keeping.
+  // The shot the whole game hangs off, so it is staged around one thing: the
+  // person being carried out. Everyone else in frame is a silhouette in a
+  // suit; she is the only colour in the sequence, lit from the doorway she is
+  // being taken out of, and she is drawn big enough to be recognised.
   // ─────────────────────────────────────────────────────────────────────────
 
   private shotTaken(ctx: C2D, f: number, n: number): void {
@@ -1158,15 +1268,17 @@ export class CutsceneScene implements Scene {
       // A third man leaves last, with a case, and looks back at the house once.
       const bx = lerp(384, 214, easeInOut(clamp((t - 0.24) / 0.52, 0, 1)));
       const look = t > 0.5 && t < 0.62;
-      this.guard(ctx, bx, 296, look ? 1 : -1, 'walk', f * 1.05, 0.6, '#22202c');
-      capsule(ctx, bx + 12, 274, bx + 12, 286, 5, '#15161c', INK, 1.4);
+      this.guard(ctx, bx, 292, look ? 1 : -1, 'walk', f * 1.05, 0.66, '#22202c');
+      capsule(ctx, bx + 12, 268, bx + 12, 282, 5, '#15161c', INK, 1.4);
 
       if (load < 1) {
-        this.guard(ctx, gx + 22, gy, -1, 'walk', f * 1.15, 0.66, '#1e1c28');
-        this.guard(ctx, gx - 22, gy, -1, 'walk', f * 1.15 + 9, 0.66, '#1e1c28');
-        this.snowWhite(ctx, gx, gy - 46 + load * 22, 1 + load * 0.06, 1 - load);
+        // The men are staged around her rather than the other way round: they
+        // are two dark shapes and a pair of hats, and she is the picture.
+        this.guard(ctx, gx + 30, gy, -1, 'walk', f * 1.15, 0.82, '#1e1c28');
+        this.guard(ctx, gx - 30, gy, -1, 'walk', f * 1.15 + 9, 0.82, '#1e1c28');
+        this.snowWhite(ctx, gx, gy - 58 + load * 26, 1.5, 1, 1 - load * 0.55, '#f7b160');
       } else {
-        this.guard(ctx, 178, gy, -1, 'idle', f, 0.66, '#1e1c28');
+        this.guard(ctx, 178, gy, -1, 'idle', f, 0.82, '#1e1c28');
       }
     }
 
@@ -1185,40 +1297,154 @@ export class CutsceneScene implements Scene {
   }
 
   /**
-   * Carried, face up, head toward the car. Two passes over the same geometry:
-   * a fat warm one for the rim the doorway throws around her, then the black.
+   * Snow White. In colour, and the only thing in this cinematic that is.
+   *
+   * She used to be a flat black silhouette here, on the theory that a shape is
+   * more frightening than a person. It is — but it also meant the audience
+   * could not tell WHO had been taken, which is the one fact the entire game
+   * is a reaction to. So: black bob, red bow, white collar, blue bodice, red
+   * puff sleeve, yellow skirt, in roughly that order of how much each one is
+   * doing. The bow does most of it.
+   *
+   * The pose keeps the original's job. Head thrown back, hair and one arm
+   * hanging, nothing supporting anything — she is cargo, not a portrait.
+   *
+   * Two passes over the same figure: the rim the light throws around her, then
+   * her. `hang` is gravity on the parts nobody is holding — 1 carried, less
+   * when she is lying on something.
    */
-  private snowWhite(ctx: C2D, x: number, y: number, s: number, rim: number): void {
+  private snowWhite(
+    ctx: C2D, x: number, y: number, s: number, hang: number, rim: number, rimCol: string,
+  ): void {
     if (rim > 0.02) {
-      this.alpha(ctx, 0.5 * rim);
-      this.snowWhiteBody(ctx, x, y, s, 1.6, '#f0a04a');
+      this.alpha(ctx, 0.55 * rim);
+      this.snowWhiteBody(ctx, x, y, s, 2.4 * s, rimCol, hang);
       ctx.globalAlpha = this.a;
     }
-    this.snowWhiteBody(ctx, x, y, s, 0, '#07060b');
+    this.snowWhiteArt(ctx, x, y, s, hang);
   }
 
-  private snowWhiteBody(ctx: C2D, x: number, y: number, s: number, pad: number, fill: string): void {
-    const u = 1 * s;
-    // Torso and the dress falling off the far side of the arms.
-    capsule(ctx, x - 8 * u, y, x + 13 * u, y + 2 * u, 7 * u + pad, fill, NO, 0);
+  /** The coarse outline, fattened by `pad`. Rim light and nothing else. */
+  private snowWhiteBody(
+    ctx: C2D, x: number, y: number, s: number, pad: number, fill: string, hang: number,
+  ): void {
+    const u = s;
+    const hx = x - 19 * u;
+    const hy = y + 2 * u;
+    const drop = 14 * u * hang;
+    capsule(ctx, x - 8 * u, y - u, x + 5 * u, y + u, 7 * u + pad, fill, NO, 0);
     quad(
       ctx,
-      x + 9 * u, y - 6 * u - pad, x + 32 * u, y - 1 * u - pad,
-      x + 30 * u, y + 11 * u + pad, x + 8 * u, y + 9 * u + pad,
+      x + 3 * u, y - 8 * u - pad, x + 30 * u, y - 3 * u - pad,
+      x + 28 * u, y + 13 * u + pad + drop * 0.3, x + 2 * u, y + 9 * u + pad,
       fill, NO, 0,
     );
-    // Head, and the hair hanging straight down out of it.
-    ellipse(ctx, x - 16 * u, y - 2 * u, 6.6 * u + pad, 7.2 * u + pad, 0, fill, NO, 0);
-    ellipse(ctx, x - 20 * u, y + 1 * u, 8 * u + pad, 7 * u + pad, 0, fill, NO, 0);
+    capsule(ctx, hx - 5 * u, hy + 2 * u, hx - 3.4 * u, hy + 9 * u + drop, 4.6 * u + pad, fill, NO, 0);
+    ellipse(ctx, hx - 1 * u, hy, 9.6 * u + pad, 9.8 * u + pad, 0, fill, NO, 0);
+    capsule(ctx, x - 3.4 * u, y + 6 * u, x + 3 * u, y + 14 * u + drop, 2.6 * u + pad, fill, NO, 0);
+    ellipse(ctx, x + 3.6 * u, y + 16 * u + drop, 3 * u + pad, 2.8 * u + pad, 0, fill, NO, 0);
+  }
+
+  private snowWhiteArt(ctx: C2D, x: number, y: number, s: number, hang: number): void {
+    const u = s;
+    const ow = Math.max(1, 1.1 * u);
+    const hx = x - 19 * u;
+    const hy = y + 2 * u;
+    const drop = 14 * u * hang;
+
+    // Hair, out of the back of the skull and straight down. First, so the head
+    // sits on top of its own root.
+    capsule(ctx, hx - 5 * u, hy + 2 * u, hx - 3.4 * u, hy + 8 * u + drop, 4.6 * u, SW_HAIR, INK, ow);
+    ellipse(ctx, hx - 3.4 * u, hy + 9 * u + drop, 3.6 * u, 3 * u, -0.35, SW_HAIR, INK, ow * 0.8);
+
+    // The skirt. Long, yellow, and the widest thing in the silhouette.
     quad(
       ctx,
-      x - 25 * u, y - 2 * u - pad, x - 15 * u, y + 2 * u,
-      x - 12 * u, y + 24 * u + pad, x - 24 * u, y + 22 * u + pad,
-      fill, NO, 0,
+      x + 3 * u, y - 7.5 * u, x + 30 * u, y - 3 * u,
+      x + 28 * u, y + 13 * u + drop * 0.3, x + 2 * u, y + 9 * u,
+      SW_YELLOW, INK, ow,
     );
+    this.alpha(ctx, 0.5);
+    capsule(ctx, x + 28.6 * u, y - 2.2 * u, x + 26.6 * u, y + 12 * u + drop * 0.3, 1.4 * u,
+      SW_YELLOW_DARK, NO, 0);
+    capsule(ctx, x + 8 * u, y - 4 * u, x + 25 * u, y + 0.6 * u, 0.9 * u, SW_YELLOW_DARK, NO, 0);
+    capsule(ctx, x + 9 * u, y + 3.4 * u, x + 24 * u, y + 8 * u + drop * 0.2, 0.9 * u,
+      SW_YELLOW_DARK, NO, 0);
+    ctx.globalAlpha = this.a;
+    // One shoe, past the hem, pointing at nothing.
+    ellipse(ctx, x + 31 * u, y + 7 * u + drop * 0.28, 3.4 * u, 2.2 * u, -0.25, '#2a2233', INK, ow * 0.8);
+
+    // Bodice.
+    capsule(ctx, x - 8 * u, y - 0.6 * u, x + 5 * u, y + u, 7 * u, SW_BLUE, INK, ow);
+    this.alpha(ctx, 0.45);
+    capsule(ctx, x - 6 * u, y + 4.2 * u, x + 4 * u, y + 5.4 * u, 2 * u, SW_BLUE_DARK, NO, 0);
+    ctx.globalAlpha = this.a;
+    capsule(ctx, x + 4 * u, y - 5.2 * u, x + 4.6 * u, y + 6 * u, 1.5 * u, SW_BLUE_DARK, INK, ow * 0.7);
+
+    // The white collar, standing up at the neck. The brightest note next to
+    // her face, and the reason the face reads at all against the night.
+    quad(
+      ctx,
+      x - 13 * u, y - 6.4 * u, x - 5.5 * u, y - 7.4 * u,
+      x - 4 * u, y + 6 * u, x - 12 * u, y + 7 * u,
+      SW_WHITE, INK, ow,
+    );
+
+    // Puff sleeve: red, slashed with blue. After the bow, the detail that says
+    // whose dress this is.
+    ellipse(ctx, x - 5 * u, y + 5.4 * u, 5.4 * u, 4.8 * u, 0.25, SW_BOW, INK, ow);
+    this.alpha(ctx, 0.85);
+    capsule(ctx, x - 7.4 * u, y + 4.6 * u, x - 6.2 * u, y + 8.2 * u, 1.1 * u, SW_BLUE, NO, 0);
+    capsule(ctx, x - 3.2 * u, y + 3.8 * u, x - 2.2 * u, y + 7.6 * u, 1.1 * u, SW_BLUE, NO, 0);
+    ctx.globalAlpha = this.a;
+
     // The arm nobody is holding.
-    capsule(ctx, x - 1 * u, y + 5 * u, x + 5 * u, y + 25 * u, 2.6 * u + pad, fill, NO, 0);
-    ellipse(ctx, x + 5 * u, y + 27 * u, 3 * u + pad, 3 * u + pad, 0, fill, NO, 0);
+    capsule(ctx, x - 3.4 * u, y + 8 * u, x + 3 * u, y + 14 * u + drop, 2.4 * u, SW_SKIN, INK, ow);
+    ellipse(ctx, x + 3.6 * u, y + 16 * u + drop, 2.9 * u, 2.7 * u, 0.3, SW_SKIN, INK, ow);
+    this.alpha(ctx, 0.4);
+    capsule(ctx, x - 2.6 * u, y + 9.6 * u, x + 2.4 * u, y + 14.6 * u + drop, 1 * u,
+      SW_SKIN_SHADE, NO, 0);
+    ctx.globalAlpha = this.a;
+
+    this.snowWhiteHead(ctx, hx, hy, u, hang, ow);
+  }
+
+  /**
+   * The head, in its own upright frame. The rotation is the pose: local +x is
+   * the way she is facing, and turning it a quarter past vertical points her
+   * face at the sky, which is what a head does when nobody is holding it up.
+   */
+  private snowWhiteHead(
+    ctx: C2D, hx: number, hy: number, u: number, hang: number, ow: number,
+  ): void {
+    ctx.save();
+    ctx.translate(hx, hy);
+    ctx.rotate(-Math.PI * 0.5 - 0.28 - 0.2 * hang);
+
+    ellipse(ctx, -1.6 * u, 0.6 * u, 9.4 * u, 9.6 * u, 0, SW_HAIR, INK, ow);
+    ellipse(ctx, 0.8 * u, 1 * u, 7.4 * u, 7.8 * u, 0, SW_SKIN, INK, ow);
+    // Fringe, and the two curls at the jaw that make it a bob and not a helmet.
+    ellipse(ctx, 0.4 * u, -5.2 * u, 7.8 * u, 4 * u, 0, SW_HAIR, INK, ow * 0.8);
+    ellipse(ctx, 5.2 * u, 5.8 * u, 3.6 * u, 3 * u, -0.5, SW_HAIR, INK, ow * 0.8);
+    ellipse(ctx, -4.6 * u, 6.4 * u, 4.4 * u, 3.6 * u, 0.5, SW_HAIR, INK, ow * 0.8);
+    this.alpha(ctx, 0.55);
+    capsule(ctx, -4 * u, -7 * u, 3 * u, -7.4 * u, 1.1 * u, SW_HAIR_LIT, NO, 0);
+    ctx.globalAlpha = this.a;
+
+    // Out cold, not asleep: the lashes sit flat and the mouth is slack.
+    capsule(ctx, 2 * u, -1.4 * u, 5.2 * u, -1 * u, 0.6 * u, '#3a2436', NO, 0);
+    capsule(ctx, 5.2 * u, -1.2 * u, 6.3 * u, -2.3 * u, 0.45 * u, '#3a2436', NO, 0);
+    ellipse(ctx, 4.2 * u, 2.6 * u, 2.4 * u, 1.6 * u, 0, SW_BLUSH, NO, 0);
+    ellipse(ctx, 6.6 * u, 0.8 * u, 1.5 * u, 1.3 * u, 0, SW_SKIN_SHADE, NO, 0);
+    ellipse(ctx, 5 * u, 4.6 * u, 2.1 * u, 1.3 * u, -0.15, SW_LIP, NO, 0);
+
+    // THE BOW. If one detail survives the scale, the distance and the dark,
+    // it is this one, and everything else on her is negotiable.
+    tri(ctx, -u, -10.4 * u, -8 * u, -14.4 * u, -6.6 * u, -8 * u, SW_BOW, INK, ow);
+    tri(ctx, -u, -10.4 * u, 6 * u, -14.4 * u, 4.6 * u, -8 * u, SW_BOW, INK, ow);
+    ellipse(ctx, -u, -10.4 * u, 2.2 * u, 2.2 * u, 0, SW_BOW_LIT, INK, ow * 0.8);
+
+    ctx.restore();
   }
 
   private beatsTaken(f: number, n: number): void {
@@ -1236,7 +1462,30 @@ export class CutsceneScene implements Scene {
   //
   // Same renderer, opposite palette. Everything shot 1 did in amber, this does
   // in surgical white and cyan, which is the whole argument of the film.
+  //
+  // It is also where the plot lives now. The letter used to explain all of
+  // this in five pages of crawl; the shot explains it in one look, because a
+  // wall chart going up and to the right is funnier than a paragraph saying
+  // the same thing. Left to right, the pan reads it out: the plan, her vitals,
+  // her on the table, the half-built copy of her, and the crown on its way
+  // down onto the copy's head.
   // ─────────────────────────────────────────────────────────────────────────
+
+  private static readonly TABLE_X = 304;
+  private static readonly TABLE_Y = 246;
+  private static readonly CLONE_X = 470;
+  /** Head of the thing on the gurney, and where the crown is going. */
+  private static readonly CROWN_X = CutsceneScene.CLONE_X + 66;
+  private static readonly CROWN_TOP = 88;
+  private static readonly CROWN_SEAT = 196;
+  private static readonly CROWN_A = 44;
+  private static readonly CROWN_B = 176;
+
+  private crownDrop(f: number): number {
+    const a = CutsceneScene.CROWN_A;
+    const b = CutsceneScene.CROWN_B;
+    return easeInOut(clamp((f - a) / (b - a), 0, 1));
+  }
 
   private shotLab(ctx: C2D, f: number, _n: number): void {
     this.bleed(ctx, this.gLab ?? '#0a1622');
@@ -1257,33 +1506,15 @@ export class CutsceneScene implements Scene {
     ctx.stroke();
     ctx.globalAlpha = this.a;
 
-    // Monitors, all of them showing the same woman's heart.
-    for (let i = 0; i < 3; i++) {
-      const mx = 46 + i * 104;
-      roundRect(ctx, mx, 58, 88, 54, 2, '#08131c', '#1e3444', 1.6);
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(mx + 3, 61, 82, 48);
-      ctx.clip();
-      this.alpha(ctx, 0.9);
-      ctx.strokeStyle = CYAN;
-      ctx.lineWidth = 1.2;
-      ctx.beginPath();
-      for (let k = 0; k <= 82; k += 2) {
-        const ph = (k + f * 1.6 + i * 40) * 0.09;
-        const spike = Math.exp(-((((ph % 6.283) - 3) ** 2) * 3)) * 16;
-        ctx.lineTo(mx + 3 + k, 88 + Math.sin(ph * 3) * 2 - spike);
-      }
-      ctx.stroke();
-      ctx.restore();
-      ctx.globalAlpha = this.a;
-    }
+    this.planBoard(ctx, 34, 38, f);
+    this.vitals(ctx, 186, 52, f);
+    this.chart(ctx, 356, 34, f);
 
     // Floor.
     ctx.fillStyle = '#0b1620';
     ctx.fillRect(-90, 250, VIEW_W + 180, VIEW_H - 190);
 
-    this.gurney(ctx, 486, 250, f);
+    this.gurney(ctx, CutsceneScene.CLONE_X, 250, f);
 
     // Surgical lamp, and the one hard cone of light in the entire cinematic.
     ctx.save();
@@ -1295,7 +1526,18 @@ export class CutsceneScene implements Scene {
     ctx.restore();
     ctx.globalAlpha = this.a;
 
-    this.table(ctx, 304, 246);
+    this.table(ctx, CutsceneScene.TABLE_X, CutsceneScene.TABLE_Y);
+
+    // Her. Same dress, same bow, no doorway light this time — a lamp, four
+    // open restraints and a tray of instruments. That is the payoff of the
+    // abduction and the reason the note only needs three pages.
+    this.snowWhite(ctx, CutsceneScene.TABLE_X, 214, 1.7, 0.5, 0.85, CLINIC);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    this.alpha(ctx, 0.1);
+    ellipse(ctx, CutsceneScene.TABLE_X, 214, 92, 26, 0, CLINIC, NO, 0);
+    ctx.restore();
+    ctx.globalAlpha = this.a;
 
     capsule(ctx, 304, 4, 304, 40, 3, '#2b3d4c', INK, 1.6);
     ellipse(ctx, 304, 48, 40, 12, 0, '#dbe6ef', INK, 2);
@@ -1306,30 +1548,219 @@ export class CutsceneScene implements Scene {
     // Him. Hands where you can see them, which is the point.
     drawCharacter(
       ctx, this.muskStyle, sampleClip(clipOf('idle'), f * 0.85), HUMAN_SKELETON,
-      196, 252, 1, { scale: 0.82 },
+      186, 252, 1, { scale: 0.95 },
     );
 
-    // The tray, and one instrument catching the light every second or so.
-    roundRect(ctx, 366, 226, 54, 6, 1.5, '#3e4c58', INK, 1.4);
-    capsule(ctx, 374, 224, 392, 222, 1.6, STEEL, INK, 1);
-    capsule(ctx, 396, 225, 412, 223, 1.4, STEEL, INK, 1);
-    if ((f % 74) < 8) star(ctx, 392, 222, 4, 4, '#ffffff', NO);
+    // The tray, down on the near floor now that the gurney has moved in — one
+    // instrument catches the light every second or so.
+    roundRect(ctx, 402, 264, 54, 6, 1.5, '#3e4c58', INK, 1.4);
+    capsule(ctx, 410, 262, 428, 260, 1.6, STEEL, INK, 1);
+    capsule(ctx, 432, 263, 448, 261, 1.4, STEEL, INK, 1);
+    if ((f % 74) < 8) star(ctx, 428, 260, 4, 4, '#ffffff', NO);
+
+    // The crown, coming down on a winch onto a head that is not finished yet.
+    // Nobody has to say what it is for; it is a crown, and it is descending.
+    const drop = this.crownDrop(f);
+    const cx = CutsceneScene.CROWN_X;
+    const cy = lerp(CutsceneScene.CROWN_TOP, CutsceneScene.CROWN_SEAT, drop);
+    capsule(ctx, cx, -60, cx, cy - 9, 1.1, '#46525f', NO, 0);
+    roundRect(ctx, cx - 5, cy - 13, 10, 5, 1.5, '#5a6875', INK, 1.2);
+    this.crown(ctx, cx, cy, 1.15);
+    if (drop >= 1 && (f % 62) < 9) star(ctx, cx + 9, cy - 4, 5, 4, '#ffffff', NO);
 
     this.groundFog(ctx, f, 0.045, '#4f7fa0');
   }
 
+  /** Five points and a band. Used at full size and at icon size. */
+  private crown(ctx: C2D, x: number, y: number, s: number): void {
+    P10[0] = x - 11 * s; P10[1] = y + 5 * s;
+    P10[2] = x - 7.5 * s; P10[3] = y - 7 * s;
+    P10[4] = x; P10[5] = y + 1 * s;
+    P10[6] = x + 7.5 * s; P10[7] = y - 7 * s;
+    P10[8] = x + 11 * s; P10[9] = y + 5 * s;
+    poly(ctx, P10, GOLD, INK, Math.max(1, 1.3 * s));
+    roundRect(ctx, x - 11 * s, y + 3 * s, 22 * s, 4.4 * s, 1.4 * s, GOLD_DEEP, INK,
+      Math.max(1, 1.1 * s));
+    ellipse(ctx, x, y + 5.2 * s, 1.7 * s, 1.7 * s, 0, BLOOD, NO, 0);
+  }
+
+  /**
+   * The plan, on the wall, in the language its author actually thinks in: a
+   * before, an arrow, and an after with a crown on it.
+   */
+  private planBoard(ctx: C2D, x: number, y: number, f: number): void {
+    const w = 140;
+    roundRect(ctx, x, y, w, 78, 2, '#08131c', '#1e3444', 1.6);
+    roundRect(ctx, x + 1.5, y + 1.5, w - 3, 10, 1, '#123049', NO, 0);
+
+    setFont(ctx, 6, 700, false);
+    ctx.textAlign = 'left';
+    this.alpha(ctx, 0.92);
+    ctx.fillStyle = CYAN;
+    ctx.fillText('PROJECT: QUEEN OF THE WORLD', x + 5, y + 9);
+    ctx.globalAlpha = this.a;
+
+    const by = y + 58;
+    this.planFigure(ctx, x + 27, by, false, f);
+    this.planFigure(ctx, x + 108, by, true, f);
+
+    // The arrow between them, which is the entire business plan.
+    this.alpha(ctx, 0.85);
+    capsule(ctx, x + 54, by - 14, x + 74, by - 14, 1.5, CYAN, NO, 0);
+    tri(ctx, x + 83, by - 14, x + 73, by - 19, x + 73, by - 9, CYAN, NO, 0);
+    ctx.globalAlpha = this.a;
+
+    setFont(ctx, 5.5, 700, false);
+    ctx.textAlign = 'center';
+    this.alpha(ctx, 0.62);
+    ctx.fillStyle = DIM;
+    ctx.fillText('BEFORE', x + 27, y + 71);
+    ctx.fillText('AFTER', x + 108, y + 71);
+    ctx.globalAlpha = this.a;
+    ctx.textAlign = 'left';
+  }
+
+  /** Twenty-six pixels of somebody. Enough for a bow, or for a crown. */
+  private planFigure(ctx: C2D, x: number, base: number, robot: boolean, f: number): void {
+    if (robot) {
+      tri(ctx, x, base - 20, x - 9, base, x + 9, base, '#7f8c99', '#1e3444', 1.2);
+      roundRect(ctx, x - 5, base - 24, 10, 8, 2, STEEL, '#1e3444', 1.2);
+      ellipse(ctx, x, base - 29, 5, 5, 0, '#aeb9c6', '#1e3444', 1.2);
+      ellipse(ctx, x + 1.6, base - 29, 1.5, 1.5, 0, CYAN, NO, 0);
+      this.crown(ctx, x, base - 36, 0.44);
+      if ((f % 96) < 9) star(ctx, x + 5, base - 38, 3.4, 4, '#ffffff', NO);
+      return;
+    }
+    tri(ctx, x, base - 20, x - 9, base, x + 9, base, SW_YELLOW, '#1e3444', 1.2);
+    roundRect(ctx, x - 4.5, base - 24, 9, 8, 2, SW_BLUE, '#1e3444', 1.2);
+    ellipse(ctx, x, base - 29, 5.2, 5.2, 0, SW_HAIR, '#1e3444', 1.2);
+    ellipse(ctx, x + 0.6, base - 29.4, 3.4, 3.6, 0, SW_SKIN, NO, 0);
+    tri(ctx, x - 1, base - 34, x - 5.4, base - 37, x - 4.6, base - 32.6, SW_BOW, NO, 0);
+    tri(ctx, x - 1, base - 34, x + 3.4, base - 37, x + 2.6, base - 32.6, SW_BOW, NO, 0);
+  }
+
+  /** Her heart, on a screen, in a room she did not walk into. */
+  private vitals(ctx: C2D, x: number, y: number, f: number): void {
+    roundRect(ctx, x, y, 74, 52, 2, '#08131c', '#1e3444', 1.6);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x + 3, y + 12, 68, 26);
+    ctx.clip();
+    this.alpha(ctx, 0.9);
+    ctx.strokeStyle = CYAN;
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    for (let k = 0; k <= 68; k += 2) {
+      const ph = (k + f * 1.6) * 0.1;
+      const spike = Math.exp(-((((ph % 6.283) - 3) ** 2) * 3)) * 14;
+      ctx.lineTo(x + 3 + k, y + 30 + Math.sin(ph * 3) * 1.8 - spike);
+    }
+    ctx.stroke();
+    ctx.restore();
+    ctx.globalAlpha = this.a;
+
+    setFont(ctx, 5.5, 700, false);
+    ctx.textAlign = 'left';
+    this.alpha(ctx, 0.8);
+    ctx.fillStyle = CYAN;
+    ctx.fillText('SUBJECT: STABLE', x + 5, y + 9);
+    this.alpha(ctx, 0.55);
+    ctx.fillStyle = DIM;
+    ctx.fillText('CONSENT: N/A', x + 5, y + 47);
+    ctx.globalAlpha = this.a;
+  }
+
+  /** Up and to the right, which is the only direction anything is allowed to go. */
+  private chart(ctx: C2D, x: number, y: number, f: number): void {
+    const w = 164;
+    roundRect(ctx, x, y, w, 82, 2, '#08131c', '#1e3444', 1.6);
+    roundRect(ctx, x + 1.5, y + 1.5, w - 3, 10, 1, '#123049', NO, 0);
+
+    setFont(ctx, 6, 700, false);
+    ctx.textAlign = 'left';
+    this.alpha(ctx, 0.92);
+    ctx.fillStyle = CYAN;
+    ctx.fillText('ADORATION, PROJECTED', x + 5, y + 9);
+    ctx.globalAlpha = this.a;
+
+    const gx = x + 12;
+    const gy = y + 66;
+    const gw = w - 26;
+    const gh = 44;
+    this.alpha(ctx, 0.4);
+    capsule(ctx, gx, y + 18, gx, gy, 0.7, '#3f5a6e', NO, 0);
+    capsule(ctx, gx, gy, x + w - 8, gy, 0.7, '#3f5a6e', NO, 0);
+    ctx.globalAlpha = this.a;
+
+    const steps = 16;
+    const shown = Math.max(1, Math.round(steps * clamp((f - 26) / 96, 0, 1)));
+
+    // Area under the curve, then the curve. One path each, no arrays.
+    ctx.beginPath();
+    ctx.moveTo(gx, gy);
+    for (let i = 0; i <= shown; i++) {
+      ctx.lineTo(gx + (gw * i) / steps, gy - gh * CutsceneScene.chartAt(i, steps));
+    }
+    ctx.lineTo(gx + (gw * shown) / steps, gy);
+    ctx.closePath();
+    this.alpha(ctx, 0.16);
+    ctx.fillStyle = CYAN;
+    ctx.fill();
+    ctx.globalAlpha = this.a;
+
+    ctx.beginPath();
+    for (let i = 0; i <= shown; i++) {
+      ctx.lineTo(gx + (gw * i) / steps, gy - gh * CutsceneScene.chartAt(i, steps));
+    }
+    this.alpha(ctx, 0.95);
+    ctx.strokeStyle = CYAN;
+    ctx.lineWidth = 1.6;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+    ctx.globalAlpha = this.a;
+
+    const hx = gx + (gw * shown) / steps;
+    const hy = gy - gh * CutsceneScene.chartAt(shown, steps);
+    if (shown >= steps) {
+      tri(ctx, hx + 9, hy - 8, hx - 3, hy - 3, hx + 3, hy + 6, GOLD, NO, 0);
+      // Left of the curve, where the curve has not been yet. Nothing in this
+      // panel is allowed to sit on top of the line going up.
+      setFont(ctx, 9, 900, true);
+      ctx.textAlign = 'left';
+      this.alpha(ctx, 0.95);
+      ctx.fillStyle = GOLD;
+      ctx.fillText('+4,000%', x + 20, y + 32);
+      ctx.globalAlpha = this.a;
+    } else {
+      ellipse(ctx, hx, hy, 2, 2, 0, '#ffffff', NO, 0);
+    }
+
+    setFont(ctx, 5.5, 700, false);
+    ctx.textAlign = 'left';
+    this.alpha(ctx, 0.5);
+    ctx.fillStyle = FAINT;
+    ctx.fillText('MODEL: TRUST ME', x + 12, y + 76);
+    ctx.globalAlpha = this.a;
+  }
+
+  /** The curve. Convex, jittered off the index so it is the same curve twice. */
+  private static chartAt(i: number, steps: number): number {
+    const t = i / steps;
+    return clamp(t * t * 0.92 + hash(i * 3.17) * 0.07, 0, 1);
+  }
+
   private table(ctx: C2D, x: number, base: number): void {
-    roundRect(ctx, x - 84, base - 10, 168, 11, 2, '#8b98a6', INK, 1.8);
-    roundRect(ctx, x - 84, base - 14, 168, 5, 2, STEEL, INK, 1.4);
+    roundRect(ctx, x - 74, base - 10, 148, 11, 2, '#8b98a6', INK, 1.8);
+    roundRect(ctx, x - 74, base - 14, 148, 5, 2, STEEL, INK, 1.4);
     this.alpha(ctx, 0.5);
     ctx.fillStyle = '#5d6b78';
-    ctx.fillRect(x - 70, base - 11, 140, 1.4);
+    ctx.fillRect(x - 62, base - 11, 124, 1.4);
     ctx.globalAlpha = this.a;
-    capsule(ctx, x - 58, base + 1, x - 58, base + 34, 3.4, '#525f6b', INK, 1.5);
-    capsule(ctx, x + 58, base + 1, x + 58, base + 34, 3.4, '#525f6b', INK, 1.5);
+    capsule(ctx, x - 52, base + 1, x - 52, base + 34, 3.4, '#525f6b', INK, 1.5);
+    capsule(ctx, x + 52, base + 1, x + 52, base + 34, 3.4, '#525f6b', INK, 1.5);
     // Restraints. Four of them, open, waiting.
     for (let i = 0; i < 4; i++) {
-      const sx = x - 60 + i * 40;
+      const sx = x - 54 + i * 36;
       capsule(ctx, sx, base - 15, sx, base - 24, 2.2, '#2c3540', INK, 1.2);
     }
   }
@@ -1369,21 +1800,9 @@ export class CutsceneScene implements Scene {
         i % 2 ? '#c05a4a' : '#3f6fa8', NO, 0);
     }
     // Something in there is still live, twice a shot.
-    if (this.arcAt(f, 66) || this.arcAt(f, 142)) {
+    if (this.arcAt(f, 84) || this.arcAt(f, 214)) {
       zigzag(ctx, x - 50, base - 46, x - 70, base - 34, 3.5, 6, CYAN, 1.4);
     }
-
-    // A crown, on a stand, under glass. Nobody has to say what it is for.
-    capsule(ctx, x + 116, base - 6, x + 116, base - 26, 3, '#39434f', INK, 1.4);
-    P10[0] = x + 104; P10[1] = base - 28;
-    P10[2] = x + 108; P10[3] = base - 40;
-    P10[4] = x + 116; P10[5] = base - 32;
-    P10[6] = x + 124; P10[7] = base - 40;
-    P10[8] = x + 128; P10[9] = base - 28;
-    poly(ctx, P10, GOLD, INK, 1.4);
-    this.alpha(ctx, 0.16);
-    ellipse(ctx, x + 116, base - 30, 22, 26, 0, '#b8dcf0', '#cfe8f8', 1.2);
-    ctx.globalAlpha = this.a;
   }
 
   /** True for ten frames after `at`, so the arc and its crackle line up. */
@@ -1395,19 +1814,47 @@ export class CutsceneScene implements Scene {
     if (f === 1) {
       this.sfx('hit_metal', 0.42, 1.8);
       this.kick(0, 0.22, CLINIC);
-    } else if (f === 66 || f === 142) {
+    } else if (f === CutsceneScene.CROWN_A) {
+      // The winch. Low, slow and entirely too pleased with itself.
+      this.sfx('drop', 0.22, 0.5);
+    } else if (f === CutsceneScene.CROWN_B) {
+      this.sfx('hit_metal', 0.32, 1.35);
+      this.sfx('coin', 0.44, 0.95);
+      this.kick(0.02, 0.24, GOLD);
+      if (!this.reduced) {
+        this.particles.emit({
+          count: 10,
+          x: CutsceneScene.CROWN_X,
+          y: py(CutsceneScene.CROWN_SEAT - 4),
+          z: 0,
+          angle: -Math.PI * 0.5,
+          spread: TAU,
+          speed: [0.6, 2.2],
+          life: [14, 30],
+          size: [0.9, 1.9],
+          colors: [GOLD, '#fff2c2'],
+          gravity: 0.1,
+          drag: 0.92,
+          shape: 'spark',
+          additive: true,
+        });
+      }
+    } else if (f === 84 || f === 214) {
       this.sfx('taser', 0.26, 1.5);
-    } else if (f === 108) {
+    } else if (f === 130) {
       this.sfx('drop', 0.28, 1.45);
+    } else if (f % 48 === 20) {
+      // Her heartbeat, through a wall speaker, for the benefit of nobody.
+      this.sfx('ui_move', 0.05, 2.6);
     }
   }
 
   // ─────────────────────────────────────────────────────────────────────────
   // 6. THE NOTE
   //
-  // The payload. The room is deliberately quiet and slightly out of focus
-  // behind a scrim: everything on screen is in service of thirty-nine lines of
-  // text, and the shot is exactly as long as those lines need.
+  // Three pages, and the player turns them. The room is deliberately quiet and
+  // slightly out of focus behind a scrim: everything on screen is in service
+  // of the words, and the shot lasts exactly as long as the reader does.
   // ─────────────────────────────────────────────────────────────────────────
 
   private shotRoom(ctx: C2D, f: number, _n: number): void {
@@ -1488,30 +1935,19 @@ export class CutsceneScene implements Scene {
     ctx.restore();
   }
 
-  private notePageAt(f: number): number {
-    for (let i = this.pages.length - 1; i >= 0; i--) if (f >= this.pageAt[i]) return i;
-    return 0;
+  /** How far up the page's own fade the composite currently is. */
+  private notePageAlpha(): number {
+    if (this.noteEnd >= 0) return 0;
+    const inA = clamp(this.noteLocal / PAGE_IN, 0, 1);
+    const outA = this.noteOut >= 0 ? 1 - clamp(this.noteOut / PAGE_OUT, 0, 1) : 1;
+    return Math.min(inA, outA);
   }
 
-  private typedAt(f: number, i: number): number {
-    const t = (f - this.pageAt[i] - PAGE_IN) * CHARS_PER_FRAME;
-    return clamp(Math.round(t), 0, this.pages[i].chars);
-  }
-
-  private noteAlphaAt(f: number, i: number): number {
-    const local = f - this.pageAt[i];
-    const outAt = PAGE_IN + this.pageType[i] + PAGE_HOLD;
-    return Math.min(
-      clamp(local / PAGE_IN, 0, 1),
-      1 - clamp((local - outAt) / PAGE_OUT, 0, 1),
-    );
-  }
-
-  private noteText(ctx: C2D, f: number): void {
+  private noteText(ctx: C2D): void {
     if (this.pages.length === 0) return;
-    const i = this.notePageAt(f);
+    const i = this.notePage;
     const page = this.pages[i];
-    const pa = this.noteAlphaAt(f, i);
+    const pa = this.notePageAlpha();
 
     // Scrim. The room is set dressing from here on; the words are the shot.
     ctx.globalAlpha = this.a * 0.74;
@@ -1531,9 +1967,10 @@ export class CutsceneScene implements Scene {
       this.pageW[i] = max;
     }
     const x0 = Math.round((VIEW_W - this.pageW[i]) * 0.5);
-    let y = Math.round(NOTE_MID - (page.lines.length * NOTE_LH) * 0.5);
+    const top = Math.round(NOTE_MID - (page.lines.length * NOTE_LH) * 0.5);
+    let y = top;
 
-    const typed = this.typedAt(f, i);
+    const typed = Math.floor(this.noteChars);
     let cum = 0;
     for (let k = 0; k < page.lines.length; k++) {
       const line = page.lines[k];
@@ -1550,9 +1987,9 @@ export class CutsceneScene implements Scene {
         ctx.fillText(s, x0, y);
       }
       if (typed <= cum + line.length) {
-        // Write head. Blinks on the hold, solid while it is still typing.
-        const blink = typed >= page.chars ? (this.frame % 34) < 20 : true;
-        if (blink) {
+        // Write head. Solid while it is still typing; the waiting state has a
+        // prompt of its own and does not need two things blinking at once.
+        if (!this.noteWait) {
           ctx.globalAlpha = this.a * pa * 0.8;
           ctx.fillStyle = page.letter[k] ? GOLD : PAPER;
           ctx.fillRect(x0 + (shown > 0 ? ctx.measureText(s).width : 0) + 1.5, y - 8, 5.5, 2);
@@ -1562,31 +1999,128 @@ export class CutsceneScene implements Scene {
       cum += line.length + 1;
       y += NOTE_LH;
     }
+
+    if (this.noteWait) {
+      this.notePrompt(ctx, top + page.lines.length * NOTE_LH + 16, pa, i);
+    }
     ctx.globalAlpha = this.a;
   }
 
-  private beatsNote(f: number): void {
-    if (this.pages.length === 0) return;
-    const i = this.notePageAt(f);
-    if (i !== this.livePage) {
-      if (this.livePage >= 0) this.sfx('drop', 0.22, 1.5);
-      this.livePage = i;
-      this.typed = 0;
-    }
+  /**
+   * The affordance. Nothing else on screen is moving at this point, so it has
+   * to be unmistakably an invitation rather than decoration: a chevron that
+   * bobs, a label that says what to do, and a page count so the player knows
+   * how much of this there is. Reduced motion keeps the blink and drops the
+   * bob, because a prompt that does not change at all reads as a dead frame.
+   */
+  private notePrompt(ctx: C2D, y: number, pa: number, page: number): void {
+    const t = this.frame * 0.06;
+    const blink = 0.55 + 0.45 * Math.sin(t);
+    const bob = this.reduced ? 0 : Math.sin(t) * 1.6;
+    const cx = VIEW_W * 0.5;
+    const a = this.a * pa * (0.42 + 0.58 * blink);
 
-    const typed = this.typedAt(f, i);
-    if (typed > this.typed) {
-      // One tick every other frame at most, and never on a space: a typewriter
-      // that clicks on whitespace sounds broken rather than mechanical.
-      const c = this.pages[i].flat.charCodeAt(typed - 1);
-      if (c !== 32 && c !== 10 && (this.frame & 1) === 0) {
-        this.sfx('ui_move', 0.07, 1.7 + hash(typed) * 0.35);
-      }
-      this.typed = typed;
-      if (typed >= this.pages[i].chars && i === this.pages.length - 1) {
-        this.sfx('meter_full', 0.45, 1.1);
-      }
+    ctx.globalAlpha = a;
+    setFont(ctx, 7, 700, false);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = DIM;
+    ctx.fillText('PRESS ANY KEY', cx, y + 2);
+
+    // Chevron, drawn rather than typed: a glyph that falls back to a box on
+    // one machine in twenty is not an affordance.
+    ctx.globalAlpha = a;
+    tri(ctx, cx - 5, y + 8 + bob, cx + 5, y + 8 + bob, cx, y + 14 + bob, GOLD, INK, 1.2);
+
+    if (this.pageLabels.length > 1) {
+      ctx.globalAlpha = this.a * pa * 0.34;
+      setFont(ctx, 6.5, 700, false);
+      ctx.fillStyle = FAINT;
+      ctx.fillText(this.pageLabels[page], cx, y + 26);
     }
+    ctx.textAlign = 'left';
+  }
+
+  /**
+   * The note's whole clock. It ticks the page in, types it, and then stops
+   * dead — `noteWait` is a terminal state until a press moves it on.
+   */
+  private beatsNote(): void {
+    if (this.pages.length === 0) {
+      this.closeOpenShot();
+      return;
+    }
+    this.noteLocal++;
+
+    if (this.noteEnd >= 0) {
+      this.noteEnd++;
+      if (this.noteEnd >= NOTE_TAIL) this.closeOpenShot();
+      return;
+    }
+    if (this.noteOut >= 0) {
+      this.noteOut++;
+      if (this.noteOut >= PAGE_OUT) this.nextPage();
+      return;
+    }
+    if (this.noteWait || this.noteLocal <= PAGE_IN) return;
+
+    const page = this.pages[this.notePage];
+    const before = Math.floor(this.noteChars);
+    this.noteChars = Math.min(page.chars, this.noteChars + CHARS_PER_FRAME);
+    const now = Math.floor(this.noteChars);
+    if (now > before) this.typeClick(page.flat, now);
+    if (this.noteChars >= page.chars) this.holdPage();
+  }
+
+  /** One tick every other frame at most, and never on whitespace: a typewriter
+   *  that clicks on a space sounds broken rather than mechanical. */
+  private typeClick(flat: string, at: number): void {
+    const c = flat.charCodeAt(at - 1);
+    if (c !== 32 && c !== 10 && (this.frame & 1) === 0) {
+      this.sfx('ui_move', 0.07, 1.7 + hash(at) * 0.35);
+    }
+  }
+
+  private holdPage(): void {
+    if (this.noteWait) return;
+    this.noteWait = true;
+    if (this.notePage === this.pages.length - 1) this.sfx('meter_full', 0.4, 1.1);
+    else this.sfx('drop', 0.16, 1.5);
+  }
+
+  private nextPage(): void {
+    this.noteOut = -1;
+    if (this.notePage >= this.pages.length - 1) {
+      this.noteEnd = 0;
+      return;
+    }
+    this.notePage++;
+    this.noteLocal = 0;
+    this.noteChars = 0;
+    this.noteWait = false;
+  }
+
+  /**
+   * A press on the note. Mid-type it completes the page and does NOT advance,
+   * which is the one piece of visual-novel etiquette everybody notices when it
+   * is missing; on a finished page it turns it.
+   */
+  private advanceNote(): void {
+    if (this.pages.length === 0) return;
+    // Pressing through the tail cuts it short rather than being swallowed:
+    // the last page has already gone, so there is nothing left to protect.
+    if (this.noteEnd >= 0) {
+      this.closeOpenShot();
+      return;
+    }
+    if (this.noteOut >= 0 || this.noteLocal <= PAGE_IN) return;
+
+    if (!this.noteWait) {
+      this.noteChars = this.pages[this.notePage].chars;
+      this.holdPage();
+      return;
+    }
+    this.sfx('ui_select', 0.28, 1.15);
+    this.noteOut = 0;
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -1799,7 +2333,8 @@ export class CutsceneScene implements Scene {
   // ─────────────────────────────────────────────────────────────────────────
 
   private outroT(): number {
-    return clamp((this.frame - (this.total - BAR_OUT)) / BAR_OUT, 0, 1);
+    if (!this.leftKnown) return 0;
+    return clamp((BAR_OUT - this.left) / BAR_OUT, 0, 1);
   }
 
   private chrome(ctx: C2D): void {
@@ -1830,7 +2365,9 @@ export class CutsceneScene implements Scene {
     }
 
     // The way out. Never covers the picture: it lives in the bottom bar, and if
-    // the bar has gone the cinematic is two seconds from ending anyway.
+    // the bar has gone the cinematic is two seconds from ending anyway. On the
+    // note, "any key" means the next page, so the hint has to say the other
+    // thing — an affordance that lies is worse than no affordance.
     if (this.skippable && h > 12) {
       const a = clamp((this.frame - HINT_AT) / HINT_FADE, 0, 1) * 0.5
         * (0.8 + 0.2 * Math.sin(this.frame * 0.045));
@@ -1839,7 +2376,10 @@ export class CutsceneScene implements Scene {
         setFont(ctx, 7, 700, false);
         ctx.textAlign = 'right';
         ctx.fillStyle = FAINT;
-        ctx.fillText('PRESS ANY KEY TO SKIP', VIEW_W - 16, VIEW_H - 11);
+        ctx.fillText(
+          this.noteLive() ? 'ESC TO SKIP' : 'PRESS ANY KEY TO SKIP',
+          VIEW_W - 16, VIEW_H - 11,
+        );
         ctx.textAlign = 'left';
         ctx.globalAlpha = 1;
       }
@@ -1856,7 +2396,7 @@ export class CutsceneScene implements Scene {
 
   private fade(ctx: C2D): void {
     const inA = 1 - easeOut(clamp(this.frame / FADE_IN, 0, 1));
-    const outA = easeIn(clamp((this.frame - (this.total - FADE_OUT)) / FADE_OUT, 0, 1));
+    const outA = this.leftKnown ? easeIn(clamp((FADE_OUT - this.left) / FADE_OUT, 0, 1)) : 0;
     const dark = Math.max(inA, outA);
     if (dark > 0.004) {
       ctx.globalAlpha = clamp(dark, 0, 1);
@@ -1880,14 +2420,18 @@ export class CutsceneScene implements Scene {
     for (const idx of live) this.pads.push(new GamepadSource(idx));
   }
 
-  private pollSkip(): void {
-    if (!this.skippable || this.done || this.frame < SKIP_LOCK) return;
-
+  /**
+   * Folds the bound buttons and the pads into this frame's press request. Both
+   * are edge-triggered at source — `pressed` is derived against last frame's
+   * mask, and the pad is diffed against its own previous mask — so a button
+   * that is merely being held never reaches the page turner.
+   */
+  private pollPads(): void {
     const input = this.host.input;
     for (const slot of input.slots) {
       if (input.get(slot).pressed !== 0) {
-        this.skip();
-        return;
+        this.pressReq = true;
+        break;
       }
     }
 
@@ -1897,12 +2441,32 @@ export class CutsceneScene implements Scene {
     }
     let mask = 0;
     for (const p of this.pads) mask |= p.sample(this.frame);
-    if ((mask & ~this.padPrev) !== 0) {
-      this.padPrev = mask;
-      this.skip();
+    if ((mask & ~this.padPrev) !== 0) this.pressReq = true;
+    this.padPrev = mask;
+  }
+
+  /**
+   * One press, consumed once, meaning whatever the shot on screen says it
+   * means. Note: advance. Anything else: leave.
+   *
+   * The lockout is deliberately applied twice — once against the start of the
+   * cinematic, so the keypress that launched it cannot end it, and once
+   * against the start of the note shot, so the keypress that was still on its
+   * way in cannot eat the first page before it has been read.
+   */
+  private handleInput(): void {
+    this.pollPads();
+    const press = this.pressReq;
+    this.pressReq = false;
+    if (!press || this.done || this.frame < SKIP_LOCK) return;
+
+    if (this.noteLive()) {
+      // Page turning is not a skip and does not ask permission from
+      // `skippable`: an unskippable cinematic still has to be able to end.
+      if (this.shotFrame >= SKIP_LOCK) this.advanceNote();
       return;
     }
-    this.padPrev = mask;
+    this.skip();
   }
 
   private skip(): void {

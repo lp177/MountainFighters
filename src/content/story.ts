@@ -1,10 +1,21 @@
 /**
  * The crawl and the fourteen title cards.
  *
- * INTRO_TEXT is one screen line per entry — keep them short enough to fit the
+ * Lines are one screen line per entry — keep them short enough to fit the
  * 640-wide virtual screen at the crawl font size. BOSS_INTROS is keyed by the
  * boss ids in content/bosses.ts and is shown under the boss's own `quote` on
  * the pre-fight card.
+ *
+ * TWO VERSIONS OF THE OPENING, deliberately:
+ *
+ *   INTRO_TEXT — the long one. Thirty-nine lines, the whole letter, kept
+ *     because it is the canonical text of the story and because other callers
+ *     may want it. The cinematic no longer shows it: five pages of crawl is a
+ *     lot of reading for a game about hitting people with a chain.
+ *   NOTE_TEXT — what the cinematic actually reads. Three pages: the three
+ *     sentences that land, and nothing else. Everything cut from it was not
+ *     deleted, it was PROMOTED — the plan, the before/after and the crown are
+ *     staged as pictures in the lab shot, where they are funnier and faster.
  *
  * This is satire of public figures doing invented, obviously fictional things
  * to cartoon dwarfs. It is not subtle and it is not supposed to be.
@@ -46,6 +57,35 @@ export const INTRO_TEXT: string[] = [
   'SEVENTY MAPS.',
   'FOURTEEN THINGS IN THE WAY.',
   'ONE BILLIONAIRE AT THE BOTTOM OF IT.',
+  '',
+  'HI HO.',
+];
+
+/**
+ * The cinematic cut. Three pages, player-paced, and every line of it is either
+ * the man's own words or the punchline to them. The paragraph breaks are load
+ * bearing: `paginate` packs whole paragraphs, so these blanks are where the
+ * page turns are, and moving one moves a page turn with it.
+ */
+export const NOTE_TEXT: string[] = [
+  'THE NOTE ON THE TABLE WAS PRINTED,',
+  'SIGNED WITH A LOGO, AND READ:',
+  '',
+  '"SUBJECT ACQUIRED.',
+  'EVERYONE LOVES HER. EVERYONE HATES HER.',
+  'BOTH AT ONCE. I HAVE SPENT BILLIONS TRYING',
+  'AND I STILL CANNOT DO IT.',
+  '',
+  'SO I AM GOING TO OPEN HER UP AND FIND OUT WHY.',
+  'THEN BUILD ONE THAT DOES IT ON PURPOSE.',
+  'THEN PUT A CROWN ON IT AND CALL IT QUEEN.',
+  '',
+  'REGARDS,',
+  'E."',
+  '',
+  'THE DWARFS READ IT TWICE.',
+  'THEN THEY PUT DOWN THE PICKAXES',
+  'AND PUT ON THE LEATHER.',
   '',
   'HI HO.',
 ];
@@ -92,7 +132,15 @@ export interface ShotCamera {
 
 export interface StoryShot {
   id: StoryShotId;
-  /** Frames the shot holds for. 0 means the scene measures it — see the note. */
+  /**
+   * Frames the shot holds for.
+   *
+   * 0 means OPEN-ENDED: the shot has no clock at all and ends when its own
+   * content says so. Exactly one shot uses it — the note, which waits on the
+   * player between pages and therefore cannot have a length, measured or
+   * otherwise. The scene resolves an open shot's real length only once it has
+   * closed, which is what lets the cut out of it still cross-dissolve.
+   */
   frames: number;
   entry: ShotEntry;
   /** Frames the entry transition runs for. Ignored when entry is 'cut'. */
@@ -131,27 +179,30 @@ export const STORYBOARD: readonly StoryShot[] = [
     cam: { x0: 0, y0: 0, z0: 1.24, x1: 4, y1: -6, z1: 1.1 },
     slug: '',
   },
-  // Pull back and let the doorway do it. She is never anything but a shape.
+  // Close on the carry, and hold there. This is the shot that has to answer
+  // "who has been taken" — so the camera is staged around HER, not around the
+  // house, and it tracks left with the men while it pulls back off the zoom.
   {
     id: 'taken',
-    frames: 168,
+    frames: 220,
     entry: 'fade',
     entryFrames: 26,
-    cam: { x0: 10, y0: -6, z0: 1.18, x1: -6, y1: 3, z1: 1.0 },
+    cam: { x0: 22, y0: -10, z0: 1.3, x1: -14, y1: 6, z1: 1.14 },
     slug: '',
   },
   // Cold open on the other end of the story. Dipped, because the cut from a
-  // warm forest to a surgical light should feel like a different film.
+  // warm forest to a surgical light should feel like a different film. The pan
+  // is a read: it opens on the plan board and ends on the crown coming down.
   {
     id: 'lab',
-    frames: 198,
+    frames: 280,
     entry: 'dip',
     entryFrames: 44,
-    cam: { x0: -16, y0: 4, z0: 1.0, x1: 16, y1: -4, z1: 1.1 },
+    cam: { x0: -30, y0: 6, z0: 1.02, x1: 34, y1: -6, z1: 1.14 },
     slug: 'INT. THE LAB — SOMEWHERE UNDER TEXAS',
   },
-  // The payload. `frames: 0` — the scene measures INTRO_TEXT and sizes the shot
-  // to it, so editing the text never silently truncates the reveal.
+  // The payload. `frames: 0` — OPEN. A page types, then the shot waits for the
+  // player, for as long as the player wants. There is no clock to truncate.
   {
     id: 'note',
     frames: 0,
@@ -186,10 +237,11 @@ export const TITLE_SUB = 'SEVENTY MAPS · FOURTEEN THINGS IN THE WAY · ONE BILL
 // ─────────────────────────────────────────────────────────────────────────────
 // Paginating the crawl
 //
-// INTRO_TEXT is thirty-nine lines and the virtual screen holds about eight, so
-// the note shot pages it. Paragraphs — runs of lines between the blanks the
-// text already uses as beats — are the unit: a page takes whole paragraphs
-// while they fit, and only splits one that is too long to fit on its own.
+// The virtual screen holds about eight lines, so the note shot pages the text.
+// Paragraphs — runs of lines between the blanks the text already uses as beats
+// — are the unit: a page takes whole paragraphs while they fit, and only
+// splits one that is too long to fit on its own. That is why NOTE_TEXT's blank
+// lines are where the page turns land, and why editing them edits the edit.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface NotePage {
@@ -207,8 +259,8 @@ export interface NotePage {
   flat: string;
 }
 
-/** Splits INTRO_TEXT into pages of at most `maxLines` lines. */
-export function paginateIntro(maxLines = 8): NotePage[] {
+/** Splits any of the texts above into pages of at most `maxLines` lines. */
+export function paginate(source: readonly string[], maxLines = 8): NotePage[] {
   const limit = Math.max(1, Math.floor(maxLines));
 
   // Group into paragraphs, tagging each line as narration or letter as we go.
@@ -216,7 +268,7 @@ export function paginateIntro(maxLines = 8): NotePage[] {
   let cur: { lines: string[]; letter: boolean[] } | null = null;
   let inQuote = false;
 
-  for (const raw of INTRO_TEXT) {
+  for (const raw of source) {
     const line = raw;
     if (line === '') {
       cur = null;
@@ -275,6 +327,16 @@ export function paginateIntro(maxLines = 8): NotePage[] {
   flush();
 
   return pages;
+}
+
+/** The long crawl, paged. Kept for anything that wants the whole letter. */
+export function paginateIntro(maxLines = 8): NotePage[] {
+  return paginate(INTRO_TEXT, maxLines);
+}
+
+/** What the cinematic reads. Three pages, one press each. */
+export function paginateNote(maxLines = 8): NotePage[] {
+  return paginate(NOTE_TEXT, maxLines);
 }
 
 export const BOSS_INTROS: Record<string, string[]> = {

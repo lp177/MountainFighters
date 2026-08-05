@@ -2,13 +2,13 @@
  * The roster. Seven dwarfs, seven grudges, seven very different ways of
  * ruining a security guard's evening.
  *
- * Each one keeps the hat colour he had in 1937 — that is the whole joke of the
+ * Each one keeps the hat colour he had in 1937 that is the whole joke of the
  * select-screen transformation. `style.outfit` starts at 0 (tunic, cap, no
  * shades) and the SelectScene tweens it to 1 while the rig plays the dressing
  * clips. Everything else about the palette is allowed to get nasty.
  *
  * Move id convention:
- *   the ground normals are bespoke per dwarf — `<id>_light` / `<id>_heavy` —
+ *   the ground normals are bespoke per dwarf `<id>_light` / `<id>_heavy`
  *   so no two of them throw the same punch;
  *   `air_light`, `air_heavy`, `grab` and `dash_attack` stay shared;
  *   the one bespoke per-dwarf entry beyond the normals is the special,
@@ -88,7 +88,7 @@ export const DWARFS: DwarfDef[] = [
     tagline: 'Hates you. Specifically you. By name.',
     bio:
       'Woke up furious in 1937 and has not once put it down. Moves like a landslide ' +
-      'and negotiates like one. Do not ask him how his day is going — he will tell ' +
+      'and negotiates like one. Do not ask him how his day is going he will tell ' +
       'you in full, with the bar, for as long as your skull holds out.',
     stats: { health: 132, speed: 0.8, jump: 0.86, power: 1.45, tech: 0.78 },
     style: {
@@ -363,7 +363,7 @@ export const DWARFS: DwarfDef[] = [
     tagline: 'Says nothing. Means every word of it.',
     bio:
       'Has never spoken and has never lost a fight whose rules he understood. Moves ' +
-      'like a dropped firework — fast, low, and going somewhere nobody predicted, ' +
+      'like a dropped firework fast, low, and going somewhere nobody predicted, ' +
       'least of all him. The hat is three sizes too big and he will not discuss it.',
     stats: { health: 84, speed: 1.46, jump: 1.26, power: 0.8, tech: 1.22 },
     style: {

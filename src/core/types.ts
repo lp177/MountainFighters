@@ -8,14 +8,14 @@
  * combat depth):
  *
  *     x — world horizontal, grows right, unbounded within a map
- *     z — depth into the screen, 0 = closest to camera, Z_DEPTH = far wall
+ *     z — depth, 0 = FAR (the back wall), Z_DEPTH = nearest the camera
  *     y — height above the ground plane, grows UP, 0 = standing on floor
  *
  * Screen projection (see render/Camera.ts):
  *     screenX = x - camera.x
  *     screenY = GROUND_Y + z * Z_SCALE - y
  *
- * Entities are sorted by z for draw order (higher z draws first / further back).
+ * Entities draw back to front, i.e. ascending z (z=0, the back wall, first).
  *
  * DETERMINISM CONTRACT — the simulation must be bit-identical across peers:
  *   - No Math.random(). Use the seeded Rng passed through SimContext.

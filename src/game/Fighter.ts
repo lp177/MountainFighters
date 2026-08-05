@@ -438,8 +438,12 @@ export class Fighter implements FighterView {
     if (input.held & Btn.Left) dx -= 1;
     if (input.held & Btn.Right) dx += 1;
     let dz = 0;
-    if (input.held & Btn.Up) dz += 1;
-    if (input.held & Btn.Down) dz -= 1;
+    // z=0 is the BACK of the walkable band and z=Z_DEPTH is nearest the camera
+    // (see Backdrop's FLOOR_TOP/FLOOR_BOTTOM, which is what the art is drawn
+    // against). Walking "up" therefore means walking away from the camera, into
+    // smaller z. Having these the other way round inverted the whole d-pad.
+    if (input.held & Btn.Up) dz -= 1;
+    if (input.held & Btn.Down) dz += 1;
     this.inX = dx;
     this.inZ = dz;
 
@@ -1734,7 +1738,9 @@ export class Fighter implements FighterView {
         flash: this.flash,
         tint: this.tint ?? undefined,
         alpha: strobe,
-        scale: clamp(1 - z * Z_PERSPECTIVE, 0.75, 1),
+        // Far things are smaller, and far is z=0 — so the falloff is measured
+        // from the back wall, not from the origin.
+        scale: clamp(1 - (Z_DEPTH - z) * Z_PERSPECTIVE, 0.75, 1),
       },
     );
   }

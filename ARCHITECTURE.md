@@ -25,14 +25,16 @@ screen and still have combat worth learning.
 
 ```
  x — world horizontal, grows right
- z — depth into the screen, 0 = nearest camera, Z_DEPTH = far wall
+ z — depth, 0 = FAR (the back wall), Z_DEPTH = nearest the camera
  y — height above ground, grows UP, 0 = standing
 
  screenX = x - camera.x
  screenY = GROUND_Y + z * Z_SCALE - y
 ```
 
-Entities draw back-to-front by descending `z`.
+Entities draw back-to-front by ascending `z` — the back wall is z=0.
+The walkable band runs from `GROUND_Y` (z=0) to `GROUND_Y + Z_DEPTH * Z_SCALE`,
+which is what `Backdrop.ts` draws against, so pressing Up walks into smaller z.
 
 ### Simulation model
 

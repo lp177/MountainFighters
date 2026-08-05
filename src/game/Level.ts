@@ -1279,7 +1279,10 @@ export class Level {
     for (let i = 0; i < this.projectiles.length; i++) push(this.projectiles[i].z, D_PROJ, i);
 
     const items = this.drawItems.slice(0, n);
-    items.sort((a, b) => b.z - a.z);
+    // Back to front. z=0 is the back wall, so ascending z — sorting the other
+    // way drew whoever stood nearest the camera UNDERNEATH the people behind
+    // them.
+    items.sort((a, b) => a.z - b.z);
     return items;
   }
 

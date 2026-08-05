@@ -315,12 +315,18 @@ export interface WeaponDef {
 export interface WeaponSfx {
   /** Played when the weapon is first produced or picked up. */
   reveal: SfxCue;
-  /** Played as it moves through the air. */
+  /**
+   * Played as it moves through the air. Deliberately distinct per weapon —
+   * when eight of ten shared one generic swoosh, every reveal ended on the
+   * same note and the whole roster sounded the same.
+   */
   swing: SfxCue;
   /** Played when it connects with something solid. */
   impact: SfxCue;
   /** Multiplies the playback rate, so a crowbar reads heavier than a pipe. */
   pitch?: number;
+  /** Playback rate for `swing` alone, when it wants a different one. */
+  swingPitch?: number;
 }
 
 export interface WeaponArt {

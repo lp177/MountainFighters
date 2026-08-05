@@ -727,7 +727,10 @@ export class SelectScene implements Scene {
       // A second beat as he swings it. Two notes are recognisable where one
       // buried in a sequence is not.
       const w = WEAPONS[d.signatureWeapon];
-      this.game.audio.play(w.sfx.swing, { gain: 0.72, pitch: (w.sfx.pitch ?? 1) * 1.06 });
+      this.game.audio.play(w.sfx.swing, {
+        gain: 0.72,
+        pitch: w.sfx.swingPitch ?? (w.sfx.pitch ?? 1) * 1.06,
+      });
       this.game.audio.voice(d.voice, 'taunt');
     }
   }

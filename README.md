@@ -106,10 +106,14 @@ fails with *"add a TURN server"* and the two players never meet. STUN cannot fix
 this; it only reports your own public address. A TURN server relays the traffic
 when a direct route does not exist.
 
-Configure one by copying `.env.example` to `.env` and rebuilding. Any credential
-shipped to a browser is public by construction, so use a dedicated, rate-limited
-one. Without it the game still works on a LAN and between lucky networks, and
-says so plainly instead of hanging.
+The game fetches short-lived relay credentials at runtime from `/ice`, so
+nothing secret is baked into the bundle — the credential a player can read out
+of devtools expires in a couple of hours. Point `VITE_ICE_ENDPOINT` at your own
+issuer, or set a static `VITE_TURN_*` in `.env` (see `.env.example`) if you
+would rather configure one directly.
+
+If no relay can be reached, the game falls back to STUN and still works on a LAN
+and between permissive networks, and says so plainly instead of hanging.
 
 ## On the satire
 

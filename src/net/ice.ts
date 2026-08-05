@@ -67,6 +67,58 @@ export function defaultIceServers(): RTCIceServer[] {
   return [...STUN, ...configuredTurn()];
 }
 
+/**
+ * Where to ask for short-lived TURN credentials.
+ *
+ * The relay on lp177.fr runs coturn with `use-auth-secret`, so it hands out
+ * credentials that expire (username IS the expiry timestamp, credential is an
+ * HMAC of it). That is strictly better than baking a static credential into the
+ * bundle: the thing a player can read out of devtools stops working in a couple
+ * of hours instead of never.
+ */
+const ICE_ENDPOINT = env('VITE_ICE_ENDPOINT') || 'https://lp177.fr/ice';
+
+interface IceGrant {
+  ttl?: number;
+  iceServers?: RTCIceServer[];
+}
+
+let cached: { servers: RTCIceServer[]; expires: number } | null = null;
+
+/**
+ * The ICE servers to actually use, fetching a relay grant when one is
+ * available.
+ *
+ * Never rejects: a relay we could not reach is a worse game, not a broken one,
+ * so a failure falls back to STUN and the connection simply has the odds it
+ * always had.
+ */
+export async function resolveIceServers(cfg: NetConfig): Promise<RTCIceServer[]> {
+  if (cfg.iceServers && cfg.iceServers.length > 0) return cfg.iceServers;
+
+  // An explicitly configured TURN wins: someone set it deliberately.
+  const stat = configuredTurn();
+  if (stat.length > 0) return [...STUN, ...stat];
+
+  if (cached && Date.now() < cached.expires) return cached.servers;
+  if (!ICE_ENDPOINT) return [...STUN];
+
+  try {
+    const res = await fetch(ICE_ENDPOINT, { mode: 'cors', cache: 'no-store' });
+    if (!res.ok) return [...STUN];
+    const grant = (await res.json()) as IceGrant;
+    const relay = Array.isArray(grant.iceServers) ? grant.iceServers : [];
+    if (relay.length === 0) return [...STUN];
+    const servers = [...STUN, ...relay];
+    // Re-fetch a little before the credentials actually lapse.
+    const ttl = typeof grant.ttl === 'number' && grant.ttl > 60 ? grant.ttl : 600;
+    cached = { servers, expires: Date.now() + (ttl - 60) * 1000 };
+    return servers;
+  } catch {
+    return [...STUN];
+  }
+}
+
 /** The RTCConfiguration handed to PeerJS. */
 export function rtcConfig(cfg: NetConfig): RTCConfiguration {
   const iceServers = cfg.iceServers ?? defaultIceServers();

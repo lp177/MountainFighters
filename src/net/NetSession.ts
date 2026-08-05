@@ -15,7 +15,7 @@ import { Peer } from 'peerjs';
 import type { DataConnection, PeerOptions } from 'peerjs';
 
 import type { NetConfig, NetMessage, NetPlayer, NetRole } from '@/core/types';
-import { iceFailureMessage, rtcConfig } from '@/net/ice';
+import { iceFailureMessage, resolveIceServers, rtcConfig } from '@/net/ice';
 import { MAX_LOCAL_PLAYERS, NET_VERSION } from '@/core/constants';
 import { createRoomId, normalizeRoomId } from '@/net/Room';
 import { randomSeed } from '@/engine/Rng';
@@ -134,6 +134,8 @@ export class NetSession {
     this._slot = 0;
     this._seed = randomSeed();
 
+    await this.ensureIce();
+
     let lastErr = new Error('Could not open a room.');
     for (let attempt = 0; attempt < HOST_ID_ATTEMPTS; attempt++) {
       const id = createRoomId();
@@ -170,6 +172,8 @@ export class NetSession {
     this._role = 'guest';
     this._slot = -1;
     this.hostPeerId = target;
+
+    await this.ensureIce();
 
     try {
       this._localId = await this.openPeer(null);
@@ -255,6 +259,15 @@ export class NetSession {
   }
 
   // ── Peer plumbing ──────────────────────────────────────────────────────────
+
+  /**
+   * Fetch the relay grant once per session, before any peer is created.
+   * Failing is fine — resolveIceServers falls back to STUN on its own.
+   */
+  private async ensureIce(): Promise<void> {
+    if (this.cfg.iceServers && this.cfg.iceServers.length > 0) return;
+    this.cfg.iceServers = await resolveIceServers(this.cfg);
+  }
 
   private peerOptions(): PeerOptions {
     // Only defined keys go in: PeerJS merges over its cloud defaults, and an

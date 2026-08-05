@@ -29,7 +29,7 @@ import { TAU, clamp, lerp } from '@/core/math';
 import { codeForBit, defaultBindingsFor } from '@/engine/input/Bindings';
 import { keyLabel, movementKeysLabel, movementLabelForCodes, onLayoutChange } from '@/engine/input/Layout';
 import { installKeyboard, isCapturing } from '@/engine/input/KeyboardSource';
-import { keyBindingEditor } from '@/ui/KeyBindingEditor';
+import { gamepadPanel, keyBindingEditor } from '@/ui/KeyBindingEditor';
 import { DWARFS } from '@/content/dwarfs';
 import { CLIPS, sampleClip } from '@/render/rig/Anim';
 import { DWARF_SKELETON } from '@/render/rig/Skeleton';
@@ -146,26 +146,6 @@ function drawTracked(
   }
   return w;
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// The gamepad half of the controls page
-//
-// Keyboard bindings are printed by the shared editor, which reads them off the
-// live save and names each key the way the player's own keyboard names it. The
-// pad is not rebindable, so it is the one table left worth writing down.
-// ─────────────────────────────────────────────────────────────────────────────
-
-const PAD_ROWS: readonly (readonly [string, string])[] = [
-  ['Move', 'Left stick / d-pad'],
-  ['Light attack', 'A / ✕'],
-  ['Heavy attack', 'B / ○'],
-  ['Jump', 'X / □'],
-  ['Special', 'Y / △'],
-  ['Block', 'RB / R1'],
-  ['Grab', 'LB / L1'],
-  ['Super', 'RT / R2'],
-  ['Pause', 'Start'],
-];
 
 interface Ember {
   x: number;
@@ -768,33 +748,14 @@ export class HomeScene implements Scene {
     const view = document.createElement('div');
     view.className = 'stack';
     view.appendChild(panel('Controls', intro, editor, notes));
-    view.appendChild(panel('Gamepad', this.padTable()));
+    // The same rule, printed for the other kind of controller: the pad panel
+    // reads whatever is plugged in and names its buttons the way that pad names
+    // them, and repaints itself when one is plugged in or pulled out.
+    view.appendChild(panel('Gamepad', gamepadPanel()));
     // No autofocus here, unlike the other pages: the point of this one is the
     // editor, so focus lands at the top of it rather than on the way out.
     view.appendChild(button('Back', () => this.go('menu'), { variant: 'tonal', wide: true }));
     return view;
-  }
-
-  /** The pad, which nobody can remap here and which needs no key labels at all. */
-  private padTable(): HTMLElement {
-    const list = document.createElement('ul');
-    list.className = 'list';
-    for (const [action, pad] of PAD_ROWS) {
-      const li = document.createElement('li');
-      li.className = 'list__item';
-
-      const name = document.createElement('span');
-      name.className = 'grow';
-      name.textContent = action;
-
-      const value = document.createElement('span');
-      value.className = 'chip';
-      value.textContent = pad;
-
-      li.append(name, value);
-      list.appendChild(li);
-    }
-    return list;
   }
 
   private buildJoining(): HTMLElement {

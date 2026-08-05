@@ -104,6 +104,27 @@ export const Btn = {
   Block: 1 << 9,
   Super: 1 << 10,
   Pause: 1 << 11,
+  /**
+   * "I mean it" — the stick is pushed near its limit, so run rather than walk.
+   *
+   * Analog position cannot go on the wire without widening the input format and
+   * breaking lockstep's exact comparison, so the one thing the game actually
+   * needs from an analog stick is reduced to a bit. A keyboard never sets it and
+   * keeps its own double-tap-to-run.
+   */
+  Run: 1 << 12,
+  /**
+   * This direction came from an analog source, so walk-versus-run is the
+   * stick's decision (via Run) and the keyboard's hold-to-run timer must not
+   * apply on top of it.
+   *
+   * Sent every frame the source reports a direction rather than latched on
+   * first use: latching meant a gentle stick push auto-ran for the opening of
+   * every fight, until the player happened to shove the stick fully once. It
+   * also means swapping from pad to keyboard mid-fight is handled on the very
+   * next frame instead of never.
+   */
+  Analog: 1 << 13,
 } as const;
 
 export type BtnMask = number;

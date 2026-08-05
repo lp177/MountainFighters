@@ -1,7 +1,7 @@
 /**
- * The key rebinding editor.
+ * The key rebinding editor, and the gamepad table that sits under it.
  *
- * ONE component, mounted by both the title screen's Controls page and the
+ * ONE component each, mounted by both the title screen's Controls page and the
  * in-game pause menu. Two copies of a rebinding UI is two copies of every bug
  * in a rebinding UI, so there is exactly one.
  *
@@ -14,6 +14,14 @@
  * why printing "W" next to it would be a lie. Every key name on screen comes
  * from `keyLabel()`, and the whole editor repaints through `onLayoutChange()`
  * when detection resolves or the player switches layout mid-session.
+ *
+ * `gamepadPanel()` is the same idea wearing the other hat. Pad actions bind to
+ * the PHYSICAL position of a button, so the bottom face button is Light on every
+ * pad on earth — and the letter printed on it is whatever the vendor felt like.
+ * The letters therefore come from the connected pad's own `PadProfile` and from
+ * nowhere else: a Nintendo player is told B for the bottom button and A for the
+ * right one, a PlayStation player Cross and Circle. A hard-coded Xbox table told
+ * them all the same lie the old hard-coded WASD table told AZERTY players.
  *
  * CAPTURE MODE
  * ------------
@@ -37,6 +45,14 @@ import {
 } from '@/engine/input/Bindings';
 import { keyLabel, layoutName, onLayoutChange } from '@/engine/input/Layout';
 import { setCaptureMode } from '@/engine/input/KeyboardSource';
+import type { PadProfile } from '@/engine/input/GamepadProfiles';
+import { profileFor } from '@/engine/input/GamepadProfiles';
+import {
+  connectedGamepads,
+  padProfile,
+  pollGamepads,
+  rumble,
+} from '@/engine/input/GamepadSource';
 import { attachRipple, button } from '@/ui/Widgets';
 
 export interface KeyBindingEditorOpts {
@@ -601,4 +617,396 @@ export function keyBindingEditor(opts: KeyBindingEditorOpts): HTMLElement {
  */
 export function disposeKeyBindingEditor(host: HTMLElement): void {
   editors.get(host)?.disarm();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The gamepad panel
+//
+// Same contract as the keyboard half: print what is actually there. It asks the
+// input layer which pads are connected, asks each one's PadProfile what its
+// buttons say, and prints that. Nothing here decides what a button DOES — the
+// action next to each letter is the position GamepadSource binds it to, and the
+// only reason the letters differ between a Switch Pro and a DualSense is that
+// the vendors disagree about the alphabet.
+//
+// With no pad connected it says so and prints the generic layout, because a
+// confident Xbox table shown to somebody holding nothing is the same lie in a
+// smaller hat.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Test buzz. Short and mid-strength: a handshake, not a hit. */
+const TEST_STRENGTH = 0.65;
+const TEST_MS = 220;
+
+interface LivePad {
+  index: number;
+  profile: PadProfile;
+}
+
+/**
+ * The layout to print when there is no pad to read.
+ *
+ * `profileFor` is written to survive a missing or exotic pad — it identifies
+ * whatever it can and returns a profile regardless — so the generic letters come
+ * out of the one label table rather than a second copy here that would drift
+ * away from it the first time somebody edited one and not the other.
+ */
+function genericProfile(): PadProfile {
+  return profileFor(null as unknown as Gamepad);
+}
+
+function collectPads(): LivePad[] {
+  const out: LivePad[] = [];
+  try {
+    // The game polls once per sim frame; this is a DOM event or a fresh mount,
+    // which can both land between two of them.
+    pollGamepads();
+    for (const index of connectedGamepads()) {
+      const profile = padProfile(index);
+      if (profile) out.push({ index, profile });
+    }
+  } catch {
+    // A browser that will not discuss gamepads still gets the generic table.
+  }
+  return out;
+}
+
+/**
+ * Whether this pad can be buzzed at all. Firefox exposes no `vibrationActuator`,
+ * plenty of pads have no motors, and offering a button that provably does
+ * nothing is worse than admitting it.
+ */
+function hasHaptics(index: number): boolean {
+  try {
+    if (typeof navigator === 'undefined' || typeof navigator.getGamepads !== 'function') {
+      return false;
+    }
+    const pad = navigator.getGamepads()[index];
+    const actuator = pad?.vibrationActuator as GamepadHapticActuator | undefined;
+    return !!actuator && typeof actuator.playEffect === 'function';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The same signal the rest of the presentation layer reads: `Ui` mirrors the
+ * setting onto <html>, and the combat resolver drops rumble outright when it is
+ * set. A test button that buzzed anyway would be advertising something the
+ * fights will not do.
+ */
+function motionReduced(): boolean {
+  return (
+    typeof document !== 'undefined' &&
+    document.documentElement.classList.contains('reduced-motion')
+  );
+}
+
+interface PadRow {
+  /** What the game calls it. */
+  action: string;
+  /** WHERE the control is. This is the half that bindings actually use. */
+  where: string;
+  /** What is printed on it, straight off this pad's profile. */
+  label: string;
+  /** False when this pad reports no such control at all. */
+  present: boolean;
+}
+
+function movePresent(p: PadProfile): boolean {
+  return (
+    (p.axisX >= 0 && p.axisY >= 0) ||
+    p.dpadUp >= 0 ||
+    p.dpadDown >= 0 ||
+    p.dpadLeft >= 0 ||
+    p.dpadRight >= 0 ||
+    typeof p.hatAxis === 'number' ||
+    typeof p.dpadAxisX === 'number' ||
+    typeof p.dpadAxisY === 'number'
+  );
+}
+
+/** Every action a pad can reach, paired with the letter THIS pad prints on it. */
+function padRows(p: PadProfile): PadRow[] {
+  const l = p.labels;
+  const stick = p.axisX >= 0 && p.axisY >= 0;
+  return [
+    {
+      action: 'Move',
+      where: 'left stick or d-pad',
+      label: 'Stick / d-pad',
+      present: movePresent(p),
+    },
+    { action: 'Run', where: 'stick pushed to its edge', label: 'Stick', present: stick },
+    { action: 'Light attack', where: 'bottom face button', label: l.south, present: p.south >= 0 },
+    { action: 'Heavy attack', where: 'right face button', label: l.east, present: p.east >= 0 },
+    { action: 'Jump', where: 'left face button', label: l.west, present: p.west >= 0 },
+    { action: 'Special', where: 'top face button', label: l.north, present: p.north >= 0 },
+    { action: 'Block / parry', where: 'right shoulder', label: l.r1, present: p.r1 >= 0 },
+    { action: 'Grab', where: 'left shoulder', label: l.l1, present: p.l1 >= 0 },
+    {
+      action: 'Super (1 bar)',
+      where: 'right trigger',
+      label: l.r2,
+      present: p.r2 >= 0 || typeof p.r2Axis === 'number',
+    },
+    { action: 'Pause', where: 'start button', label: l.start, present: p.start >= 0 },
+  ];
+}
+
+const PAD_TAG = 'mf-gamepad-panel';
+const gamepadPanels = new WeakMap<HTMLElement, GamepadPanel>();
+
+class GamepadPanelElement extends HTMLElement {
+  connectedCallback(): void {
+    gamepadPanels.get(this)?.arm();
+  }
+
+  disconnectedCallback(): void {
+    gamepadPanels.get(this)?.disarm();
+  }
+}
+
+function createPadHost(): HTMLElement {
+  if (typeof customElements === 'undefined') return document.createElement('div');
+  if (!customElements.get(PAD_TAG)) customElements.define(PAD_TAG, GamepadPanelElement);
+  return document.createElement(PAD_TAG);
+}
+
+class GamepadPanel {
+  private readonly summaryEl: HTMLParagraphElement;
+  private readonly bodyEl: HTMLElement;
+  private readonly statusEl: HTMLParagraphElement;
+
+  private armed = false;
+  private hotplug: AbortController | null = null;
+
+  constructor(host: HTMLElement) {
+    host.classList.add('kbe');
+    host.setAttribute('role', 'group');
+    host.setAttribute('aria-label', 'Gamepad controls');
+
+    const head = document.createElement('div');
+    head.className = 'kbe__head';
+    this.summaryEl = document.createElement('p');
+    this.summaryEl.className = 'kbe__layout';
+    this.summaryEl.title =
+      'Read off the pads that are plugged in right now. Unplug one and this list ' +
+      'notices.';
+    head.appendChild(this.summaryEl);
+
+    const hint = document.createElement('p');
+    hint.className = 'kbe__hint';
+    hint.textContent =
+      'Pad buttons are bound by POSITION, exactly like the keys: the bottom face button is ' +
+      'Light on every pad on earth, whether that button says A, B or Cross. The letters below ' +
+      'are the ones your own pad prints. Nudge the stick to walk and push it to the edge to ' +
+      'run; the d-pad always runs. Pads are not rebindable.';
+
+    this.bodyEl = document.createElement('div');
+    this.bodyEl.className = 'stack';
+
+    this.statusEl = document.createElement('p');
+    this.statusEl.className = 'kbe__status';
+    this.statusEl.setAttribute('role', 'status');
+    this.statusEl.setAttribute('aria-live', 'polite');
+
+    host.append(head, hint, this.bodyEl, this.statusEl);
+    this.paint();
+  }
+
+  // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+  /** Called when the host enters the DOM. */
+  arm(): void {
+    if (this.armed) return;
+    this.armed = true;
+    if (typeof window !== 'undefined') {
+      const ctl = new AbortController();
+      this.hotplug = ctl;
+      // A pad plugged in while this page is open must not leave a screen full of
+      // "no gamepad connected" behind it.
+      window.addEventListener('gamepadconnected', this.onConnect, { signal: ctl.signal });
+      window.addEventListener('gamepaddisconnected', this.onDisconnect, { signal: ctl.signal });
+    }
+    this.paint();
+  }
+
+  /** Called when the host leaves the DOM — including via Ui.clear(). */
+  disarm(): void {
+    this.armed = false;
+    this.hotplug?.abort();
+    this.hotplug = null;
+  }
+
+  private readonly onConnect = (e: GamepadEvent): void => {
+    this.paint();
+    const name = profileFor(e.gamepad).name;
+    this.say(`${name} connected as pad ${e.gamepad.index + 1}.`, 'ok');
+  };
+
+  private readonly onDisconnect = (e: GamepadEvent): void => {
+    this.paint();
+    this.say(`Pad ${e.gamepad.index + 1} disconnected.`, 'warn');
+  };
+
+  // ── Painting ──────────────────────────────────────────────────────────────
+
+  private say(text: string, tone: Tone = 'plain'): void {
+    this.statusEl.className = tone === 'plain' ? 'kbe__status' : `kbe__status kbe__status--${tone}`;
+    // Re-setting identical text is not re-announced, and the same news twice is
+    // still news.
+    this.statusEl.textContent = '';
+    this.statusEl.textContent = text;
+  }
+
+  private paint(): void {
+    const pads = collectPads();
+
+    // Rebuilding throws away whatever had focus, which on a pad-connected event
+    // is somebody's Tab position. Put it back on the same pad's button.
+    const active = document.activeElement;
+    const wasInside = active instanceof HTMLElement && this.bodyEl.contains(active);
+    const focused = wasInside ? (active.dataset.pad ?? '') : '';
+
+    const name = document.createElement('b');
+    name.textContent =
+      pads.length === 0 ? 'none connected' : pads.map((p) => p.profile.name).join(' · ');
+    this.summaryEl.textContent = pads.length > 1 ? 'Gamepads: ' : 'Gamepad: ';
+    this.summaryEl.appendChild(name);
+
+    this.bodyEl.textContent = '';
+    if (pads.length === 0) {
+      this.bodyEl.appendChild(this.buildSection(-1, genericProfile()));
+    } else {
+      for (const pad of pads) this.bodyEl.appendChild(this.buildSection(pad.index, pad.profile));
+    }
+
+    if (!wasInside) return;
+    const back =
+      (/^\d+$/.test(focused)
+        ? this.bodyEl.querySelector<HTMLElement>(`[data-pad="${focused}"]`)
+        : null) ?? this.bodyEl.querySelector<HTMLElement>('button');
+    back?.focus({ preventScroll: true });
+  }
+
+  /** One pad, or — with `index` at -1 — the generic layout and an apology. */
+  private buildSection(index: number, profile: PadProfile): HTMLElement {
+    const section = document.createElement('div');
+    section.className = 'kbe__panel';
+
+    const head = document.createElement('div');
+    head.className = 'kbe__head';
+
+    const title = document.createElement('p');
+    title.className = 'kbe__layout';
+    const name = document.createElement('b');
+    name.textContent = index < 0 ? 'generic layout' : profile.name;
+    const lead = index < 0 ? 'Nothing plugged in — ' : `Pad ${index + 1} — `;
+    title.append(document.createTextNode(lead), name);
+    head.appendChild(title);
+
+    if (index >= 0) head.appendChild(this.buildRumbleControl(index));
+    section.appendChild(head);
+
+    if (index < 0) {
+      const note = document.createElement('p');
+      note.className = 'kbe__hint';
+      note.textContent =
+        'Plug a controller in and press a button. This table then names every button the way ' +
+        'your own pad names it, and players three and four get one each.';
+      section.appendChild(note);
+    }
+
+    const list = document.createElement('ul');
+    list.className = 'list';
+    for (const row of padRows(profile)) list.appendChild(this.buildRow(row));
+    section.appendChild(list);
+
+    return section;
+  }
+
+  private buildRow(row: PadRow): HTMLElement {
+    const li = document.createElement('li');
+    li.className = 'list__item';
+
+    const action = document.createElement('span');
+    action.className = 'grow';
+    action.textContent = row.action;
+
+    const where = document.createElement('span');
+    where.className = 'hint';
+    where.textContent = row.where;
+
+    const value = document.createElement('span');
+    value.className = row.present ? 'chip' : 'chip chip--warn';
+    value.textContent = row.label;
+
+    li.append(action, where, value);
+
+    if (!row.present) {
+      const missing = document.createElement('span');
+      missing.className = 'chip chip--warn';
+      missing.textContent = 'not reported';
+      li.appendChild(missing);
+      li.title = 'This pad does not report that control, so the action is out of its reach.';
+    }
+
+    return li;
+  }
+
+  private buildRumbleControl(index: number): HTMLElement {
+    if (!hasHaptics(index)) {
+      const chip = document.createElement('span');
+      chip.className = 'chip chip--warn';
+      chip.textContent = 'no rumble';
+      chip.title = 'This pad reports no motors, or this browser does not expose them.';
+      return chip;
+    }
+
+    const btn = button('Test rumble', () => this.test(index), {
+      variant: 'outlined',
+      icon: '≈',
+      ariaLabel: `Buzz pad ${index + 1}`,
+      title: 'A short buzz, so you know which pad is which',
+    });
+    btn.dataset.pad = String(index);
+    return btn;
+  }
+
+  private test(index: number): void {
+    if (motionReduced()) {
+      this.say(
+        'Reduced motion is on, so rumble stays off — here and in the fights. Turn it off in ' +
+          'Settings to feel anything.',
+        'warn',
+      );
+      return;
+    }
+    rumble(index, TEST_STRENGTH, TEST_MS);
+    this.say(`Buzzed pad ${index + 1}.`, 'ok');
+  }
+}
+
+/**
+ * The gamepad half of a Controls page: what is plugged in, what each of its
+ * buttons says, and a buzz to tell two identical pads apart. Self-updating —
+ * it repaints itself when a pad is connected or disconnected while it is open.
+ */
+export function gamepadPanel(): HTMLElement {
+  const host = createPadHost();
+  const p = new GamepadPanel(host);
+  gamepadPanels.set(host, p);
+  // A plain <div> fallback gets no lifecycle callbacks, so arm it now; teardown
+  // then depends on disposeGamepadPanel().
+  if (!(host instanceof GamepadPanelElement)) p.arm();
+  return host;
+}
+
+/**
+ * Explicit teardown, for a caller that drops the panel without taking it out of
+ * the DOM. Detaching it already does this on its own.
+ */
+export function disposeGamepadPanel(host: HTMLElement): void {
+  gamepadPanels.get(host)?.disarm();
 }

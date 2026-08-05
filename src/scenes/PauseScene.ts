@@ -27,7 +27,7 @@ import { KeyboardSource, isCapturing, refreshOwnedKeys } from '@/engine/input/Ke
 import { defaultBindingsFor } from '@/engine/input/Bindings';
 
 import { Ui, setReducedMotion } from '@/ui/Ui';
-import { keyBindingEditor } from '@/ui/KeyBindingEditor';
+import { gamepadPanel, keyBindingEditor } from '@/ui/KeyBindingEditor';
 import { button, panel, slider, toggle } from '@/ui/Widgets';
 
 import { setGoreLevel } from '@/game/Fighter';
@@ -394,15 +394,6 @@ type View = 'root' | 'settings' | 'controls' | 'invite';
 const DISPLAY = 'Impact, "Arial Black", "Helvetica Neue", system-ui, sans-serif';
 
 /**
- * The pad half of the controls page.
- *
- * The keyboard half used to be a hard-coded table that said W A S D to
- * everybody, including the people whose W is two rows away. It is now the
- * shared binding editor, which reads the live bindings and names every key the
- * way the player's own keyboard names it. The pad cannot be remapped here, so
- * it stays a table.
- */
-/**
  * The gore control, as a three-stop slider.
  *
  * A slider rather than three radio buttons because the setting really is a
@@ -422,18 +413,6 @@ function goreIndex(level: Settings['gore']): number {
 function goreAt(v: number): Settings['gore'] {
   return GORE_LEVELS[clamp(Math.round(v), 0, GORE_LEVELS.length - 1)] ?? 'on';
 }
-
-const PAD_ROWS: readonly (readonly [string, string])[] = [
-  ['Move', 'Left stick / d-pad'],
-  ['Light attack', 'A / ✕'],
-  ['Heavy attack', 'B / ○'],
-  ['Jump', 'X / □'],
-  ['Special', 'Y / △'],
-  ['Block / parry', 'RB / R1'],
-  ['Grab', 'LB / L1'],
-  ['Super (1 bar)', 'RT / R2'],
-  ['Pause', 'Start'],
-];
 
 export class PauseScene implements Scene {
   readonly name = 'pause';
@@ -745,16 +724,6 @@ export class PauseScene implements Scene {
       },
     });
 
-    const pads = document.createElement('ul');
-    pads.className = 'list';
-    for (const [action, pad] of PAD_ROWS) {
-      const li = document.createElement('li');
-      li.className = 'list__item';
-      li.appendChild(cell(action, 'grow'));
-      li.appendChild(chip(pad));
-      pads.appendChild(li);
-    }
-
     const notes = document.createElement('p');
     notes.className = 'hint';
     notes.textContent =
@@ -766,7 +735,10 @@ export class PauseScene implements Scene {
 
     const stack = div('stack');
     stack.appendChild(panel('Controls', intro, editor, notes));
-    stack.appendChild(panel('Gamepad', pads));
+    // Pads follow the same rule as the keys — bound by position, printed by
+    // vendor — so this panel reads the pads that are actually in somebody's
+    // hands and prints their own letters, mid-fight plug-ins included.
+    stack.appendChild(panel('Gamepad', gamepadPanel()));
     stack.appendChild(foot);
     return stack;
   }

@@ -158,7 +158,13 @@ const ACTION_PRIORITY: readonly [number, Action][] = [
   [Btn.Jump, 'jump'],
 ];
 
-/** Frames a direction must be held before a walk rolls into a run. */
+/**
+ * Frames a direction must be held before a walk rolls into a run.
+ *
+ * This is the KEYBOARD rule, and only the keyboard rule: a digital direction has
+ * no magnitude, so the only thing left to read intent from is time. An analog
+ * stick says it outright through `Btn.Run` and never waits (see `wantsRun`).
+ */
 const RUN_HOLD_FRAMES = 12;
 /** Landing recovery. Short, and cancellable out of. */
 const LAND_FRAMES = 8;
@@ -398,6 +404,24 @@ export class Fighter implements FighterView {
   private dashDir: Facing = 1;
   private holdDir = 0;
   private holdFrames = 0;
+  /** `Btn.Run` on this frame: the stick is pushed near its limit. */
+  private runHeld = false;
+  /**
+   * True once this fighter is known to be driven by something with a magnitude.
+   *
+   * `Btn.Run` is the only analog signal that fits on the wire, so its first
+   * appearance is also the proof that this input HAS an analog axis — from that
+   * point on the hold timer is ignored and the stick alone decides walk or run.
+   * A keyboard never sets the bit, never latches this, and keeps its
+   * hold-to-run behaviour untouched.
+   *
+   * Latched from the input mask alone, and deliberately not settable from
+   * outside: the mask is what lockstep transmits, so every peer derives this
+   * from the same frames and reaches the same answer. A setter called only on
+   * the machine the pad is plugged into would be a desync waiting for the first
+   * player who walks before they run.
+   */
+  private analogMove = false;
   private tapDir = 0;
   private tapAge = 999;
   private heldMask = 0;
@@ -708,6 +732,15 @@ export class Fighter implements FighterView {
     this.inX = dx;
     this.inZ = dz;
 
+    // "I mean it": the stick is at its limit. A source that has ever said this
+    // is analog, and an analog source is never asked to hold a direction to
+    // prove it wants to run.
+    this.runHeld = (input.held & Btn.Run) !== 0;
+    // Per frame, not latched: before this, a stick held gently still rolled
+    // into a run after RUN_HOLD_FRAMES for the whole opening of a fight,
+    // because the fighter did not yet know its input was analog.
+    this.analogMove = (input.held & Btn.Analog) !== 0;
+
     if (dx !== 0 && dx === this.holdDir) this.holdFrames++;
     else {
       this.holdDir = dx;
@@ -901,6 +934,28 @@ export class Fighter implements FighterView {
     this.stateFrame = 0;
   }
 
+  /**
+   * Walk or run, from whatever this fighter is actually being driven by.
+   *
+   * Three answers, in the order they are asked:
+   *
+   *   1. `Btn.Run` is held — the stick is pushed to its limit, and the source
+   *      has said so outright. Run this frame, no wind-up.
+   *   2. The source is analog but the bit is clear — the stick is somewhere in
+   *      the middle, and the player asked to walk. Never roll into a run; a
+   *      half-deflected stick that accelerated on its own would be exactly the
+   *      "why is my character sprinting" bug the hold timer was written for.
+   *   3. Otherwise it is a keyboard, and hold-to-run is the only intent channel
+   *      there is. Unchanged, down to the frame.
+   */
+  private wantsRun(): boolean {
+    if (this.runHeld) return true;
+    // An analog source has already said how hard it is pushing; asking it to
+    // also hold a direction for twelve frames would override that answer.
+    if (this.analogMove) return false;
+    return this.holdFrames > RUN_HOLD_FRAMES;
+  }
+
   private updateGround(ctx: SimContext): void {
     this.stateFrame++;
 
@@ -925,7 +980,7 @@ export class Fighter implements FighterView {
     }
 
     const spd = this.moveSpeed;
-    const running = this.holdFrames > RUN_HOLD_FRAMES;
+    const running = this.wantsRun();
 
     if (this.inX !== 0) {
       this.facing = this.inX > 0 ? 1 : -1;
@@ -949,10 +1004,13 @@ export class Fighter implements FighterView {
 
     if (this.dashTimer <= 0) {
       this.vel.x *= 0.4;
-      // Holding the direction out of a dash rolls straight into a run.
+      // Holding the direction out of a dash rolls straight into a run — the
+      // timer is pre-satisfied so a keyboard does not have to earn it twice.
+      // A stick still decides for itself: leaning out of a dash walks out of it,
+      // pushing out of it runs.
       if (this.inX === this.dashDir) {
         this.holdFrames = RUN_HOLD_FRAMES + 1;
-        this.setState('run');
+        this.setState(this.wantsRun() ? 'run' : 'walk');
       } else {
         this.setState('idle');
       }

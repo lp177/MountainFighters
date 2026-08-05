@@ -32,6 +32,14 @@
  * deserve a finisher, it only asks and then keeps its hands off the KO if the
  * answer is yes.
  *
+ * Contact is also the only place in the game that knows who just felt something,
+ * which is why the pads are driven from here — see `setRumbleHook`. Rumble is
+ * presentation in the strictest sense: it is guarded by `FxBus.muted` exactly
+ * like every other cue, it is dropped entirely under reduced motion, and it is
+ * routed to the two fighters in the exchange and nobody else, because a
+ * four-player couch game that buzzes all four pads when one person gets punched
+ * has told everybody nothing.
+ *
  * Everything runs inside the deterministic sim: randomness comes from `ctx.rng`
  * only, and the FxBus/AudioBus calls are dropped during rollback.
  */
@@ -80,6 +88,66 @@ let fatalityHook: FatalityHook | null = null;
 
 export function setFatalityHook(fn: FatalityHook | null): void {
   fatalityHook = fn;
+}
+
+/**
+ * One buzz, in the shape the Gamepad API's `dual-rumble` effect already takes:
+ * a low-frequency motor, a high-frequency motor and a length. Anything that
+ * cannot do two motors can collapse them; anything that cannot rumble at all
+ * ignores the whole thing.
+ */
+export interface RumbleSpec {
+  /** Low-frequency (heavy) motor, 0..1. Weight and impact. */
+  strong: number;
+  /** High-frequency (light) motor, 0..1. Snap and texture. */
+  weak: number;
+  /** Milliseconds. */
+  duration: number;
+}
+
+/**
+ * The pad handoff — the smallest hook that makes "whose controller is this?"
+ * reachable from combat.
+ *
+ * The resolver knows exactly two things about a rumble: which FIGHTER it
+ * happened to, and how hard. It deliberately knows nothing about player slots,
+ * input sources, or which of them is a gamepad rather than a keyboard or a
+ * remote peer — all of which live in the input layer and belong to whoever wired
+ * the fight up. So the fight scene installs a hook, gets handed the fighter, and
+ * resolves it the same way it resolved that fighter's input in the first place:
+ * a player Fighter's `id` IS its player slot (see `FightScene.buildPlayers`),
+ * so `input.source(f.id)` is the controller that just got hit.
+ *
+ * A hook that is handed a slot with no pad — keyboard, AI, a peer three hundred
+ * milliseconds away — should do nothing at all. Rumbling for a remote player's
+ * hit on the local pad is the same bug as rumbling everybody's.
+ */
+export type RumbleHook = (fighter: Fighter, spec: RumbleSpec) => void;
+
+let rumbleHook: RumbleHook | null = null;
+
+export function setRumbleHook(fn: RumbleHook | null): void {
+  rumbleHook = fn;
+}
+
+/**
+ * Reduced motion, read the way the rest of the presentation layer reads it.
+ *
+ * `Ui.setReducedMotion` mirrors `Settings.reducedMotion` onto <html> at boot and
+ * again the instant the toggle flips, so this needs no settings reference and a
+ * change made in the pause menu lands on the very next hit — the same trick the
+ * HUD and the rig already use for the same question. Only ever consulted on the
+ * rumble path, which is presentation and outside the simulation entirely.
+ *
+ * Reduced motion drops rumble outright rather than scaling it down. Somebody who
+ * asked for less movement did not ask for a gentler shaking of the thing in
+ * their hands.
+ */
+function motionReduced(): boolean {
+  return (
+    typeof document !== 'undefined' &&
+    document.documentElement.classList.contains('reduced-motion')
+  );
 }
 
 /**
@@ -157,6 +225,50 @@ const UNHITTABLE = new Set<FighterState>(['dead', 'entering', 'victory']);
 
 /** Reactions violent enough to take something off the body with them. */
 const BRUTAL = new Set<HitReaction>(['launch', 'crumple', 'blowback']);
+
+// ── Rumble tuning ────────────────────────────────────────────────────────────
+// Presentation only. Every number here is milliseconds or a 0..1 motor level.
+
+/** Damage that reads as "as hard as it gets"; the scale saturates here. */
+const RUMBLE_FULL_DAMAGE = 24;
+/** Nothing may hold a motor down longer than this, whatever the arithmetic. */
+const RUMBLE_MAX_MS = 600;
+
+/**
+ * Landing one. Short and light, and biased to the high-frequency motor: this is
+ * a confirmation, not an event, and it has to be out of the way before the
+ * player's next input lands.
+ */
+const HIT_DEALT_STRONG = [0.1, 0.2] as const;
+const HIT_DEALT_WEAK = [0.24, 0.34] as const;
+const HIT_DEALT_MS = [55, 45] as const;
+
+/**
+ * Taking one. Heavier, longer and led by the low-frequency motor, so the two
+ * are never mistaken for each other with your eyes on the other side of the
+ * screen. Getting hit is the thing that should be felt.
+ */
+const HIT_TAKEN_STRONG = [0.34, 0.46] as const;
+const HIT_TAKEN_WEAK = [0.22, 0.34] as const;
+const HIT_TAKEN_MS = [135, 165] as const;
+/** Multipliers for a reaction that is more than a flinch. */
+const HIT_TAKEN_HEAVY = 1.1;
+const HIT_TAKEN_BRUTAL = 1.25;
+const HIT_TAKEN_BRUTAL_MS = 1.35;
+
+/** A guard holding. One tick, felt in the fingertips, gone immediately. */
+const RUMBLE_BLOCK: RumbleSpec = { strong: 0.08, weak: 0.3, duration: 45 };
+/** A parry: the same tick, sharpened, because it is the better outcome. */
+const RUMBLE_PARRY: RumbleSpec = { strong: 0.14, weak: 0.6, duration: 70 };
+/** ...and the shove the parried attacker takes for it. */
+const RUMBLE_PARRIED: RumbleSpec = { strong: 0.32, weak: 0.16, duration: 90 };
+
+/** The big one. A life ended; both hands know about it. */
+const RUMBLE_KO_VICTIM: RumbleSpec = { strong: 1, weak: 0.85, duration: 500 };
+const RUMBLE_KO_KILLER: RumbleSpec = { strong: 0.55, weak: 0.45, duration: 260 };
+/** A finisher is the loudest thing in the game and rumbles like it. */
+const RUMBLE_FATALITY_VICTIM: RumbleSpec = { strong: 1, weak: 0.9, duration: 600 };
+const RUMBLE_FATALITY_KILLER: RumbleSpec = { strong: 0.65, weak: 0.5, duration: 320 };
 
 type SprayKind = 'blood' | 'oil';
 
@@ -447,21 +559,31 @@ export class CombatResolver {
 
     if (parried) {
       this.parryJuice(a, b, cx, cy, cz, dir);
+      this.rumble(b, RUMBLE_PARRY);
+      this.rumble(a, RUMBLE_PARRIED);
       return;
     }
     if (blocked) {
       this.blockJuice(b, cx, cy, cz, dir);
+      this.rumble(b, RUMBLE_BLOCK);
       return;
     }
 
     const dealt = Math.max(0, before - b.health);
     this.impactJuice(b, props, dealt, cx, cy, cz, dir);
+    this.hitRumble(a, b, props, dealt);
     if (b.alive) return;
 
     // Offer the corpse to the director. If it takes it, everything from here —
     // the shockwave, the lens pull, the whole KO — belongs to the finisher.
-    if (this.offerFatality(a, b)) return;
+    if (this.offerFatality(a, b)) {
+      this.rumble(b, RUMBLE_FATALITY_VICTIM);
+      this.rumble(a, RUMBLE_FATALITY_KILLER);
+      return;
+    }
     this.koJuice(b, cx, cy, cz);
+    this.rumble(b, RUMBLE_KO_VICTIM);
+    this.rumble(a, RUMBLE_KO_KILLER);
   }
 
   /**
@@ -475,6 +597,74 @@ export class CombatResolver {
     if (!fatalityHook) return false;
     if (goreLevel() === 'off') return false;
     return fatalityHook(a as unknown as Fighter, b as unknown as Fighter) === true;
+  }
+
+  // ── Rumble ─────────────────────────────────────────────────────────────────
+
+  /**
+   * The two halves of a clean hit, told apart by feel.
+   *
+   * The attacker gets a light, short confirmation that scales with what the blow
+   * actually took off — a jab and a launcher must not land in the hand the same
+   * way, which is the whole reason this scales with damage dealt rather than
+   * with damage printed in the move table. The victim gets the heavy half, long
+   * enough to survive the hitstop it is landing under.
+   */
+  private hitRumble(
+    a: CombatBody,
+    b: CombatBody,
+    props: HitProperties,
+    dealt: number,
+  ): void {
+    if (!rumbleHook) return;
+    const d = dealt > 0 ? dealt : props.damage;
+    const p = clamp(d / RUMBLE_FULL_DAMAGE, 0, 1);
+    const heavy = props.reaction !== 'light';
+    const brutal = BRUTAL.has(props.reaction);
+    const bump = brutal ? HIT_TAKEN_BRUTAL : heavy ? HIT_TAKEN_HEAVY : 1;
+
+    this.rumble(a, {
+      strong: HIT_DEALT_STRONG[0] + HIT_DEALT_STRONG[1] * p,
+      weak: HIT_DEALT_WEAK[0] + HIT_DEALT_WEAK[1] * p,
+      duration: HIT_DEALT_MS[0] + HIT_DEALT_MS[1] * p,
+    });
+    this.rumble(b, {
+      strong: (HIT_TAKEN_STRONG[0] + HIT_TAKEN_STRONG[1] * p) * bump,
+      weak: (HIT_TAKEN_WEAK[0] + HIT_TAKEN_WEAK[1] * p) * bump,
+      duration: (HIT_TAKEN_MS[0] + HIT_TAKEN_MS[1] * p) * (brutal ? HIT_TAKEN_BRUTAL_MS : 1),
+    });
+  }
+
+  /**
+   * One buzz, to one fighter's pad, if all four gates open.
+   *
+   * The gates, in the order they cost nothing to ask:
+   *
+   *   1. Somebody installed a hook. Nobody has to.
+   *   2. `FxBus.muted` — a rollback re-simulation is replaying frames that have
+   *      already been felt, and a motor cannot be un-buzzed. Same rule as every
+   *      other cue in here, for the same reason.
+   *   3. This fighter is a player. An enemy has no hands.
+   *   4. Reduced motion is off.
+   *
+   * Nothing about this touches the simulation: no fighter state is read that is
+   * not already public, nothing is written, and two peers that disagree about
+   * reduced motion still agree about the fight.
+   */
+  private rumble(f: CombatBody, spec: RumbleSpec): void {
+    const hook = rumbleHook;
+    if (!hook) return;
+    if (this.fx.muted) return;
+    if (f.team !== 'player') return;
+    if (motionReduced()) return;
+
+    const duration = clamp(Math.round(spec.duration), 0, RUMBLE_MAX_MS);
+    if (duration <= 0) return;
+    hook(f as unknown as Fighter, {
+      strong: clamp(spec.strong, 0, 1),
+      weak: clamp(spec.weak, 0, 1),
+      duration,
+    });
   }
 
   // ── Presentation ───────────────────────────────────────────────────────────

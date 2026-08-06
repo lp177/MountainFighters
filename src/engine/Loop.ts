@@ -33,6 +33,8 @@ export class GameLoop {
   private suspended = false;
   private last = 0;
   private acc = 0;
+  /** Real-time accumulator for freeze frames, unscaled by timeScale. */
+  private hsAcc = 0;
   private _frame = 0;
   private _fps = SIM_HZ;
 
@@ -86,23 +88,42 @@ export class GameLoop {
 
     this.acc += elapsed * (this.timeScale > 0 ? this.timeScale : 0);
 
-    let steps = 0;
-    while (this.acc >= this.stepMs) {
-      if (steps >= MAX_CATCHUP_STEPS) {
-        // Spiral-of-death guard: drop the backlog rather than fall further behind.
-        this.acc = 0;
-        break;
-      }
-      this.acc -= this.stepMs;
-      steps++;
-      if (this.hitstop > 0) {
-        // Freeze-frame: real time passes, the sim does not. This is what makes
-        // a heavy hit land with weight.
+    if (this.hitstop > 0) {
+      /*
+       * Freeze-frame: real time passes, the sim does not.
+       *
+       * It drains on the REAL clock, deliberately not through the accumulator
+       * above. Hitstop and slow motion arrive together on the hits that matter
+       * — a K.O. fires 26 frames of freeze alongside slowmo at 0.22 — and
+       * draining the freeze through a timeScale-scaled accumulator made those
+       * 26 frames take over two seconds of wall clock. That is the "one second
+       * of cooldown after every hit" that made the game unplayable: the freeze
+       * was being slowed by the slow motion it was paired with.
+       */
+      this.hsAcc += elapsed;
+      while (this.hsAcc >= this.stepMs && this.hitstop > 0) {
+        this.hsAcc -= this.stepMs;
         this.hitstop--;
-        continue;
       }
-      this._frame++;
-      this.cb.update();
+      // Nothing simulates while frozen, and no backlog is allowed to build:
+      // releasing one would fire a burst of catch-up steps the moment the
+      // freeze lifts, which reads as the fight lurching forward.
+      if (this.acc > this.stepMs) this.acc = this.stepMs;
+    } else {
+      this.hsAcc = 0;
+      let steps = 0;
+      while (this.acc >= this.stepMs) {
+        if (steps >= MAX_CATCHUP_STEPS) {
+          // Spiral-of-death guard: drop the backlog rather than fall further behind.
+          this.acc = 0;
+          break;
+        }
+        this.acc -= this.stepMs;
+        steps++;
+        this._frame++;
+        this.cb.update();
+        if (this.hitstop > 0) break; // a hit landed inside this step; freeze now
+      }
     }
 
     this.cb.render(clamp(this.acc / this.stepMs, 0, 1));

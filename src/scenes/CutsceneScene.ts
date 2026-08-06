@@ -915,8 +915,21 @@ export class CutsceneScene implements Scene {
     this.band(ctx, 11, 22, -70, 720, 238, 46, 84, 0.34, '#0a1418');
     this.band(ctx, 47, 15, -70, 720, 252, 74, 128, 0.32, '#070f12');
 
-    // Beams, drawn over the trees so they wash the trunks rather than sit
-    // behind them. As each car swings in, its cone rakes down across the wood.
+    ctx.fillStyle = '#0b1210';
+    ctx.fillRect(-90, 250, VIEW_W + 180, VIEW_H - 190);
+    quad(ctx, 300, 262, 420, 262, 560, 360, 120, 360, '#111813', NO, 0);
+
+    // The cottage, unaware, still warm, at the end of the track.
+    this.cottage(ctx, 528, 258, 0.66, 1, f);
+
+    for (let i = 0; i < 3; i++) this.suv(ctx, this.carX(i, f), CAR_BASE, CAR_S, f);
+
+    // Beams LAST, after the ground and the cars.
+    //
+    // They used to be drawn before both, so the ground fillRect painted over
+    // everything below y=250 and only the far, upper end of each cone survived
+    // — a pale wedge hanging in the trees, attached to nothing, while the lamps
+    // underneath it lit nothing at all. Light belongs on top of what it lights.
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
     for (let i = 0; i < 3; i++) {
@@ -924,11 +937,8 @@ export class CutsceneScene implements Scene {
       if (x < -200) continue;
       const arrive = clamp((f - i * 9) / (CutsceneScene.CAR_STOP - 8), 0, 1);
       const sweep = (1 - easeOut(arrive)) * 120 - 6;
-      // The beam has to leave the lamp, not somewhere near it. These are the
-      // same expressions suv() uses to place the headlamp, off the same base
-      // and scale, so the two cannot drift apart again — hardcoding (x+40, 288)
-      // put the cone about two pixels right and three pixels below the bulb,
-      // which reads as light leaking out of the bodywork.
+      // Same expressions suv() uses to place the headlamp, off the same base
+      // and scale, so origin and lamp cannot drift apart.
       const bx = x + CAR_W * 0.44;
       const by = CAR_BODY_Y + 7 * CAR_S;
       this.alpha(ctx, 0.13);
@@ -938,15 +948,6 @@ export class CutsceneScene implements Scene {
     }
     ctx.restore();
     ctx.globalAlpha = this.a;
-
-    ctx.fillStyle = '#0b1210';
-    ctx.fillRect(-90, 250, VIEW_W + 180, VIEW_H - 190);
-    quad(ctx, 300, 262, 420, 262, 560, 360, 120, 360, '#111813', NO, 0);
-
-    // The cottage, unaware, still warm, at the end of the track.
-    this.cottage(ctx, 528, 258, 0.66, 1, f);
-
-    for (let i = 0; i < 3; i++) this.suv(ctx, this.carX(i, f), CAR_BASE, CAR_S, f);
 
     // Four of them get out and start walking. They are in no hurry either.
     const gy = 306;

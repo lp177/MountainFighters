@@ -1868,20 +1868,29 @@ export class Level {
       }
       if (it.y > 2) continue;
       /*
-       * Weapons are NOT collected by walking over them.
+       * Who picks up what, by walking over it:
        *
-       * That is what made the report: the old rule quietly skipped the pickup
-       * once your hands were full, so an armed player walking over a better
-       * weapon got nothing, no prompt and no way to trade. Taking one is now a
-       * deliberate press — see `updateInteract`.
+       *   health / meter  — always. Not a choice, and asking for a keypress to
+       *                     take a health pack would be a downgrade.
+       *   weapon, unarmed — always. Arming yourself should never be a chore.
+       *   weapon, armed   — never. This is the case the interact key exists
+       *                     for: you choose between what you are holding and
+       *                     what is at your feet, and the HUD prompts you.
+       *                     See `updateInteract`.
        *
-       * Health and meter still come to you. Those are not a choice, and making
-       * somebody press a key for a health pack would be a downgrade.
+       * The original bug was that the armed case silently did nothing at all —
+       * no pickup, no prompt, no way to trade.
        */
-      if (it.kind === 'weapon') continue;
-
       for (const p of this.players) {
         if (!p.alive || !p.grounded) continue;
+        // Empty hands take what they walk over. Making somebody press a key to
+        // arm themselves at all was the wrong half of the rule: the press is
+        // there so you can CHOOSE between the chain you are holding and the bat
+        // at your feet, not so that picking anything up is a chore.
+        //
+        // Anyone already carrying something walks over it untouched, and trades
+        // deliberately through `updateInteract`.
+        if (it.kind === 'weapon' && p.weapon) continue;
         if (Math.abs(p.pos.x - it.x) > PICKUP_REACH_X) continue;
         if (Math.abs(p.pos.z - it.z) > PICKUP_REACH_Z) continue;
         this.collect(it, p);

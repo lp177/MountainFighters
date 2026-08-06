@@ -3599,7 +3599,7 @@ VISUALS.wontfix = {
   },
 };
 
-/** FLOKI — takes the leg, trots off with it, tail going the whole time. */
+/** SHIBA INU — takes the leg, trots off with it, tail going the whole time. */
 VISUALS.shiba_leg = {
   banner: 0.6,
   draw(s) {
@@ -3694,7 +3694,7 @@ VISUALS.shiba_leg = {
   },
 };
 
-/** FLOKI — digs, deposits, backfills, pats it down. */
+/** SHIBA INU — digs, deposits, backfills, pats it down. */
 VISUALS.shiba_bury = {
   banner: 0.68,
   draw(s) {
@@ -3835,7 +3835,7 @@ VISUALS.ratio_crush = {
   },
 };
 
-/** LANE ASSIST — forwards, backwards, forwards, and then it parks. */
+/** TESLA — forwards, backwards, forwards, and then it parks. */
 VISUALS.car_roll = {
   banner: 0.74,
   draw(s) {
@@ -3940,7 +3940,7 @@ VISUALS.car_roll = {
   },
 };
 
-/** LANE ASSIST — the door closes. The sensor is confident. */
+/** TESLA — the door closes. The sensor is confident. */
 VISUALS.falcon_door = {
   banner: 0.66,
   draw(s) {
@@ -4888,7 +4888,7 @@ VISUALS.airlock_vent = {
   },
 };
 
-/** SNOW WHITE MK. II — the kiss. Ninety-six percent of one. */
+/** SNOW MUSK MK. II — the kiss. Ninety-six percent of one. */
 VISUALS.kiss_shatter = {
   banner: 0.68,
   draw(s) {

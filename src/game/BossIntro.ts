@@ -1407,9 +1407,10 @@ export class BossIntro {
     const boss = this.boss;
     if (!boss) return;
 
-    // The names are written "FLOKI, THE FIFTEEN-BILLION-DOLLAR DOG" — a name
-    // and a job. Split them, because one line of that at title size is a
-    // paragraph, not a title.
+    // Some names carry a job title after a comma ("CRUNCH, MUSK'S PRINCIPAL
+    // ENGINEER"); others are just a name ("SHIBA INU"). Split on the comma when
+    // there is one, because a whole job description at title size is a
+    // paragraph rather than a title — and fall through cleanly when there is not.
     const full = boss.name;
     const comma = full.indexOf(',');
     this.nameHead = comma > 0 ? full.slice(0, comma) : full;

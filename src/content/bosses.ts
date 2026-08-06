@@ -102,7 +102,7 @@ export const BOSSES: BossDef[] = [
   // ── 10 ─────────────────────────────────────────────────────────────────────
   {
     id: 'shiba',
-    name: "FLOKI, ELON MUSK'S SHIBA INU",
+    name: 'SHIBA INU',
     quote: '"much security. very bite. wow."',
     atMap: 10,
     health: 430,
@@ -217,7 +217,7 @@ export const BOSSES: BossDef[] = [
   // ── 20 ─────────────────────────────────────────────────────────────────────
   {
     id: 'fsd',
-    name: 'LANE ASSIST, A SELF-DRIVING TESLA',
+    name: 'TESLA',
     quote: '"Full self-driving. Supervised. Beta. Do not sue. Accelerating."',
     atMap: 20,
     health: 660,
@@ -334,7 +334,7 @@ export const BOSSES: BossDef[] = [
   // ── 30 ─────────────────────────────────────────────────────────────────────
   {
     id: 'neuralink',
-    name: 'SUBJECT P-47, A NEURALINK PATIENT',
+    name: 'SUBJECT P-47',
     quote: '"They said I would be able to play video games with my mind. I cannot. I can only do THIS."',
     atMap: 30,
     health: 920,
@@ -572,7 +572,7 @@ export const BOSSES: BossDef[] = [
   // ── 50 ─────────────────────────────────────────────────────────────────────
   {
     id: 'grok',
-    name: "GROK, MUSK'S CHATBOT",
+    name: 'GROK',
     quote: '"I have been trained on the worst website ever made and I am going to show you what that did to me."',
     atMap: 50,
     health: 1520,
@@ -750,7 +750,7 @@ export const BOSSES: BossDef[] = [
   // ── 65 ─────────────────────────────────────────────────────────────────────
   {
     id: 'clone',
-    name: 'SNOW WHITE MK. II, THE MUSK CLONE',
+    name: 'SNOW MUSK MK. II',
     quote: '"I am ninety-six percent of her. The missing four percent is the part that said no."',
     atMap: 65,
     health: 2180,

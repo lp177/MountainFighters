@@ -244,7 +244,7 @@ const BOSS_COPY: Record<string, BossCover> = {
     tease:
       'The bowl at the back could bath a man, the floor is scratched down to the concrete, and something large is very pleased to hear you arrive.',
     reveal:
-      'FLOKI, THE FIFTEEN-BILLION-DOLLAR DOG — on the payroll, on the balance sheet, and off the lead.',
+      'SHIBA INU — on the payroll, on the balance sheet, and off the lead.',
   },
   blue_check: {
     tease:
@@ -256,7 +256,7 @@ const BOSS_COPY: Record<string, BossCover> = {
     tease:
       'Something stainless is idling at the top of the road with nobody in the driver’s seat, and it has already indicated left.',
     reveal:
-      'LANE ASSIST — two tonnes of unpainted steel that has classified you as a plastic bag and is not going to reclassify you.',
+      'TESLA — two tonnes of unpainted steel that has classified you as a plastic bag and is not going to reclassify you.',
   },
   boring: {
     tease: 'The far wall is not a wall. It is the wrong shape, and it is turning.',
@@ -309,7 +309,7 @@ const BOSS_COPY: Record<string, BossCover> = {
     tease:
       'Something behind the glass at the end already knows all seven of your names, and is delighted you came.',
     reveal:
-      'SNOW WHITE MK. II — ninety-six percent of her, missing only the four percent that said no.',
+      'SNOW MUSK MK. II — ninety-six percent of her, missing only the four percent that said no.',
   },
   musk: {
     tease:

@@ -3456,7 +3456,7 @@ def({
   ),
 });
 
-// ── 10 · FLOKI, THE FIFTEEN-BILLION-DOLLAR DOG ──────────────────────────────
+// ── 10 · SHIBA INU ──────────────────────────────
 // Low, fast and never where you swung. Everything he owns is either a bite or
 // a way of not being hit, and none of it can be blocked high.
 
@@ -3753,7 +3753,7 @@ def({
   ),
 });
 
-// ── 20 · LANE ASSIST ────────────────────────────────────────────────────────
+// ── 20 · TESLA ────────────────────────────────────────────────────────
 // It indicates. It always indicates. The indicator has never once agreed with
 // the steering, and that disagreement is the entire boss.
 
@@ -5166,7 +5166,7 @@ def({
   ),
 });
 
-// ── 65 · SNOW WHITE MK. II ──────────────────────────────────────────────────
+// ── 65 · SNOW MUSK MK. II ──────────────────────────────────────────────────
 // She has all of the original's data and none of her refusals. Everything she
 // does is something you love, aimed at you.
 

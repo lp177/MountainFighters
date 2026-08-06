@@ -804,7 +804,7 @@ export function drawBossRig(
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// FLOKI — the fifteen-billion-dollar dog
+// SHIBA INU — Musk's dog
 //
 // The brief for this one is short: it has to be CUTE. A Shiba is read by four
 // things and nothing else — the upright triangular ears, the curled tail over
@@ -1309,7 +1309,7 @@ function dogEye(
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// LANE ASSIST — the angular wedge
+// TESLA — the angular wedge
 //
 // Two straight lines meeting at an apex, and nothing else. The silhouette is
 // the entire design, so there is not one curve anywhere on the body: every

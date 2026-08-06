@@ -119,6 +119,19 @@ export const FIGHT_ZOOM = 1.45;
 /** How far ahead of the player the camera leads, in world units. */
 export const CAMERA_LOOKAHEAD = 34;
 
+/**
+ * Bodies a vehicle can run over before it is scrap.
+ *
+ * A ride used to clear a whole map on its own, which is fun exactly once and
+ * then removes the fight. Twenty is enough to feel like a rampage and short
+ * enough that it ends in a wreck rather than at the boss door.
+ */
+export const VEHICLE_HP = 20;
+/** Damage the wreck deals to the driver and to everyone stood around it. */
+export const VEHICLE_BLAST_DAMAGE = 9;
+/** Reach of that blast, in world units. */
+export const VEHICLE_BLAST_RADIUS = 74;
+
 // ── Progression ──────────────────────────────────────────────────────────────
 
 export const TOTAL_MAPS = 70;

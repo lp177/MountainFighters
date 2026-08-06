@@ -64,6 +64,9 @@ import {
   GRAVITY,
   GROUND_Y,
   STARTING_LIVES,
+  VEHICLE_BLAST_DAMAGE,
+  VEHICLE_BLAST_RADIUS,
+  VEHICLE_HP,
   VIEW_W,
   WALL_BOUNCE,
   Z_HIT_TOLERANCE,
@@ -361,6 +364,11 @@ interface Pickup {
 
 interface Vehicle {
   kind: VehicleSection['kind'];
+  /** Bodies it can still take. Every ram costs one; at zero it is scrap. */
+  hp: number;
+  maxHp: number;
+  /** Frames of shake left from the last impact, for the damage read. */
+  jolt: number;
   x: number;
   z: number;
   facing: Facing;
@@ -1490,6 +1498,9 @@ export class Level {
         spin: 0,
         wheelie: 0,
         skid: 0,
+        hp: VEHICLE_HP,
+        maxHp: VEHICLE_HP,
+        jolt: 0,
       });
     }
 
@@ -1515,6 +1526,9 @@ export class Level {
         spin: 0,
         wheelie: 0,
         skid: 0,
+        hp: VEHICLE_HP,
+        maxHp: VEHICLE_HP,
+        jolt: 0,
       });
     }
   }
@@ -1654,6 +1668,7 @@ export class Level {
         if (v.skid > 0) v.skid--;
       }
 
+      if (v.jolt > 0) v.jolt--;
       v.spin = (v.spin + v.vx * 0.09) % (Math.PI * 2);
     }
   }
@@ -1717,7 +1732,83 @@ export class Level {
       });
       this.audio.play('tyres', { pan: this.pan(v.x), gain: 0.4, pitch: 1.2 });
       ctx.requestHitstop(4);
+
+      // Bodies are not free. Twenty of them and it is scrap — which is what
+      // stops one bike clearing a whole map and turning the level into a
+      // corridor you drive down.
+      v.hp--;
+      v.jolt = 10;
+      if (v.hp <= 0) {
+        this.wreck(v, ctx);
+        return;
+      }
     }
+  }
+
+  /**
+   * The vehicle gives out.
+   *
+   * Everyone within reach goes down, the driver included — riding it into the
+   * twentieth man is a decision with a bill attached, and being thrown off your
+   * own bike is a funnier ending than it quietly vanishing.
+   */
+  private wreck(v: Vehicle, ctx: SimContext): void {
+    const rider = v.rider;
+    const x = v.x;
+    const z = v.z;
+
+    if (rider) this.dismount(v);
+
+    const i = this.vehicles.indexOf(v);
+    if (i >= 0) this.vehicles.splice(i, 1);
+
+    const caught: Fighter[] = [];
+    for (const u of this.units) {
+      if (!u.dead && u.f.alive) caught.push(u.f);
+    }
+    for (const p of this.players) if (p.alive) caught.push(p);
+
+    for (const f of caught) {
+      const dx = f.pos.x - x;
+      const dz = (f.pos.z - z) * 0.7;
+      if (Math.hypot(dx, dz) > VEHICLE_BLAST_RADIUS) continue;
+      f.takeHit(blastHit(f === rider), x, ctx, rider ?? f);
+    }
+
+    this.fx.shake({ magnitude: 14, duration: 30 });
+    this.fx.flash('#ffd08a', 5, 0.55);
+    this.audio.play('explosion', { pan: this.pan(x), gain: 0.9 });
+    ctx.requestHitstop(10);
+    this.fx.particles({
+      count: 46,
+      x,
+      y: 22,
+      z,
+      angle: -Math.PI / 2,
+      spread: Math.PI * 1.6,
+      speed: [2, 8],
+      life: [20, 52],
+      size: [1.4, 4],
+      colors: ['#ffe14a', '#ff8a3d', '#c9c4d6', '#4a4152'],
+      gravity: 0.26,
+      drag: 0.93,
+      shape: 'shard',
+    });
+    this.fx.particles({
+      count: 22,
+      x,
+      y: 26,
+      z,
+      angle: -Math.PI / 2,
+      spread: 1.2,
+      speed: [0.6, 2.4],
+      life: [40, 90],
+      size: [4, 10],
+      colors: ['#3a3448', '#6a6478'],
+      gravity: -0.02,
+      drag: 0.95,
+      shape: 'smoke',
+    });
   }
 
   // ── props, pickups, projectiles ─────────────────────────────────────────────
@@ -2279,6 +2370,15 @@ export class Level {
 
     ctx.save();
     ctx.translate(v.x, sy);
+    // Wear reads before it matters: a machine on its last bodies limps, lists
+    // and shakes, so the wreck is something you saw coming rather than
+    // something that happened to you.
+    const wear = 1 - clamp(v.hp / Math.max(1, v.maxHp), 0, 1);
+    if (wear > 0.001) {
+      const jolt = v.jolt > 0 ? v.jolt / 10 : 0;
+      ctx.rotate(wear * 0.07 * (v.facing > 0 ? 1 : -1) + Math.sin(this.tick * 0.9) * wear * 0.02);
+      ctx.translate(0, Math.abs(Math.sin(this.tick * 0.55)) * wear * 1.6 + jolt * 1.4);
+    }
     ctx.scale(v.facing, 1);
     if (v.wheelie > 0) {
       // Pivot on the back wheel, which is what a wheelie is.
@@ -2307,7 +2407,69 @@ export class Level {
         break;
     }
 
+    this.drawVehicleWear(ctx, v);
     ctx.restore();
+  }
+
+  /**
+   * Dents, scorch, smoke and fire, in that order, as the bodies add up.
+   *
+   * Drawn inside the vehicle's own transform so it lists with the bodywork.
+   */
+  private drawVehicleWear(ctx: C2D, v: Vehicle): void {
+    const wear = 1 - clamp(v.hp / Math.max(1, v.maxHp), 0, 1);
+    if (wear < 0.15) return;
+
+    // Scorching, from the front backwards.
+    ctx.save();
+    ctx.globalAlpha = clamp(wear * 0.85, 0, 0.7);
+    // Fixed per vehicle, so the scorch sits still instead of crawling.
+    const seed = Math.abs(Math.round(v.maxHp * 13 + v.kind.length * 7));
+    for (let i = 0; i < 5; i++) {
+      const h = ((Math.sin(seed + i * 12.9898) * 43758.5453) % 1 + 1) % 1;
+      if (h > wear) continue;
+      const px = -14 + i * 9 + h * 5;
+      ellipse(ctx, px, -12 - h * 9, 3 + h * 3, 2 + h * 2, h * 2, '#181420', 'none', 0);
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    // Smoke once it is past halfway, fire on the last few bodies.
+    if (wear > 0.5 && (this.tick & 3) === 0) {
+      this.fx.particles({
+        count: 1,
+        x: v.x - v.facing * 6,
+        y: 22,
+        z: v.z,
+        angle: -Math.PI / 2,
+        spread: 0.5,
+        speed: [0.3, 0.9],
+        life: [26, 54],
+        size: [2.5, 5],
+        colors: wear > 0.8 ? ['#ff8a3d', '#4a4152'] : ['#4a4152', '#6a6478'],
+        gravity: -0.03,
+        drag: 0.96,
+        shape: 'smoke',
+      });
+    }
+    if (wear > 0.8 && (this.tick & 1) === 0) {
+      this.fx.particles({
+        count: 1,
+        x: v.x - v.facing * 4,
+        y: 20,
+        z: v.z,
+        angle: -Math.PI / 2,
+        spread: 0.7,
+        speed: [0.8, 2],
+        life: [8, 18],
+        size: [1.2, 2.6],
+        colors: ['#ffe14a', '#ff8a3d'],
+        gravity: -0.05,
+        drag: 0.94,
+        shape: 'spark',
+        additive: true,
+      });
+    }
   }
 
   /** Two black streaks where the rubber went. */
@@ -2644,6 +2806,31 @@ function ramHit(speed: number, mul: number): HitProperties {
     meterGainVictim: 0.06,
     shake: 6,
     sfx: 'bone_crack',
+  };
+}
+
+/**
+ * The wreck going up.
+ *
+ * Light damage and a knockdown rather than a kill: this is a punctuation mark
+ * on a rampage, not a punishment for having enjoyed one. The driver takes the
+ * same hit as everyone else, which is only fair — he was sitting on it.
+ */
+function blastHit(isRider: boolean): HitProperties {
+  return {
+    damage: isRider ? VEHICLE_BLAST_DAMAGE * 0.7 : VEHICLE_BLAST_DAMAGE,
+    hitstun: 30,
+    blockstun: 18,
+    hitstop: 6,
+    knockback: { x: 6.5, y: 6 },
+    pushback: 0,
+    reaction: 'sweep',
+    level: 'mid',
+    chip: DEFAULT_CHIP,
+    meterGain: 0,
+    meterGainVictim: 0.08,
+    shake: 10,
+    sfx: 'explosion',
   };
 }
 

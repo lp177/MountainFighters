@@ -119,7 +119,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
   pistol: {
     kind: 'pistol',
     sfx: { reveal: 'gunshot', swing: 'hit_metal', swingPitch: 1.9, impact: 'gunshot' },
-    name: 'Executive Sidearm',
+    name: '3D-Printed Sidearm',
     // Six rounds, no reload, wildly out of proportion to the situation.
     durability: -1,
     ammo: 6,

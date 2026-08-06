@@ -16,6 +16,7 @@
 
 import type {
   Bone,
+  BoneName,
   FaceState,
   Facing,
   FighterState,
@@ -25,6 +26,7 @@ import type {
   HitWindow,
   InputFrame,
   MoveDef,
+  Pose,
   RigDamage,
   RigStyle,
   Settings,
@@ -120,6 +122,38 @@ export interface FighterInit {
    * instead of by drawCharacter.
    */
   bossRig?: BossRigKind;
+}
+
+/**
+ * Where a machine puts the body riding it, and how that body holds on.
+ *
+ * A Fighter has no idea what a motorbike is — the Level does, so the shape of a
+ * saddle is described here and authored there, next to the art it has to agree
+ * with. Everything in it is PRESENTATION ONLY: `pos` stays on the floor, which
+ * is what keeps hitboxes, the stage bounds and the depth sort working exactly
+ * as they do on foot.
+ *
+ * Units are the machine's own — the same ones its chassis is drawn in — and are
+ * scaled by the depth perspective alongside the rig, so a bike at the back wall
+ * still has its rider on the seat rather than hovering over it.
+ */
+export interface RideSeat {
+  /** Forward offset of the rig's ground point from the middle of the machine. */
+  x: number;
+  /** How far that point is lifted off the road: the saddle, deck or cab floor. */
+  y: number;
+  /** Extra lean about the seat, in radians. Positive folds forward. */
+  lean: number;
+  /** Shoulder swing. Negative brings the arms down off the bars. */
+  arm: number;
+  /** Elbow. Positive folds the hands in toward the chest. */
+  elbow: number;
+  /** Thigh. Positive lifts the knees toward the chest. */
+  thigh: number;
+  /** Knee. Positive tucks the heels up under the seat. */
+  knee: number;
+  /** Spine. Positive folds down over the bars; negative sits up. */
+  spine: number;
 }
 
 /** Buffered action slots. These map to move ids through `moves`. */
@@ -353,6 +387,40 @@ export function isMechanicalArchetype(archetype: string): boolean {
   return false;
 }
 
+/** Adds to a bone's rotation in a pose. Safe on a bone the clip never touched. */
+function bend(pose: Pose, name: BoneName, d: number): void {
+  if (d === 0) return;
+  const cur = pose[name];
+  if (cur) cur.rot = (cur.rot ?? 0) + d;
+  else pose[name] = { rot: d };
+}
+
+/**
+ * Bends the one `ride` clip to fit the machine it is being played on.
+ *
+ * Crouched over the bars of a moto, upright on a scooter's stem and folded into
+ * a cab are the same pose with different joints, so the vehicle supplies the
+ * differences rather than the rig growing a clip per vehicle. The pose handed in
+ * is freshly sampled every frame (see `sampleClip`), so this mutates it in place
+ * rather than allocating another one sixty times a second.
+ */
+function seatPose(pose: Pose, s: RideSeat): void {
+  bend(pose, 'torso', -s.spine);
+  bend(pose, 'armL_upper', s.arm);
+  bend(pose, 'armR_upper', s.arm);
+  bend(pose, 'armL_lower', s.elbow);
+  bend(pose, 'armR_lower', s.elbow);
+  bend(pose, 'legL_upper', s.thigh);
+  bend(pose, 'legR_upper', s.thigh);
+  bend(pose, 'legL_lower', -s.knee);
+  bend(pose, 'legR_lower', -s.knee);
+  // Anim.legs() keeps the sole flat by construction — an ankle carries the knee
+  // flex less the thigh swing — so a delta to either has to reach the foot too,
+  // or a rider on a peg points his toes at the floor for no reason.
+  bend(pose, 'footL', s.knee - s.thigh);
+  bend(pose, 'footR', s.knee - s.thigh);
+}
+
 /** Moves are authored by other modules; a bad id must not take the game down. */
 function lookupMove(id: string): MoveDef | null {
   if (!id) return null;
@@ -500,6 +568,15 @@ export class Fighter implements FighterView {
   private rideVel = 0;
   /** Speed multiplier for the thing being ridden. A pod is not a moto. */
   private rideBoost = 1;
+  /**
+   * Where the thing being ridden wants this body, or null on foot.
+   *
+   * Read by `render` and by nothing else: the simulation goes on treating a
+   * rider as a body standing on the floor at `pos`, which is the only reason
+   * combat, the stage bounds and the depth sort survive somebody getting on a
+   * motorbike.
+   */
+  private seat: RideSeat | null = null;
   private rideWheelie = 0;
   private rideSwing = 0;
   /**
@@ -2290,12 +2367,13 @@ export class Fighter implements FighterView {
     if (this.grounded) this.setState('idle', true);
   }
 
-  setRiding(on: boolean, speedScale = 1): void {
+  setRiding(on: boolean, speedScale = 1, seat: RideSeat | null = null): void {
     if (on) {
       if (!this.alive) return;
       this.currentMove = null;
       this.clearBuffer();
       this.rideBoost = clamp(speedScale, 0.4, 2.4);
+      this.seat = seat;
       // Whatever you were carrying in comes with you.
       this.rideVel = clamp(this.vel.x, -RIDE_TOP_SPEED, RIDE_TOP_SPEED);
       this.rideWheelie = 0;
@@ -2321,6 +2399,7 @@ export class Fighter implements FighterView {
     this.rideWheelie = 0;
     this.rideSwing = 0;
     this.rideWindow = null;
+    this.seat = null;
   }
 
   heal(v: number): void {
@@ -2430,10 +2509,23 @@ export class Fighter implements FighterView {
     const y = lerp(this.prevPos.y, this.pos.y, a);
     const z = lerp(this.prevPos.z, this.pos.z, a);
 
+    // Far things are smaller, and far is z=0 — so the falloff is measured from
+    // the back wall, not from the origin. Needed before the cull because the
+    // seat is measured in the machine's units and has to shrink with it.
+    const u = clamp(1 - (Z_DEPTH - z) * Z_PERSPECTIVE, 0.75, 1);
+
+    // On a vehicle the body is drawn at the SEAT, never on the road under it.
+    // `pos` is untouched — see RideSeat.
+    const seat = this.state === 'riding' ? this.seat : null;
+    const ox = seat ? seat.x * this.facing * u : 0;
+    const oy = seat ? seat.y * u : 0;
+
     // Recorded before the cull, so an overlay that anchors to it never latches
-    // onto a stale position for a fighter who was briefly off the side.
-    this.drawPos.x = x;
-    this.drawPos.y = y;
+    // onto a stale position for a fighter who was briefly off the side. The
+    // seat is included: a marker over a rider's head belongs over the head he
+    // is drawn with, not over the tarmac he is standing on in the simulation.
+    this.drawPos.x = x + ox;
+    this.drawPos.y = y + oy;
     this.drawPos.z = z;
 
     const onScreen = x - cam.x;
@@ -2442,6 +2534,7 @@ export class Fighter implements FighterView {
     const clip = CLIPS[this.animClip] ?? CLIPS.idle;
     if (!clip) return;
     const pose = sampleClip(clip, lerp(this.prevAnimFrame, this.animFrame, a));
+    if (seat) seatPose(pose, seat);
 
     // Invulnerability reads as a strobe; a solid ghost would look like a bug.
     const strobe = this.invulnFrames > 0 && (this.age & 2) !== 0 ? 0.45 : 1;
@@ -2451,14 +2544,13 @@ export class Fighter implements FighterView {
     o.flash = this.flash;
     o.tint = this.tint ?? undefined;
     o.alpha = strobe;
-    // Far things are smaller, and far is z=0 — so the falloff is measured from
-    // the back wall, not from the origin.
-    o.scale = clamp(1 - (Z_DEPTH - z) * Z_PERSPECTIVE, 0.75, 1);
+    o.scale = u;
     o.damage = this.damage;
 
-    const sy = GROUND_Y + z * Z_SCALE - y;
+    const px = x + ox;
+    const sy = GROUND_Y + z * Z_SCALE - y - oy;
     if (this.bossRig && hasBossRig(this.bossRig)) {
-      drawBossRig(ctx, this.bossRig, this.style, x, sy, this.facing, {
+      drawBossRig(ctx, this.bossRig, this.style, px, sy, this.facing, {
         state: this.state,
         frame: this.stateFrame,
         flash: o.flash,
@@ -2470,7 +2562,18 @@ export class Fighter implements FighterView {
       return;
     }
 
-    drawCharacter(ctx, this.style, pose, this.skeleton, x, sy, this.facing, o);
+    if (seat && seat.lean !== 0) {
+      // About the seat, so a lean pivots on the thing being sat on rather than
+      // on a pair of feet that are nowhere near the floor.
+      ctx.save();
+      ctx.translate(px, sy);
+      ctx.rotate(seat.lean * this.facing);
+      drawCharacter(ctx, this.style, pose, this.skeleton, 0, 0, this.facing, o);
+      ctx.restore();
+      return;
+    }
+
+    drawCharacter(ctx, this.style, pose, this.skeleton, px, sy, this.facing, o);
   }
 
   // ── netcode ────────────────────────────────────────────────────────────────

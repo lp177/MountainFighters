@@ -48,7 +48,7 @@ import type {
 } from '@/core/types';
 import type { Camera } from '@/render/Camera';
 import { Fighter } from '@/game/Fighter';
-import type { FighterInit } from '@/game/Fighter';
+import type { FighterInit, RideSeat } from '@/game/Fighter';
 import { EnemyAI } from '@/game/ai/EnemyAI';
 import type { AiTuning } from '@/game/ai/EnemyAI';
 import { ENEMIES } from '@/content/enemies';
@@ -58,18 +58,23 @@ import { DWARF_SKELETON, HUMAN_SKELETON } from '@/render/rig/Skeleton';
 import { drawWeapon } from '@/render/rig/CharacterRig';
 import { drawBackdrop, drawForeground } from '@/game/Backdrop';
 import { capsule, ellipse, poly, roundRect, shadow, star } from '@/render/Shapes';
-import { clamp, easeOut, easeOutBack } from '@/core/math';
+import { clamp, easeOut, easeOutBack, lerp } from '@/core/math';
 import {
   DEFAULT_CHIP,
   GRAVITY,
   GROUND_Y,
   STARTING_LIVES,
+  FIGHT_ZOOM,
+  PROJECTILE_PIERCE,
+  PROJECTILE_RANGE_FRAC,
   VEHICLE_BLAST_DAMAGE,
   VEHICLE_BLAST_RADIUS,
   VEHICLE_HP,
   VIEW_W,
   WALL_BOUNCE,
+  Z_DEPTH,
   Z_HIT_TOLERANCE,
+  Z_PERSPECTIVE,
   Z_SCALE,
 } from '@/core/constants';
 
@@ -240,6 +245,68 @@ const VEHICLE_KINDS: Record<VehicleSection['kind'], VehicleTuning> = {
   },
 };
 
+/**
+ * Where each machine puts its rider, and how it makes him hold on.
+ *
+ * These are the numbers the chassis art below is drawn AROUND, not decoration
+ * on top of it: `x`/`y` are the point the rig stands on — the saddle, the deck,
+ * the cab floor — and the joint deltas bend the single `ride` clip into a pose
+ * that suits this particular machine. Both are in vehicle-local units, so a
+ * grip drawn at (20, -28) is a grip the hands actually close on.
+ *
+ * Nothing here touches the simulation. See RideSeat.
+ */
+const SEATS: Record<VehicleSection['kind'], RideSeat> = {
+  // Crouched over the bars, backside on the saddle, boots on the pegs — the
+  // clip was authored for exactly this, so only the legs are let down a little
+  // to reach the pegs.
+  moto: { x: -2, y: 18, lean: 0, arm: 0, elbow: 0, thigh: -0.35, knee: -0.45, spine: 0 },
+  // Standing on the deck with both hands on the stem. Nobody crouches on one
+  // of these; the whole comedy is how upright and how slow it is.
+  scooter: { x: -4, y: 9, lean: -0.14, arm: -0.15, elbow: 0.1, thigh: -0.9, knee: -1.2, spine: -0.6 },
+  // Sunk into a cab built for somebody twice his height: everything below the
+  // window line is inside the door, and what is left is a hat and two fists on
+  // a wheel he can barely see over.
+  cybertruck: { x: -2, y: 6, lean: 0, arm: -0.55, elbow: 1, thigh: 0.3, knee: -0.5, spine: -0.45 },
+  // Reclined in the tube and set well back under the peak of the canopy, knees
+  // up, hands down on a sidestick below the coaming.
+  hyperloop_pod: { x: -10, y: 6, lean: 0, arm: -0.35, elbow: 0.4, thigh: 0.45, knee: -0.7, spine: -0.25 },
+  // Not seated in anything. Astride the hull with both fists on a grab bar,
+  // which is the only honest way to draw a man on a firework.
+  rocket: { x: -4, y: 19, lean: 0.06, arm: 0.15, elbow: -0.15, thigh: -0.15, knee: -0.1, spine: 0.2 },
+};
+
+/**
+ * The window a closed machine lets you see its driver through.
+ *
+ * Used for BOTH the clip region around the rider and the glass drawn over him,
+ * from the same numbers, so the two can never disagree about where the cabin
+ * is. Anything of him outside this outline is inside the bodywork and is simply
+ * not drawn — which is the whole difference between a man in a truck and a man
+ * standing in front of one.
+ *
+ * Vehicle-local, flat [x0,y0, x1,y1, ...], mirrored with the machine.
+ */
+const TRUCK_GLASS: readonly number[] = [-24, -24, -1, -48, 19, -46.5, 26, -24];
+const POD_CANOPY: readonly number[] = [
+  -15, -26, -13, -42, -4, -53, 8, -55, 17, -46, 19, -26,
+];
+
+/** Kinds that hide what they cover. Open frames are absent on purpose. */
+const CABINS: Partial<Record<VehicleSection['kind'], readonly number[]>> = {
+  cybertruck: TRUCK_GLASS,
+  hyperloop_pod: POD_CANOPY,
+};
+
+/** Contact shadow half-width. A scooter does not cast a truck's shadow. */
+const VEHICLE_FOOTPRINT: Record<VehicleSection['kind'], number> = {
+  moto: 19,
+  scooter: 15,
+  cybertruck: 30,
+  hyperloop_pod: 24,
+  rocket: 22,
+};
+
 /** What a fighter would interact with right now. Consumed by the HUD prompt. */
 export interface InteractTarget {
   kind: 'weapon' | 'vehicle';
@@ -371,6 +438,17 @@ interface Vehicle {
   jolt: number;
   x: number;
   z: number;
+  /**
+   * Where it was at the end of the previous step.
+   *
+   * A ridden machine is pinned to `rider.pos` every frame, so interpolating it
+   * from here with the SAME alpha the rider's own renderer uses puts the two on
+   * the same spot at every point between two sim steps. Without it a bike at
+   * speed slid up to seven units out from under its rider and back again, sixty
+   * times a second, which is most of what "stacked images" looked like.
+   */
+  prevX: number;
+  prevZ: number;
   facing: Facing;
   /** Signed speed. Mirrors the rider while ridden, coasts to a stop after. */
   vx: number;
@@ -394,6 +472,12 @@ interface Projectile {
   damage: number;
   life: number;
   color: string;
+  /** World units still to travel before it drops. See PROJECTILE_RANGE_FRAC. */
+  range: number;
+  /** Bodies already passed through. Stops at PROJECTILE_PIERCE. */
+  pierced: number;
+  /** Ids already hit, so one body cannot be hit twice by the same round. */
+  hit: number[];
 }
 
 interface DrawItem {
@@ -658,6 +742,21 @@ export class Level {
     if (this.outro > 0 && --this.outro === 0) this._complete = true;
 
     this.followCamera();
+    // Last word of the step, because `followCamera` is allowed to shove a body
+    // back inside the stage — and a machine that settled a frame before its
+    // rider did is a machine the rider is standing next to.
+    this.seatVehicles();
+  }
+
+  /** Pin every ridden machine to the body on it, after everything has moved. */
+  private seatVehicles(): void {
+    for (const v of this.vehicles) {
+      const r = v.rider;
+      if (!r) continue;
+      v.x = r.pos.x;
+      v.z = r.pos.z;
+      v.facing = r.facing;
+    }
   }
 
   /**
@@ -690,6 +789,11 @@ export class Level {
           damage: numberOf(d.damage, 8),
           life: numberOf(d.life, 120),
           color: typeof d.color === 'string' ? d.color : kind === 'bolt' ? '#8fe3ff' : '#ffe08a',
+          // 40% of the width the player can SEE, not of the map — a shooter who
+          // can out-range the screen can only be answered by walking to him.
+          range: numberOf(d.range, (VIEW_W / FIGHT_ZOOM) * PROJECTILE_RANGE_FRAC),
+          pierced: 0,
+          hit: [],
         });
         this.audio.play(kind === 'bolt' ? 'taser' : 'gunshot', { pan: this.pan(x) });
         break;
@@ -1492,6 +1596,8 @@ export class Level {
         kind: 'scooter',
         x: pr.x,
         z: pr.z,
+        prevX: pr.x,
+        prevZ: pr.z,
         facing: 1,
         vx: 0,
         rider: null,
@@ -1516,10 +1622,13 @@ export class Level {
 
     for (let i = 0; i < n; i++) {
       const x = clamp(Math.min(from + 34 + i * VEHICLE_SPACING, last), 20, w - 20);
+      const z = clamp(this.def.depth * (0.42 + i * 0.13), 4, this.def.depth - 4);
       this.vehicles.push({
         kind: spec.kind,
         x,
-        z: clamp(this.def.depth * (0.42 + i * 0.13), 4, this.def.depth - 4),
+        z,
+        prevX: x,
+        prevZ: z,
         facing: 1,
         vx: 0,
         rider: null,
@@ -1564,9 +1673,13 @@ export class Level {
     v.rider = p;
     v.x = p.pos.x;
     v.z = p.pos.z;
+    // The chassis teleports to the body; without this it interpolates across
+    // the gap and the bike slides out of a hedge to meet him.
+    v.prevX = v.x;
+    v.prevZ = v.z;
     v.facing = p.facing;
     v.vx = 0;
-    p.setRiding(true, tune.speed);
+    p.setRiding(true, tune.speed, SEATS[v.kind]);
 
     this.audio.play('engine', { pan: this.pan(v.x), gain: 0.9 });
     this.fx.text({
@@ -1616,8 +1729,11 @@ export class Level {
     if (!r) return;
 
     r.setRiding(false);
-    // Step the chassis forward so the two silhouettes come apart.
+    // Step the chassis forward so the two silhouettes come apart. It is put
+    // there, not driven there, so the renderer must not tween across the gap.
     v.x = clamp(v.x + v.facing * 14, 8, this.def.width - 8);
+    v.prevX = v.x;
+    v.prevZ = v.z;
     this.audio.play('tyres', { pan: this.pan(v.x), gain: 0.5, pitch: 1.1 });
     this.fx.particles({
       count: 6,
@@ -1647,6 +1763,10 @@ export class Level {
     }
 
     for (const v of this.vehicles) {
+      // Last frame's resting place, for the renderer to interpolate from.
+      v.prevX = v.x;
+      v.prevZ = v.z;
+
       const r = v.rider;
       // Knocked out of the saddle, or knocked out entirely.
       if (r && (!r.alive || !r.riding)) this.dismount(v);
@@ -2092,11 +2212,19 @@ export class Level {
       pj.y += pj.vy;
       if (pj.kind === PROJ_KIND_LOB) pj.vy -= GRAVITY * 0.5;
 
-      let done = --pj.life <= 0 || pj.x < camL || pj.x > camR || pj.y < -4;
+      // Range is spent by distance, not by time, so a fast round and a slow one
+      // reach equally far. A shooter has to close in to be a threat at all.
+      pj.range -= Math.abs(pj.vx);
+      let done = --pj.life <= 0 || pj.range <= 0 || pj.x < camL || pj.x > camR || pj.y < -4;
 
       if (!done) {
         for (const f of this.fighters) {
-          if (!f.alive || f.team === pj.team) continue;
+          // FRIENDLY FIRE. A bullet does not check whose side you are on — it
+          // only refuses to hit the man who fired it, because a gun that kills
+          // its owner on frame one is a bug rather than satire. Standing behind
+          // your own gunman is now a decision.
+          if (!f.alive || f === pj.owner) continue;
+          if (pj.hit.includes(f.id)) continue;
           if (Math.abs(f.pos.x - pj.x) > 12) continue;
           if (Math.abs(f.pos.z - pj.z) > Z_HIT_TOLERANCE) continue;
           if (pj.y > 46) continue;
@@ -2118,8 +2246,13 @@ export class Level {
             shape: 'spark',
             additive: true,
           });
-          done = true;
-          break;
+          // Rounds punch through. With friendly fire on this cuts both ways:
+          // a line of guards is a gift to whoever shoots down it.
+          pj.hit.push(f.id);
+          if (++pj.pierced >= PROJECTILE_PIERCE) {
+            done = true;
+            break;
+          }
         }
       }
 
@@ -2144,17 +2277,22 @@ export class Level {
         case D_PICKUP:
           this.drawPickup(ctx, this.pickups[it.i]);
           break;
-        case D_FIGHTER:
-          this.fighters[it.i].render(ctx, cam, alpha);
+        case D_FIGHTER: {
+          const f = this.fighters[it.i];
+          // A rider is drawn inside its machine's frame, and clipped by it.
+          const v = f.riding ? this.vehicleOf(f) : null;
+          if (v) this.drawRider(ctx, cam, alpha, f, v);
+          else f.render(ctx, cam, alpha);
           break;
+        }
         case D_PROJ:
           this.drawProjectile(ctx, this.projectiles[it.i]);
           break;
         case D_VEHICLE:
-          this.drawVehicle(ctx, this.vehicles[it.i], false);
+          this.drawVehicle(ctx, this.vehicles[it.i], false, alpha);
           break;
         case D_VEHICLE_FRONT:
-          this.drawVehicle(ctx, this.vehicles[it.i], true);
+          this.drawVehicle(ctx, this.vehicles[it.i], true, alpha);
           break;
         default:
           break;
@@ -2348,38 +2486,35 @@ export class Level {
    * The vehicle, in the same bold-outline vector house style as the props.
    *
    * Drawn in two passes around its rider: `front` is the handful of parts that
-   * belong in FRONT of a body sitting on the thing — bars, glass, straps —
-   * without which the rider reads as standing on top of a shape rather than
-   * riding it.
+   * belong in FRONT of a body sitting on the thing — the flank a knee grips,
+   * the pipe across a shin, the bars, the glass, the straps — without which the
+   * rider reads as standing on top of a shape rather than riding it.
    *
    * Local space inside the transform: x=0 is the middle of the vehicle, y=0 the
-   * ground line at its depth, +x forward whichever way it is pointing.
+   * ground line at its depth, +x forward whichever way it is pointing. The same
+   * units the seats above are written in, because the two have to agree.
    */
-  private drawVehicle(ctx: C2D, v: Vehicle, front: boolean): void {
+  private drawVehicle(ctx: C2D, v: Vehicle, front: boolean, alpha: number): void {
     if (!v) return;
-    const sy = GROUND_Y + v.z * Z_SCALE;
+    const vx = lerp(v.prevX, v.x, alpha);
+    const vz = lerp(v.prevZ, v.z, alpha);
+    const sy = GROUND_Y + vz * Z_SCALE;
+    const s = depthScale(vz);
     const tune = VEHICLE_KINDS[v.kind];
 
     if (!front) {
       // A scooter has a smaller footprint than a motorbike, which is most of
       // what sells it as a different machine at this size.
-      const foot = v.kind === 'scooter' ? 14 : v.kind === 'moto' ? 19 : 26;
-      shadow(ctx, v.x, sy, foot, 0.32);
-      if (v.skid > 0) this.drawSkid(ctx, v, sy);
+      const foot = VEHICLE_FOOTPRINT[v.kind] * s;
+      shadow(ctx, vx, sy, foot, 0.32);
+      if (v.skid > 0) this.drawSkid(ctx, v, vx, sy, s);
     }
 
     ctx.save();
-    ctx.translate(v.x, sy);
-    // Wear reads before it matters: a machine on its last bodies limps, lists
-    // and shakes, so the wreck is something you saw coming rather than
-    // something that happened to you.
-    const wear = 1 - clamp(v.hp / Math.max(1, v.maxHp), 0, 1);
-    if (wear > 0.001) {
-      const jolt = v.jolt > 0 ? v.jolt / 10 : 0;
-      ctx.rotate(wear * 0.07 * (v.facing > 0 ? 1 : -1) + Math.sin(this.tick * 0.9) * wear * 0.02);
-      ctx.translate(0, Math.abs(Math.sin(this.tick * 0.55)) * wear * 1.6 + jolt * 1.4);
-    }
-    ctx.scale(v.facing, 1);
+    this.vehicleFrame(ctx, v, vx, sy, s);
+    // The rig shrinks with depth and the machine has to shrink with it, or a
+    // bike at the back wall is a bike with a smaller man on it.
+    ctx.scale(s * v.facing, s);
     if (v.wheelie > 0) {
       // Pivot on the back wheel, which is what a wheelie is.
       ctx.translate(-16, 0);
@@ -2393,12 +2528,16 @@ export class Level {
         else this.drawTruckBody(ctx, v, tune);
         break;
       case 'hyperloop_pod':
-        if (front) this.drawPodFront(ctx, tune);
+        if (front) this.drawPodFront(ctx, v, tune);
         else this.drawPodBody(ctx, v, tune);
         break;
       case 'rocket':
         if (front) this.drawRocketFront(ctx, tune);
         else this.drawRocketBody(ctx, v, tune);
+        break;
+      case 'scooter':
+        if (front) this.drawScooterFront(ctx, v, tune);
+        else this.drawScooterBody(ctx, v, tune);
         break;
       case 'moto':
       default:
@@ -2407,7 +2546,90 @@ export class Level {
         break;
     }
 
-    this.drawVehicleWear(ctx, v);
+    // Once, on the chassis pass. Drawing it in both used to double every
+    // scorch mark and emit two plumes of smoke per frame.
+    if (!front) this.drawVehicleWear(ctx, v);
+    ctx.restore();
+  }
+
+  /**
+   * The frame the machine lives in: where it stands, how it lists as it is
+   * wrecked, and the float under anything that does not use wheels.
+   *
+   * Shared by the chassis and by the body riding it — a rider who does not list
+   * with the bodywork is a sticker on it — so it leaves the origin at the
+   * machine's ground point, unscaled and unflipped, and each caller applies
+   * whatever else it needs from there.
+   */
+  private vehicleFrame(ctx: C2D, v: Vehicle, vx: number, sy: number, s: number): void {
+    ctx.translate(vx, sy);
+    // Wear reads before it matters: a machine on its last bodies limps, lists
+    // and shakes, so the wreck is something you saw coming rather than
+    // something that happened to you.
+    const wear = 1 - clamp(v.hp / Math.max(1, v.maxHp), 0, 1);
+    if (wear > 0.001) {
+      const jolt = v.jolt > 0 ? v.jolt / 10 : 0;
+      ctx.rotate(wear * 0.07 * (v.facing > 0 ? 1 : -1) + Math.sin(this.tick * 0.9) * wear * 0.02);
+      ctx.translate(0, (Math.abs(Math.sin(this.tick * 0.55)) * wear * 1.6 + jolt * 1.4) * s);
+    }
+    const float = this.vehicleFloat(v);
+    if (float !== 0) ctx.translate(0, -float * s);
+  }
+
+  /** How far off the road a machine sits when it is not standing on tyres. */
+  private vehicleFloat(v: Vehicle): number {
+    return v.kind === 'hyperloop_pod' ? 7 + Math.sin(this.tick * 0.12) * 1.4 : 0;
+  }
+
+  /**
+   * The body on the machine.
+   *
+   * Two jobs the fighter's own renderer cannot do, because a Fighter has never
+   * heard of a motorbike:
+   *
+   *   - it is drawn inside the machine's frame, so it lists with the bodywork,
+   *     floats with a pod and pivots with a wheelie instead of sitting bolt
+   *     upright while the bike stands on its back wheel underneath it;
+   *   - on a CLOSED machine it is clipped to the cabin, so everything the
+   *     bodywork covers is genuinely not drawn. A dwarf in a truck is a head
+   *     and two fists behind glass; a dwarf in a pod is a silhouette in a
+   *     canopy. Neither of them is a man painted over a shell.
+   *
+   * The seat itself — the lift onto the saddle and the pose that goes with it —
+   * belongs to the Fighter, which applies it in its own render. See RideSeat.
+   */
+  private drawRider(ctx: C2D, cam: Camera, alpha: number, f: Fighter, v: Vehicle): void {
+    const vx = lerp(v.prevX, v.x, alpha);
+    const vz = lerp(v.prevZ, v.z, alpha);
+    const sy = GROUND_Y + vz * Z_SCALE;
+    const s = depthScale(vz);
+
+    ctx.save();
+    this.vehicleFrame(ctx, v, vx, sy, s);
+    if (v.wheelie > 0) {
+      const px = -16 * v.facing * s;
+      ctx.translate(px, 0);
+      ctx.rotate(-v.wheelie * 0.5 * v.facing);
+      ctx.translate(-px, 0);
+    }
+    // Back to world space: the frame is now a rotation about the machine, and
+    // the fighter still draws itself wherever it thinks it is.
+    ctx.translate(-vx, -sy);
+
+    const cabin = CABINS[v.kind];
+    if (cabin) {
+      ctx.beginPath();
+      for (let i = 0; i + 1 < cabin.length; i += 2) {
+        const cx = vx + cabin[i] * v.facing * s;
+        const cy = sy + cabin[i + 1] * s;
+        if (i === 0) ctx.moveTo(cx, cy);
+        else ctx.lineTo(cx, cy);
+      }
+      ctx.closePath();
+      ctx.clip();
+    }
+
+    f.render(ctx, cam, alpha);
     ctx.restore();
   }
 
@@ -2473,18 +2695,18 @@ export class Level {
   }
 
   /** Two black streaks where the rubber went. */
-  private drawSkid(ctx: C2D, v: Vehicle, sy: number): void {
+  private drawSkid(ctx: C2D, v: Vehicle, vx: number, sy: number, s: number): void {
     const dir = v.vx >= 0 ? 1 : -1;
     ctx.save();
     ctx.globalAlpha = clamp(v.skid / 14, 0, 1) * 0.5;
     ctx.strokeStyle = '#100d14';
-    ctx.lineWidth = 2.6;
+    ctx.lineWidth = 2.6 * s;
     ctx.lineCap = 'round';
     ctx.beginPath();
-    ctx.moveTo(v.x - dir * 40, sy + 1);
-    ctx.lineTo(v.x - dir * 12, sy + 1);
-    ctx.moveTo(v.x - dir * 34, sy + 3);
-    ctx.lineTo(v.x - dir * 8, sy + 3);
+    ctx.moveTo(vx - dir * 40 * s, sy + 1);
+    ctx.lineTo(vx - dir * 12 * s, sy + 1);
+    ctx.moveTo(vx - dir * 34 * s, sy + 3);
+    ctx.lineTo(vx - dir * 8 * s, sy + 3);
     ctx.stroke();
     ctx.restore();
   }
@@ -2506,116 +2728,204 @@ export class Level {
     ctx.restore();
   }
 
+  /**
+   * The bike, built around the seat rather than beside it.
+   *
+   * The top line is a rear cowl, the dip he sits in, and then the tank hump his
+   * knees close on — so there is somewhere to sit, and the thing sat on is
+   * between his legs. Everything on the near side of him is in the FRONT pass.
+   */
   private drawMotoBody(ctx: C2D, v: Vehicle, t: VehicleTuning): void {
-    this.drawWheel(ctx, -16, -8, 8, v.spin, '#8f8aa0');
-    this.drawWheel(ctx, 16, -7.5, 7.5, v.spin, '#8f8aa0');
+    this.drawWheel(ctx, -17, -8, 8, v.spin, '#8f8aa0');
+    this.drawWheel(ctx, 17, -7.5, 7.5, v.spin, '#8f8aa0');
 
-    // swingarm, forks, exhaust
-    capsule(ctx, -16, -8, -3, -13, 2.4, '#3c4152', INK, 1.6);
-    capsule(ctx, 16, -7.5, 12, -22, 2.2, t.trim, INK, 1.6);
-    capsule(ctx, -3, -12, -22, -7, 2.2, '#a9a4b6', INK, 1.4);
+    // swingarm, forks, and the pipe that runs down the far side
+    capsule(ctx, -17, -8, -4, -14, 2.4, '#3c4152', INK, 1.6);
+    capsule(ctx, 17, -7.5, 13, -25, 2.2, t.trim, INK, 1.6);
+    capsule(ctx, 2, -18, -20, -9, 2.2, '#8f8aa0', INK, 1.4);
 
-    // tank and tail, one continuous slab of colour
+    // tank, saddle and tail, one continuous slab of colour
     poly(
       ctx,
-      [-19, -18, -6, -25, 8, -24, 14, -18, 12, -13, -6, -12, -18, -13],
+      [-21, -20, -19, -26, -6, -25.5, 2, -26, 9, -29, 15, -24, 13, -15, -4, -13, -18, -15],
       t.body,
       INK,
       1.8,
     );
-    poly(ctx, [-6, -25, 8, -24, 6, -21, -5, -22], '#ffffff', 'none', 0);
-    roundRect(ctx, -22, -22, 15, 5, 2.5, '#241f28', INK, 1.6);
-    roundRect(ctx, -9, -16, 13, 8, 2, '#4a4152', INK, 1.6);
-
-    // a lick of flame down the tank, because of course
-    poly(ctx, [-14, -17, -4, -19, 2, -16, -6, -15], t.lamp, 'none', 0);
+    // a lick of flame down the flank, because of course
+    poly(ctx, [-14, -21.5, -4, -22.5, 4, -20, -6, -18.5], t.lamp, 'none', 0);
+    // the saddle itself, which is the whole point
+    roundRect(ctx, -18, -26.5, 20, 4, 2, '#241f28', INK, 1.6);
+    roundRect(ctx, -10, -18, 15, 7, 2, '#4a4152', INK, 1.6);
   }
 
   private drawMotoFront(ctx: C2D, v: Vehicle, t: VehicleTuning): void {
-    capsule(ctx, 12, -24, 21, -26, 2, '#2b2731', INK, 1.6);
-    capsule(ctx, 19, -27, 23, -27, 1.6, t.trim, INK, 1.2);
-    ellipse(ctx, 19, -20, 4.2, 4.6, 0, t.lamp, INK, 1.6);
+    // The near side of the machine, over the near leg: the flank his knee grips,
+    // the pipe under his boot, the crank cover behind his heel and the peg that
+    // boot stands on. A darker shade, so the tank's top ridge still reads.
+    capsule(ctx, 2, -14, -18, -9, 2.2, '#c9c4d6', INK, 1.4);
+    ellipse(ctx, -3, -15.5, 4.2, 4.2, 0, '#5b6178', INK, 1.4);
+    poly(ctx, [2, -24, 9, -28.5, 15, -24, 13, -18, 3, -18], shift(t.body, 0.84, 4), INK, 1.6);
+    capsule(ctx, 1, -15, 8, -15, 1.5, '#c9c4d6', INK, 1.2);
+
+    // bars and grips, closed on by the hands underneath them
+    capsule(ctx, 13, -26, 20, -28, 2, '#2b2731', INK, 1.6);
+    capsule(ctx, 18.5, -28.5, 23, -28, 1.7, t.trim, INK, 1.2);
+    ellipse(ctx, 19, -21, 4.2, 4.6, 0, t.lamp, INK, 1.6);
 
     if (Math.abs(v.vx) > 1.2) {
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
       ctx.globalAlpha = 0.34;
-      poly(ctx, [21, -24, 54, -30, 56, -10, 21, -16], t.lamp, 'none', 0);
+      poly(ctx, [22, -25, 54, -31, 56, -11, 22, -17], t.lamp, 'none', 0);
       ctx.restore();
     }
   }
 
-  private drawTruckBody(ctx: C2D, v: Vehicle, t: VehicleTuning): void {
-    this.drawWheel(ctx, -19, -9, 9, v.spin, '#6f6a7c');
-    this.drawWheel(ctx, 19, -9, 9, v.spin, '#6f6a7c');
+  /**
+   * The rented e-scooter. Stood on, not sat on — the deck is the seat, the
+   * stem is the only thing to hold, and the near lip of the deck crosses in
+   * front of both boots so he is standing ON it rather than behind it.
+   */
+  private drawScooterBody(ctx: C2D, v: Vehicle, t: VehicleTuning): void {
+    this.drawWheel(ctx, -15, -4, 4, v.spin, '#8f8aa0');
+    this.drawWheel(ctx, 13, -4, 4, v.spin, '#8f8aa0');
 
-    // One wedge. That is the entire design, and it is the joke.
-    poly(ctx, [-29, -10, -27, -25, 4, -31, 31, -17, 31, -10], t.body, INK, 2);
-    poly(ctx, [-24, -24, 2, -29, 22, -19, -22, -19], '#171a22', 'none', 0);
-    poly(ctx, [-29, -12, 31, -12, 31, -10, -29, -10], t.trim, 'none', 0);
+    capsule(ctx, -16, -9.5, -9, -9.5, 2.2, '#3c4152', INK, 1.4);
+    roundRect(ctx, -17, -8, 30, 4.5, 2, t.trim, INK, 1.6);
+    // the column, raked back exactly as far as nobody asked for
+    capsule(ctx, 13, -5, 15, -30, 2.2, '#5b6178', INK, 1.6);
+    capsule(ctx, 9, -30, 20, -30.5, 1.8, '#3c4152', INK, 1.5);
+  }
+
+  private drawScooterFront(ctx: C2D, v: Vehicle, t: VehicleTuning): void {
+    // The near lip of the deck, over the soles standing on it — and the only
+    // part of the thing that carries the rental company's colour.
+    roundRect(ctx, -17, -7.4, 30, 3.4, 1.6, t.body, INK, 1.4);
+    // grips at both ends of the bar, closed on by the hands underneath
+    capsule(ctx, 9, -30, 12.5, -30.2, 1.8, '#241f28', INK, 1.2);
+    capsule(ctx, 16.5, -30.4, 20, -30.5, 1.8, '#241f28', INK, 1.2);
+    roundRect(ctx, 12, -34.5, 7, 4.5, 1.5, '#1d1b26', INK, 1.3);
+    ellipse(ctx, 17, -27, 2.4, 2.6, 0, t.lamp, INK, 1.2);
+    // the rental sticker, which is the joke
+    roundRect(ctx, 12.5, -24, 5, 5, 1, t.body, INK, 1);
+
+    if (Math.abs(v.vx) > 1.2) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = 0.26;
+      poly(ctx, [20, -28, 40, -31, 41, -18, 20, -21], t.lamp, 'none', 0);
+      ctx.restore();
+    }
+  }
+
+  /**
+   * One wedge. That is the entire design, and it is the joke — but now it is
+   * tall enough to have somebody inside it, which is what the greenhouse is
+   * for: the rider is clipped to TRUCK_GLASS, so everything below the window
+   * line is in the door where it belongs.
+   */
+  private drawTruckBody(ctx: C2D, v: Vehicle, t: VehicleTuning): void {
+    this.drawWheel(ctx, -19, -9.5, 9.5, v.spin, '#6f6a7c');
+    this.drawWheel(ctx, 19, -9.5, 9.5, v.spin, '#6f6a7c');
+
+    poly(ctx, [-31, -11, -29, -32, -2, -52, 20, -50, 33, -26, 33, -11], t.body, INK, 2);
+    // the cabin, unlit, so a silhouette in it reads at any distance
+    poly(ctx, TRUCK_GLASS, '#171a22', 'none', 0);
+    poly(ctx, [-31, -13, 33, -13, 33, -11, -31, -11], t.trim, 'none', 0);
 
     // The panel gaps nobody could close.
     ctx.strokeStyle = 'rgba(0,0,0,0.45)';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(-6, -30);
-    ctx.lineTo(-4, -12);
-    ctx.moveTo(14, -26);
-    ctx.lineTo(16, -12);
+    ctx.moveTo(-8, -46);
+    ctx.lineTo(-6, -13);
+    ctx.moveTo(17, -45);
+    ctx.lineTo(19, -13);
     ctx.stroke();
   }
 
   private drawTruckFront(ctx: C2D, t: VehicleTuning): void {
-    roundRect(ctx, 22, -20, 10, 2.4, 1.2, t.lamp, INK, 1.2);
+    // The wheel, on this side of the fists closed around it.
+    ellipse(ctx, 14, -28, 4.4, 5.6, 0.35, 'none', t.trim, 1.5);
+
+    // Glass over the driver rather than the driver over the truck.
     ctx.save();
-    ctx.globalAlpha = 0.22;
-    poly(ctx, [-22, -24, 2, -29, 20, -20, -20, -20], '#bfe8ff', 'none', 0);
+    ctx.globalAlpha = 0.34;
+    poly(ctx, TRUCK_GLASS, '#bfe8ff', 'none', 0);
+    ctx.globalAlpha = 0.18;
+    poly(ctx, [-16, -25, 0, -46, 8, -46, -6, -25], '#ffffff', 'none', 0);
     ctx.restore();
-    capsule(ctx, -24, -24, 2, -30, 1.6, t.trim, 'none', 0);
+
+    // The beltline, which is also what covers the clip's cut edge.
+    roundRect(ctx, -27, -25.5, 55, 2.8, 1.3, t.trim, INK, 1.2);
+    capsule(ctx, -1, -47, -3, -25, 1.6, t.trim, INK, 1.2);
+    roundRect(ctx, 23, -23, 10, 2.4, 1.2, t.lamp, INK, 1.2);
   }
 
+  /**
+   * The pod, rebuilt as something with an inside.
+   *
+   * It used to be a smooth tube with a bubble stuck on the top and the
+   * passenger standing in front of the whole arrangement with a strut through
+   * his face. Now the hull is a cockpit with a coaming, the rider is clipped to
+   * POD_CANOPY, and the canopy goes over him translucent — so he is in there,
+   * and you can see he is in there.
+   */
   private drawPodBody(ctx: C2D, v: Vehicle, t: VehicleTuning): void {
-    const hover = 7 + Math.sin(this.tick * 0.12) * 1.4;
-
-    // The tube it was always going to be, seen end on.
+    // The cushion of air it rides on, left down on the road where it belongs.
+    const f = this.vehicleFloat(v);
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
     ctx.globalAlpha = 0.4;
-    ellipse(ctx, 0, -hover + 4, 26, 4.5, 0, t.trim, 'none', 0);
+    ellipse(ctx, 0, f - 3, 26, 4.5, 0, t.trim, 'none', 0);
     ctx.restore();
 
-    capsule(ctx, -20, -hover - 13, 18, -hover - 13, 12, t.body, INK, 2);
-    poly(
-      ctx,
-      [18, -hover - 25, 33, -hover - 15, 33, -hover - 11, 18, -hover - 1],
-      t.body,
-      INK,
-      1.8,
-    );
-    poly(ctx, [-20, -hover - 24, -30, -hover - 30, -28, -hover - 8, -20, -hover - 2], t.trim, INK, 1.6);
-    roundRect(ctx, -14, -hover - 9, 26, 3, 1.5, t.trim, 'none', 0);
-    ellipse(ctx, 30, -hover - 13, 2.6, 2.6, 0, t.lamp, INK, 1.2);
+    capsule(ctx, -20, -16, 14, -16, 10, t.body, INK, 2);
+    poly(ctx, [14, -26, 34, -17, 34, -11, 14, -6], t.body, INK, 1.8);
+    poly(ctx, [-20, -26, -30, -32, -28, -10, -20, -4], t.trim, INK, 1.6);
+    // headrest, seen behind him through the glass
+    roundRect(ctx, -13, -42, 7, 16, 3, shift(t.trim, 0.7, 0), INK, 1.4);
+    roundRect(ctx, -14, -14, 26, 3, 1.5, t.trim, 'none', 0);
+    ellipse(ctx, 31, -16, 2.6, 2.6, 0, t.lamp, INK, 1.2);
 
     if (Math.abs(v.vx) > 1) {
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
       ctx.globalAlpha = clamp(Math.abs(v.vx) / 9, 0.2, 0.7);
-      ellipse(ctx, -32, -hover - 13, 9, 5, 0, t.trim, 'none', 0);
-      ellipse(ctx, -28, -hover - 13, 5, 3, 0, '#ffffff', 'none', 0);
+      ellipse(ctx, -32, -16, 9, 5, 0, t.trim, 'none', 0);
+      ellipse(ctx, -28, -16, 5, 3, 0, '#ffffff', 'none', 0);
       ctx.restore();
     }
   }
 
-  private drawPodFront(ctx: C2D, t: VehicleTuning): void {
-    const hover = 7 + Math.sin(this.tick * 0.12) * 1.4;
+  private drawPodFront(ctx: C2D, v: Vehicle, t: VehicleTuning): void {
     ctx.save();
-    ctx.globalAlpha = 0.32;
-    // A bubble canopy tall enough to have the passenger actually inside it.
-    ellipse(ctx, 2, -hover - 27, 16, 13, -0.1, '#cdf1ff', 'none', 0);
+    ctx.globalAlpha = 0.34;
+    poly(ctx, POD_CANOPY, '#cdf1ff', 'none', 0);
+    ctx.globalAlpha = 0.22;
+    poly(ctx, [-11, -30, -6, -49, 1, -52, -4, -30], '#ffffff', 'none', 0);
     ctx.restore();
-    capsule(ctx, -13, -hover - 34, 17, -hover - 24, 1.4, t.trim, 'none', 0);
+
+    // The frame of the canopy, and the coaming that hides the clip's cut edge.
+    poly(ctx, POD_CANOPY, 'none', t.trim, 1.4);
+    roundRect(ctx, -17, -27.5, 36, 3, 1.5, t.trim, INK, 1.4);
+    if (Math.abs(v.vx) > 1) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = 0.3;
+      poly(ctx, [19, -30, 44, -34, 45, -18, 19, -22], t.trim, 'none', 0);
+      ctx.restore();
+    }
   }
 
+  /**
+   * Not a cockpit: a man astride a firework, holding a bar.
+   *
+   * Nothing is clipped here — he is on TOP of the hull and meant to be seen —
+   * so the occlusion is the straps and the grab bar going over his lap, his
+   * shin and his fists in the front pass.
+   */
   private drawRocketBody(ctx: C2D, v: Vehicle, t: VehicleTuning): void {
     // The sled it is bolted to, since nobody thought about landing.
     this.drawWheel(ctx, -18, -5, 5, v.spin, '#6f6a7c');
@@ -2634,14 +2944,17 @@ export class Level {
     capsule(ctx, -18, -18, 14, -18, 9, t.body, INK, 2);
     poly(ctx, [14, -27, 32, -18, 14, -9], t.body, INK, 1.8);
     poly(ctx, [-18, -27, -26, -32, -24, -12, -18, -9], t.trim, INK, 1.6);
-    roundRect(ctx, -6, -22, 12, 3, 1.5, t.trim, 'none', 0);
+    // the pad he is sitting on, such as it is
+    roundRect(ctx, -9, -29.5, 17, 3.5, 1.7, '#241f28', INK, 1.4);
     ellipse(ctx, 26, -18, 2.4, 2.4, 0, t.lamp, INK, 1.2);
   }
 
   private drawRocketFront(ctx: C2D, t: VehicleTuning): void {
-    // Two straps. This is not a cockpit; it is a man tied to a firework.
-    capsule(ctx, -8, -30, -6, -12, 1.8, t.trim, INK, 1.2);
-    capsule(ctx, 4, -30, 6, -12, 1.8, t.trim, INK, 1.2);
+    // Two straps over the lap and the shin, and a bar to hang on to. This is
+    // not a cockpit; it is a man tied to a firework.
+    capsule(ctx, -7, -30.5, 6, -26, 2, t.trim, INK, 1.3);
+    capsule(ctx, -5, -22, 7, -20, 1.8, t.trim, INK, 1.2);
+    capsule(ctx, 12.5, -29.2, 21, -27.5, 1.8, '#2b2731', INK, 1.4);
   }
 
   private drawProjectile(ctx: C2D, pj: Projectile): void {
@@ -2771,6 +3084,17 @@ export class Level {
 
 function numberOf(v: unknown, fallback: number): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+}
+
+/**
+ * The rig's depth perspective, exactly as `Fighter.render` applies it.
+ *
+ * A machine is drawn through this too, so a bike and the body on it shrink
+ * together as they walk away from the camera instead of the rider quietly
+ * losing a tenth of his height while the bike keeps all of its own.
+ */
+function depthScale(z: number): number {
+  return clamp(1 - (Z_DEPTH - z) * Z_PERSPECTIVE, 0.75, 1);
 }
 
 function weaponOf(v: unknown): WeaponKind | null {

@@ -120,6 +120,25 @@ export const FIGHT_ZOOM = 1.45;
 export const CAMERA_LOOKAHEAD = 34;
 
 /**
+ * How far a bullet flies, as a fraction of the width the player can actually
+ * SEE (VIEW_W / FIGHT_ZOOM), not of the map.
+ *
+ * Gunmen used to out-range the screen, so the only counter to one was to walk
+ * the length of the level while he backed away — which is why they read as
+ * "run in all directions and waste your time". A shooter now has to come to
+ * you to be a threat at all.
+ */
+export const PROJECTILE_RANGE_FRAC = 0.4;
+
+/**
+ * Bodies a single bullet passes through before it stops.
+ *
+ * With friendly fire on, this cuts both ways: a line of guards is a gift to
+ * whoever shoots down it, and standing behind your own gunman is a mistake.
+ */
+export const PROJECTILE_PIERCE = 3;
+
+/**
  * Bodies a vehicle can run over before it is scrap.
  *
  * A ride used to clear a whole map on its own, which is fun exactly once and

@@ -594,6 +594,15 @@ export class HomeScene implements Scene {
           icon: '▶',
         }),
       );
+      // The wall of places you have been. Only worth offering once there is
+      // something on it, which is why it appears with the Continue button.
+      col.appendChild(
+        button('Map Gallery', () => this.game.setScene('gallery', { mapIndex: save.progress }), {
+          variant: 'outlined',
+          wide: true,
+          icon: '▦',
+        }),
+      );
     }
 
     col.appendChild(

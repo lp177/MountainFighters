@@ -46,6 +46,7 @@ import { Ui, setReducedMotion } from '@/ui/Ui';
 import { FightScene } from '@/scenes/FightScene';
 import { GameOverScene } from '@/scenes/GameOverScene';
 import { HomeScene } from '@/scenes/HomeScene';
+import { GalleryScene } from '@/scenes/GalleryScene';
 import { LobbyScene } from '@/scenes/LobbyScene';
 import { PauseScene } from '@/scenes/PauseScene';
 import { SelectScene } from '@/scenes/SelectScene';
@@ -100,6 +101,7 @@ const SCENE_CLASSES: Partial<Record<SceneName, SceneCtor>> = {
   victory: VictoryScene,
   gameover: GameOverScene,
   lobby: LobbyScene,
+  gallery: GalleryScene,
 };
 
 type Op =

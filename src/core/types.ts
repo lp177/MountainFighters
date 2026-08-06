@@ -891,6 +891,7 @@ export type SceneName =
   | 'victory'
   | 'gameover'
   | 'lobby'
+  | 'gallery'
   | 'cutscene';
 
 // ─────────────────────────────────────────────────────────────────────────────

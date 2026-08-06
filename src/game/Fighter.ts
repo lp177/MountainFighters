@@ -482,6 +482,8 @@ export class Fighter implements FighterView {
 
   private weaponDurability = 0;
   private weaponAmmo = 0;
+  /** Ammo hit zero this move; let go of it once the move finishes. */
+  private weaponSpent = false;
   private weaponSpeed = 1;
   private pickupFrames = 0;
 
@@ -1567,7 +1569,14 @@ export class Fighter implements FighterView {
       return false;
     }
     this.meter -= cost;
-    if (spendsAmmo) this.weaponAmmo--;
+    if (spendsAmmo) {
+      this.weaponAmmo--;
+      // A taser holds eight cartridges and NEVER breaks (durability -1), so an
+      // empty one used to be permanent dead weight: both its moves are refused
+      // for want of ammo, and since a weapon replaces the unarmed light and
+      // heavy, the fighter was left with no attacks at all. Spent means gone.
+      if (this.weaponAmmo <= 0) this.weaponSpent = true;
+    }
 
     this.currentMove = m;
     this.moveConnected = false;
@@ -1688,6 +1697,16 @@ export class Fighter implements FighterView {
     this.currentMove = null;
     this.moveConnected = false;
     this.whiffed = false;
+
+    // The shot that emptied it has now played out, so let go of the husk and
+    // get the fists back.
+    if (this.weaponSpent) {
+      this.weaponSpent = false;
+      if (this.weapon) {
+        if (this.team === 'player') ctx.audio.play('ui_error', { gain: 0.35, pitch: 0.7 });
+        this.dropWeapon(ctx);
+      }
+    }
   }
 
   // ── taking damage ──────────────────────────────────────────────────────────

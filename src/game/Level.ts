@@ -91,6 +91,8 @@ const BOSS_CARD_FRAMES = 190;
 /** Frames between the boss dying and the level being declared over. */
 const OUTRO_FRAMES = 110;
 const PICKUP_LIFE = 1500;
+/** Frames a just-dropped weapon refuses to be walked back into your hands. */
+const DROP_GRAB_LOCK = 48;
 const PICKUP_REACH_X = 15;
 const PICKUP_REACH_Z = 13;
 /**
@@ -345,6 +347,16 @@ interface Pickup {
    */
   durability: number;
   ammo: number;
+  /**
+   * Frames before this can be hoovered up by walking over it.
+   *
+   * Set when a fighter puts a weapon DOWN. Without it, deliberately dropping
+   * one was impossible: the moment your hands were empty the auto-pickup
+   * grabbed the same weapon straight back off the floor, so a spent taser could
+   * never be got rid of. The interact key can still take it back immediately —
+   * that is a decision, not an accident.
+   */
+  grabLock: number;
 }
 
 interface Vehicle {
@@ -1813,6 +1825,7 @@ export class Level {
       spin: 0,
       durability: durability !== undefined ? durability : (def?.durability ?? -1),
       ammo: ammo !== undefined ? ammo : (def?.ammo ?? 0),
+      grabLock: DROP_GRAB_LOCK,
     });
     this.audio.play('drop', { pan: this.pan(x) });
   }
@@ -1830,6 +1843,7 @@ export class Level {
       spin: 0,
       durability: 0,
       ammo: 0,
+      grabLock: 0,
     });
   }
 
@@ -1846,6 +1860,7 @@ export class Level {
       spin: 0,
       durability: 0,
       ammo: 0,
+      grabLock: 0,
     });
   }
 
@@ -1862,6 +1877,7 @@ export class Level {
           if (it.vy === 0) it.spin = 0;
         }
       }
+      if (it.grabLock > 0) it.grabLock--;
       if (--it.life <= 0) {
         this.pickups.splice(i, 1);
         continue;
@@ -1890,7 +1906,7 @@ export class Level {
         //
         // Anyone already carrying something walks over it untouched, and trades
         // deliberately through `updateInteract`.
-        if (it.kind === 'weapon' && p.weapon) continue;
+        if (it.kind === 'weapon' && (p.weapon || it.grabLock > 0)) continue;
         if (Math.abs(p.pos.x - it.x) > PICKUP_REACH_X) continue;
         if (Math.abs(p.pos.z - it.z) > PICKUP_REACH_Z) continue;
         this.collect(it, p);

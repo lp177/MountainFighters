@@ -691,7 +691,12 @@ export interface PropSpawn {
 }
 
 export interface VehicleSection {
-  kind: 'moto' | 'cybertruck' | 'hyperloop_pod' | 'rocket';
+  /**
+   * 'scooter' is not placed by a map section — every scooter PROP on a map
+   * becomes one, because a scooter lying in the street that you can only smash
+   * is a worse joke than a scooter you can ride.
+   */
+  kind: 'moto' | 'cybertruck' | 'hyperloop_pod' | 'rocket' | 'scooter';
   /** X range of the map this section covers, as fractions of width. */
   from: number;
   to: number;

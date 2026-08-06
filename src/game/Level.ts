@@ -110,9 +110,19 @@ const RAM_SPEED = 3.2;
 const RAM_COOLDOWN = 26;
 /** Gap between vehicles when a whole couch turns up wanting one each. */
 const VEHICLE_SPACING = 54;
-/** How far in front of a swing a prop can be and still get wrecked. */
-const PROP_REACH_X = 40;
-const PROP_REACH_Z = 24;
+/**
+ * How far in front of a swing a prop can be and still get wrecked.
+ *
+ * Generous on purpose. Props were unreliable enough to hit that they read as
+ * scenery rather than as loot: you had to be inside a 54-unit-wide window, on
+ * a 24-unit depth line, during five specific frames of a swing. This is a
+ * brutal brawler, not a precision game — if the barrel is roughly in front of
+ * you and you swing, it should break.
+ */
+const PROP_REACH_X = 58;
+const PROP_REACH_Z = 34;
+/** How far BEHIND you a prop can be and still catch the swing. */
+const PROP_REACH_BACK = 26;
 const RESPAWN_FRAMES = 90;
 
 const PROJ_KIND_BULLET = 0;
@@ -185,6 +195,17 @@ interface VehicleTuning {
  */
 const VEHICLE_KINDS: Record<VehicleSection['kind'], VehicleTuning> = {
   moto: { speed: 1, name: 'MOTO', nose: 24, ram: 1, body: '#c8402f', trim: '#f2f0ea', lamp: '#ffe6a8' },
+  // Slower and weedier than the moto, and funnier for it: a dwarf in a spiked
+  // leather jacket on a rented e-scooter is the correct image.
+  scooter: {
+    speed: 0.72,
+    name: 'SCOOTER',
+    nose: 16,
+    ram: 0.6,
+    body: '#3fb7a4',
+    trim: '#20303a',
+    lamp: '#ffe6a8',
+  },
   cybertruck: {
     speed: 0.88,
     name: 'TRUCK',
@@ -1441,6 +1462,25 @@ export class Level {
    * nothing.
    */
   private buildVehicles(): void {
+    // Scooters are scattered as props all over the campaign. Riding one should
+    // always be an option — smashing it is still allowed, it just has to be a
+    // choice rather than the only thing it is for.
+    for (const pr of this.props) {
+      if (pr.kind !== 'scooter' || pr.broken) continue;
+      pr.broken = true;
+      this.vehicles.push({
+        kind: 'scooter',
+        x: pr.x,
+        z: pr.z,
+        facing: 1,
+        vx: 0,
+        rider: null,
+        spin: 0,
+        wheelie: 0,
+        skid: 0,
+      });
+    }
+
     const spec = this.def.vehicle;
     if (!spec) return;
     if (!(spec.kind in VEHICLE_KINDS)) return;
@@ -1678,17 +1718,18 @@ export class Level {
 
     for (const f of this.players) {
       if (!f.alive || f.state !== 'attack') continue;
-      if (f.stateFrame < 3 || f.stateFrame > 14) continue;
+      // Most of the swing counts, not five frames in the middle of it.
+      if (f.stateFrame < 2 || f.stateFrame > 22) continue;
       const tag = ctx.frame - f.stateFrame;
       if (this.propSwing.get(f.id) === tag) continue;
 
       for (const pr of this.props) {
         if (pr.broken) continue;
         const dx = (pr.x - f.pos.x) * f.facing;
-        if (dx < -14 || dx > PROP_REACH_X) continue;
+        if (dx < -PROP_REACH_BACK || dx > PROP_REACH_X) continue;
         if (Math.abs(pr.z - f.pos.z) > PROP_REACH_Z) continue;
         this.propSwing.set(f.id, tag);
-        this.damageProp(pr, f.weapon ? 22 : 13);
+        this.damageProp(pr, f.weapon ? 26 : 16);
         break;
       }
     }
@@ -2204,7 +2245,10 @@ export class Level {
     const tune = VEHICLE_KINDS[v.kind];
 
     if (!front) {
-      shadow(ctx, v.x, sy, v.kind === 'moto' ? 19 : 26, 0.32);
+      // A scooter has a smaller footprint than a motorbike, which is most of
+      // what sells it as a different machine at this size.
+      const foot = v.kind === 'scooter' ? 14 : v.kind === 'moto' ? 19 : 26;
+      shadow(ctx, v.x, sy, foot, 0.32);
       if (v.skid > 0) this.drawSkid(ctx, v, sy);
     }
 

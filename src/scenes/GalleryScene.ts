@@ -151,6 +151,8 @@ const VEHICLE_LABEL: Record<VehicleSection['kind'], string> = {
   cybertruck: 'TRUCK SECTION',
   hyperloop_pod: 'POD SECTION',
   rocket: 'ROCKET SECTION',
+  // Never appears on a cover: scooters come from props, not from map sections.
+  scooter: 'SCOOTER',
 };
 
 const HINTS =

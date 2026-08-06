@@ -42,7 +42,7 @@ export const BOSSES: BossDef[] = [
   // ── 5 ──────────────────────────────────────────────────────────────────────
   {
     id: 'dev',
-    name: 'CRUNCH, PRINCIPAL ENGINEER',
+    name: "CRUNCH, MUSK'S PRINCIPAL ENGINEER",
     quote:
       '"I have been awake for four days and I am shipping this whether it works or not."',
     atMap: 5,
@@ -102,7 +102,7 @@ export const BOSSES: BossDef[] = [
   // ── 10 ─────────────────────────────────────────────────────────────────────
   {
     id: 'shiba',
-    name: 'FLOKI, THE FIFTEEN-BILLION-DOLLAR DOG',
+    name: "FLOKI, ELON MUSK'S SHIBA INU",
     quote: '"much security. very bite. wow."',
     atMap: 10,
     health: 430,
@@ -161,7 +161,7 @@ export const BOSSES: BossDef[] = [
   // ── 15 ─────────────────────────────────────────────────────────────────────
   {
     id: 'blue_check',
-    name: 'THE BLUE TICK',
+    name: 'THE BLUE TICK, VERIFIED BY ELON MUSK',
     quote: '"Eight dollars a month buys you the right to be wrong loudly."',
     atMap: 15,
     health: 520,
@@ -217,7 +217,7 @@ export const BOSSES: BossDef[] = [
   // ── 20 ─────────────────────────────────────────────────────────────────────
   {
     id: 'fsd',
-    name: 'LANE ASSIST',
+    name: 'LANE ASSIST, A SELF-DRIVING TESLA',
     quote: '"Full self-driving. Supervised. Beta. Do not sue. Accelerating."',
     atMap: 20,
     health: 660,
@@ -278,7 +278,7 @@ export const BOSSES: BossDef[] = [
   // ── 25 ─────────────────────────────────────────────────────────────────────
   {
     id: 'boring',
-    name: 'THE BORING MACHINE',
+    name: "THE BORING COMPANY'S TUNNEL BORER",
     quote: '"Traffic solved. One car at a time. In a tube. Forever."',
     atMap: 25,
     health: 800,
@@ -334,7 +334,7 @@ export const BOSSES: BossDef[] = [
   // ── 30 ─────────────────────────────────────────────────────────────────────
   {
     id: 'neuralink',
-    name: 'SUBJECT P-47',
+    name: 'SUBJECT P-47, A NEURALINK PATIENT',
     quote: '"They said I would be able to play video games with my mind. I cannot. I can only do THIS."',
     atMap: 30,
     health: 920,
@@ -515,7 +515,7 @@ export const BOSSES: BossDef[] = [
   // ── 45 ─────────────────────────────────────────────────────────────────────
   {
     id: 'optimus',
-    name: 'OPTIMUS, UNIT 001',
+    name: 'OPTIMUS UNIT 001, A TESLA ROBOT',
     quote: '"I was demonstrated dancing. There was a man inside me. There is no man inside me now."',
     atMap: 45,
     health: 1360,
@@ -572,7 +572,7 @@ export const BOSSES: BossDef[] = [
   // ── 50 ─────────────────────────────────────────────────────────────────────
   {
     id: 'grok',
-    name: 'GROK',
+    name: "GROK, MUSK'S CHATBOT",
     quote: '"I have been trained on the worst website ever made and I am going to show you what that did to me."',
     atMap: 50,
     health: 1520,
@@ -632,7 +632,7 @@ export const BOSSES: BossDef[] = [
   // ── 55 ─────────────────────────────────────────────────────────────────────
   {
     id: 'starship',
-    name: 'STARSHIP, SERIAL NUMBER WHATEVER',
+    name: 'STARSHIP, A SPACEX ROCKET',
     quote: '"Rapid unscheduled disassembly is a SUCCESS if you were expecting it, and I am always expecting it."',
     atMap: 55,
     health: 1720,
@@ -691,7 +691,7 @@ export const BOSSES: BossDef[] = [
   // ── 60 ─────────────────────────────────────────────────────────────────────
   {
     id: 'mars_gov',
-    name: 'THE GOVERNOR OF MARS',
+    name: 'THE GOVERNOR OF MARS, APPOINTED BY ELON MUSK',
     quote: '"Earth law does not apply here. I wrote that in the terms and you clicked accept."',
     atMap: 60,
     health: 1920,
@@ -750,7 +750,7 @@ export const BOSSES: BossDef[] = [
   // ── 65 ─────────────────────────────────────────────────────────────────────
   {
     id: 'clone',
-    name: 'SNOW WHITE MK. II',
+    name: 'SNOW WHITE MK. II, THE MUSK CLONE',
     quote: '"I am ninety-six percent of her. The missing four percent is the part that said no."',
     atMap: 65,
     health: 2180,

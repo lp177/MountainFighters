@@ -90,6 +90,7 @@ import {
   Z_SCALE,
 } from '@/core/constants';
 import { burst, capsule, ellipse, poly, roundRect, star, zigzag } from '@/render/Shapes';
+import { drawBossRig, hasBossRig } from '@/render/rig/BossRigs';
 import { drawCharacter, drawLooseHat } from '@/render/rig/CharacterRig';
 import { pickFlourish } from '@/content/fatalities';
 
@@ -558,6 +559,24 @@ function actor(
   flash = 0,
   tint?: string,
 ): void {
+  // A boss with a body of its own keeps it here too. The finisher poses its
+  // actors from authored keyframes, which a quadruped or a car has no joints
+  // for — but drawing the Shiba as a humanoid for the whole animation, which is
+  // what happened before, is far worse than posing it generically. Better the
+  // right creature in a plain pose than the wrong creature in a good one.
+  if (who.bossRig && hasBossRig(who.bossRig)) {
+    drawBossRig(s.ctx, who.bossRig, who.style, x, y, facing, {
+      state: who === s.victim ? 'hurt' : who.state,
+      frame: s.f,
+      scale,
+      alpha,
+      flash,
+      tint: tint ?? who.tint ?? undefined,
+      damage: who.damage,
+    });
+    return;
+  }
+
   drawCharacter(s.ctx, who.style, pose, who.skeleton, x, y, facing, {
     scale,
     alpha,

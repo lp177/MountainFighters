@@ -365,6 +365,12 @@ export class GamepadSource implements InputSource {
     if (pressed(pad, p.north)) mask |= Btn.Special;
     if (pressed(pad, p.r1)) mask |= Btn.Block;
     if (pressed(pad, p.l1)) mask |= Btn.Grab;
+    // Both triggers go through triggerHeld rather than pressed(): on most pads
+    // a trigger is analog, and on the ones that report it on an axis instead of
+    // a button there is no `pressed` flag to read at all. Interact sits on the
+    // left trigger — LT / L2 / ZL, whatever this pad has printed on it — beside
+    // Grab on the left bumper, which is the hand the pick-up belongs to.
+    if (triggerHeld(pad, p.l2, p.l2Axis)) mask |= Btn.Interact;
     if (triggerHeld(pad, p.r2, p.r2Axis)) mask |= Btn.Super;
     if (pressed(pad, p.start)) mask |= Btn.Pause;
 

@@ -22,6 +22,19 @@
  * for the life of the director, and the poses are drawn from a fixed pool, so
  * the draw path allocates nothing.
  *
+ * ── THE FOLLOW-THROUGH ──────────────────────────────────────────────────────
+ *
+ * A finisher used to end with the killer holding a spine and quietly dropping
+ * it, while six guards stood in a ring and politely waited their turn. So the
+ * performance has a second act: `FatalityDef.trophy` says what is left in the
+ * killer's hands, `pickFlourish` says what they do with it, and one entry in
+ * `FLOURISH_VISUALS` draws it — the same table shape as `VISUALS`, resolved the
+ * same way, and just as fatal to an unknown id. Everyone hostile inside the
+ * flourish's radius takes its damage through `Fighter.takeHit`, so hitstun,
+ * knockdown, blood and the combo counter behave exactly as they do in the
+ * fight. The crowd arrives through `FatalityDeps.crowd`; with no provider the
+ * flourish still plays and simply hits nobody.
+ *
  * ── THE THREE SETTINGS THIS FILE OWES A DEBT TO ─────────────────────────────
  *
  * `gore: 'off'` never reaches here at all — `pickFatality` returns null, so
@@ -34,11 +47,18 @@
  *
  * ── DETERMINISM ─────────────────────────────────────────────────────────────
  *
- * This class NEVER consumes the shared RNG. It reads `getState()` to season a
- * per-performance seed and nothing else. That is deliberate: gore is a local
- * preference, two peers in a lockstep match may legitimately disagree about it,
- * and a director that drew from the shared stream would turn that disagreement
- * into a desync.
+ * The performance itself NEVER consumes the shared RNG. It reads `getState()`
+ * to season a per-performance seed and nothing else. That is deliberate: gore
+ * is a local preference, two peers in a lockstep match may legitimately
+ * disagree about it, and a director that drew from the shared stream would turn
+ * that disagreement into a desync.
+ *
+ * The follow-through is the one exception and it has to be: it deals real
+ * damage, so choosing it and applying it must come from the seeded stream
+ * rather than from `Math.random`. That is safe for the same reason the freeze
+ * is — the scene refuses to stage a finisher at all in a netplay fight, so the
+ * shared stream is never shared while any of this runs. Presentation (lens
+ * splatter, smear ghosts) still uses `Math.random`, and still never touches it.
  */
 
 import type {
@@ -46,12 +66,16 @@ import type {
   BoneName,
   Facing,
   FatalityDef,
+  FatalityFlourish,
+  HitProperties,
   ParticleSpec,
   Pose,
   RigStyle,
   Rng,
   Settings,
   SfxCue,
+  SimContext,
+  TrophyKind,
 } from '@/core/types';
 import type { Fx } from '@/juice/Fx';
 import type { Camera } from '@/render/Camera';
@@ -67,6 +91,7 @@ import {
 } from '@/core/constants';
 import { burst, capsule, ellipse, poly, roundRect, star, zigzag } from '@/render/Shapes';
 import { drawCharacter, drawLooseHat } from '@/render/rig/CharacterRig';
+import { pickFlourish } from '@/content/fatalities';
 
 type C2D = CanvasRenderingContext2D;
 
@@ -106,6 +131,26 @@ const BANNER_AT = 0.52;
 /** Lens drops live this long and there are at most this many. */
 const SPLAT_MAX = 18;
 const SPLAT_LIFE = 150;
+
+/**
+ * Hard ceiling on a follow-through, in frames.
+ *
+ * The scene gives a finisher its own duration plus a fixed grace and then
+ * cancels the whole thing out from under the director, so a content entry with
+ * an over-generous duration in it has to cost a clipped flourish rather than a
+ * fight that never resumes. Comfortably above the longest one in the book.
+ */
+const MAX_FLOURISH = 116;
+/** Where the camera settles for the follow-through: the fight's own framing. */
+const FLOURISH_ZOOM = 1.04;
+/**
+ * How far either side of the lane a thrown trophy still counts as hitting, in
+ * world depth units. The belt is Z_DEPTH deep; this is about a third of it, so
+ * a bowling ball down the middle takes the middle and misses the back row.
+ */
+const LANE_DEPTH = 26;
+/** How far a landed throw knocks over the bystanders around its impact point. */
+const SPLASH = 38;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pose plumbing
@@ -395,6 +440,25 @@ interface Stage {
   mechanical: boolean;
   reduced: boolean;
   seed: number;
+
+  // ── the follow-through, only meaningful while a flourish is on stage ───────
+  /** Frames elapsed in the flourish, and the same thing normalised to 0..1. */
+  ff: number;
+  ft: number;
+  fdur: number;
+  /** What is in the killer's hand. Never 'none' while a flourish is running. */
+  trophy: TrophyKind;
+  /** How many the sweep caught. 0 until it connects; drives the reaction size. */
+  caught: number;
+  /**
+   * Screen point the throw is aimed at — the nearest hostile when there is one,
+   * otherwise a plausible spot out in front of the killer so an empty room
+   * still gets a throw with somewhere to go.
+   */
+  tx: number;
+  ty: number;
+  /** Draw scale for whatever is standing at the aim point. */
+  ts: number;
 }
 
 interface Visual {
@@ -402,6 +466,42 @@ interface Visual {
   tick?(s: Stage): void;
   /** Where the title card lands, as a fraction of the duration. */
   banner?: number;
+}
+
+/**
+ * How a flourish decides who it caught.
+ *
+ * `FatalityFlourish.radius` alone cannot say this, and the difference matters:
+ * TORNADO's 66 is a circle drawn around the killer's feet, BOWLING's 210 is the
+ * length of a lane, and JAVELIN's 240 is how far it will look for ONE target
+ * before it gives up. Reading all three as "a sphere of damage" would turn the
+ * javelin — the highest-damage entry in the book, and named after a throw at a
+ * single person — into a screen clear.
+ *
+ *   'self'  — a circle about the killer. Spins, slams, whips.
+ *   'lane'  — a corridor from the killer out to `radius`, LANE_DEPTH either
+ *             side. Anything that travels along the floor or through the front
+ *             row.
+ *   'point' — the nearest hostile within `radius`, plus everyone within SPLASH
+ *             of where it lands. "Hurl it at the nearest enemy, and knock over
+ *             everyone nearby", which is what was actually asked for.
+ */
+type FlourishReach = 'self' | 'lane' | 'point';
+
+/**
+ * One entry per `FatalityFlourish.visual`.
+ *
+ * Same contract as `Visual`, with two additions. `strike` is the fraction of
+ * the flourish at which the sweep connects — the single frame the director
+ * deals damage on, required rather than defaulted, because "when does this hit"
+ * is the one thing a follow-through cannot be vague about. `reach` is the shape
+ * above.
+ */
+interface FlourishVisual {
+  draw(s: Stage): void;
+  tick?(s: Stage): void;
+  strike: number;
+  reach: FlourishReach;
 }
 
 /** 0 before `a`, 1 after `b`, linear between. The spine of every renderer. */
@@ -587,6 +687,36 @@ const SPEC: ParticleSpec = {
   drag: 0.98,
   shape: 'blood',
 };
+
+/**
+ * The one the follow-through uses, in WORLD space.
+ *
+ * `emit` below converts from the stage's screen coordinates using the victim's
+ * depth, which is exactly wrong for a guard standing somewhere else on the
+ * belt: the crowd already has world coordinates, so it keeps its own spec and
+ * skips the round trip.
+ */
+const CROWD_SPEC: ParticleSpec = {
+  count: 0,
+  x: 0,
+  y: 0,
+  z: 0,
+  angle: -Math.PI * 0.5,
+  spread: 2.2,
+  speed: [1, 3],
+  life: [20, 40],
+  size: [1.6, 2.8],
+  colors: BLOOD_COLORS,
+  gravity: 0.32,
+  drag: 0.96,
+  shape: 'blood',
+  fade: 'ease',
+};
+
+/** Stable ordering for anything the sweep iterates. See `strikeCrowd`. */
+function byId(a: Fighter, b: Fighter): number {
+  return a.id - b.id;
+}
 
 /**
  * Emit at a SCREEN point.
@@ -797,6 +927,339 @@ function drawPaper(
   }
 }
 
+// ── Trophy art ───────────────────────────────────────────────────────────────
+//
+// Everything a finisher can leave in the killer's hands, drawn from the same
+// primitives as the finishers themselves and coloured out of the VICTIM's
+// RigStyle, so a torn-off arm is visibly the arm of the man on the floor.
+//
+// Each of these draws around (x, y) with `u` as the unit of size — roughly a
+// tenth of the victim's on-screen height — and `rot` as the direction it points
+// in, 0 = up, positive = clockwise on screen.
+
+/** A severed arm: sleeve, forearm, hand, and a stump at the shoulder end. */
+function drawTrophyArm(ctx: C2D, style: RigStyle, x: number, y: number, rot: number, u: number): void {
+  const dx = Math.sin(rot);
+  const dy = -Math.cos(rot);
+  const ex = x + dx * u * 2.1;
+  const ey = y + dy * u * 2.1;
+  const hx = ex + dx * u * 1.7 + -dy * u * 0.5;
+  const hy = ey + dy * u * 1.7 + dx * u * 0.5;
+  capsule(ctx, x, y, ex, ey, u * 0.44, style.jacketColor, INK, 1.4);
+  capsule(ctx, ex, ey, hx, hy, u * 0.34, style.skin, INK, 1.3);
+  ellipse(ctx, hx, hy, u * 0.42, u * 0.36, rot, style.skin, INK, 1.2);
+  // Knuckles, so the far end reads as a hand and not as a sausage.
+  for (let i = -1; i <= 1; i++) {
+    ellipse(ctx, hx + -dy * u * 0.22 * i, hy + dx * u * 0.22 * i, u * 0.12, u * 0.12, 0, style.skinShade, 'none');
+  }
+  ellipse(ctx, x, y, u * 0.46, u * 0.3, rot, BLOOD_DARK, INK, 1.1);
+  ellipse(ctx, x, y, u * 0.18, u * 0.13, rot, BONE, 'none');
+}
+
+/** A severed leg: trouser, calf, boot, femur showing at the hip end. */
+function drawTrophyLeg(ctx: C2D, style: RigStyle, x: number, y: number, rot: number, u: number): void {
+  const dx = Math.sin(rot);
+  const dy = -Math.cos(rot);
+  const kx = x + dx * u * 2.4;
+  const ky = y + dy * u * 2.4;
+  const ax = kx + dx * u * 2.2;
+  const ay = ky + dy * u * 2.2;
+  capsule(ctx, x, y, kx, ky, u * 0.58, style.tunicColor, INK, 1.5);
+  capsule(ctx, kx, ky, ax, ay, u * 0.42, style.tunicColor, INK, 1.4);
+  // The boot, square to the leg rather than to the world: it has been off the
+  // body long enough to stop caring which way is down.
+  ctx.save();
+  ctx.translate(ax, ay);
+  ctx.rotate(rot);
+  roundRect(ctx, -u * 0.5, -u * 0.1, u * 1.5, u * 0.8, u * 0.3, '#2a2530', INK, 1.4);
+  capsule(ctx, -u * 0.4, u * 0.62, u * 0.9, u * 0.62, u * 0.16, '#4a4250', INK, 1);
+  ctx.restore();
+  ellipse(ctx, x, y, u * 0.62, u * 0.4, rot, BLOOD_DARK, INK, 1.2);
+  ellipse(ctx, x, y, u * 0.24, u * 0.17, rot, BONE, INK, 0.8);
+}
+
+/**
+ * A head, hat and all, wearing the expression it stopped on.
+ *
+ * `hatScale` is the scale the loose hat is drawn at, which is NOT derivable
+ * from `u`: `drawLooseHat` sizes itself off the rig's own units, so the caller
+ * passes the same scale the victim was being drawn at and the hat comes out
+ * fitting the skull it came off.
+ */
+function drawTrophyHead(
+  ctx: C2D,
+  style: RigStyle,
+  x: number,
+  y: number,
+  rot: number,
+  u: number,
+  hatScale: number,
+): void {
+  const r = u * 1.4;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rot);
+  // Beard first so the jaw sits on top of it.
+  if (style.beardStyle !== 'none') {
+    ellipse(ctx, 0, r * 0.72, r * 0.86, r * (0.7 + (style.beardLength || 1) * 0.28), 0, style.hair, INK, 1.3);
+  }
+  ellipse(ctx, 0, 0, r, r * 1.08, 0, style.skin, INK, 1.5);
+  ellipse(ctx, r * 0.6, r * 0.14, r * 0.28, r * 0.24, 0, style.skinShade, INK, 1);
+  if (style.shades) {
+    roundRect(ctx, -r * 0.82, -r * 0.34, r * 1.64, r * 0.4, r * 0.14, '#15121b', INK, 1);
+  } else {
+    // Eyes, shut. Nobody in this file is ever drawn conscious.
+    capsule(ctx, -r * 0.52, -r * 0.2, -r * 0.2, -r * 0.2, r * 0.07, INK, 'none');
+    capsule(ctx, r * 0.2, -r * 0.2, r * 0.52, -r * 0.2, r * 0.07, INK, 'none');
+  }
+  // The neck, opened, at the bottom of the skull.
+  ellipse(ctx, 0, r * 1.02, r * 0.44, r * 0.2, 0, BLOOD_DARK, INK, 1.1);
+  ellipse(ctx, 0, r * 1.02, r * 0.17, r * 0.09, 0, BONE, 'none');
+  ctx.restore();
+  drawLooseHat(ctx, style, x, y - r * 0.62, rot, hatScale);
+}
+
+/** A torso: jacket, collar, and three stumps where the rest of him went. */
+function drawTrophyTorso(ctx: C2D, style: RigStyle, x: number, y: number, rot: number, u: number): void {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rot);
+  roundRect(ctx, -u * 1.1, -u * 1.5, u * 2.2, u * 3, u * 0.5, style.jacketColor, INK, 1.7);
+  roundRect(ctx, -u * 0.32, -u * 1.5, u * 0.64, u * 3, u * 0.2, style.tunicColor, INK, 1.2);
+  poly(
+    ctx,
+    [-u * 1.1, -u * 1.5, -u * 0.2, -u * 1.5, -u * 0.6, -u * 0.7],
+    style.jacketAccent,
+    INK,
+    1.1,
+  );
+  poly(
+    ctx,
+    [u * 1.1, -u * 1.5, u * 0.2, -u * 1.5, u * 0.6, -u * 0.7],
+    style.jacketAccent,
+    INK,
+    1.1,
+  );
+  // Neck and both shoulders, opened.
+  ellipse(ctx, 0, -u * 1.5, u * 0.4, u * 0.24, 0, BLOOD_DARK, INK, 1.1);
+  ellipse(ctx, 0, -u * 1.5, u * 0.16, u * 0.1, 0, BONE, 'none');
+  for (let i = -1; i <= 1; i += 2) {
+    ellipse(ctx, i * u * 1.05, -u * 1.05, u * 0.3, u * 0.36, 0, BLOOD_DARK, INK, 1);
+  }
+  ellipse(ctx, 0, u * 1.5, u * 0.7, u * 0.26, 0, BLOOD, INK, 1.1);
+  ctx.restore();
+}
+
+/**
+ * The catch-all: whatever the kill actually involved.
+ *
+ * Deliberately generic — a wrenched-out server blade, a barrel lid, a stapler,
+ * a gavel all read as "a heavy angular thing with an edge on it" at this size,
+ * and a specific silhouette per finisher would be forty props for two seconds
+ * of screen time each.
+ */
+function drawTrophyObject(ctx: C2D, x: number, y: number, rot: number, u: number): void {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rot);
+  poly(
+    ctx,
+    [
+      -u * 0.9, -u * 1.6,
+      u * 0.9, -u * 1.3,
+      u * 1.05, u * 1.4,
+      -u * 0.7, u * 1.6,
+    ],
+    STEEL,
+    INK,
+    1.7,
+  );
+  poly(
+    ctx,
+    [-u * 0.9, -u * 1.6, u * 0.9, -u * 1.3, u * 0.6, -u * 0.6, -u * 0.7, -u * 0.85],
+    STEEL_DARK,
+    INK,
+    1.1,
+  );
+  for (let i = 0; i < 3; i++) {
+    ellipse(ctx, -u * 0.35 + i * u * 0.5, u * 0.75, u * 0.14, u * 0.14, 0, '#2b303a', 'none');
+  }
+  // A torn edge, because it did not come off cleanly.
+  zigzag(ctx, -u * 0.7, u * 1.6, u * 1.05, u * 1.4, u * 0.3, 4, STEEL_DARK, 1.2);
+  ctx.restore();
+}
+
+/**
+ * Whatever this performance left in the killer's hands, at (x, y).
+ *
+ * `k` scales the whole prop; 1 is the size it hangs at. Unknown trophies cannot
+ * reach here — `beginFlourish` refuses a trophy it has no art for, exactly as
+ * `start` refuses a visual it has no renderer for.
+ */
+function drawTrophy(s: Stage, x: number, y: number, rot: number, k = 1): void {
+  const ctx = s.ctx;
+  const style = s.victim.style;
+  const u = Math.max(1.2, s.vh * 0.1 * k);
+  switch (s.trophy) {
+    case 'spine':
+      drawSpine(ctx, x, y - u * 2.4, u * 7, rot, Math.sin(s.ft * 12) * 0.3);
+      break;
+    case 'heart':
+      drawHeart(ctx, x, y, u * 1.1, 0.5 + 0.5 * Math.sin(s.ff * 0.4), 0);
+      break;
+    case 'arm':
+      drawTrophyArm(ctx, style, x, y, rot, u);
+      break;
+    case 'leg':
+      drawTrophyLeg(ctx, style, x, y, rot, u);
+      break;
+    case 'head':
+      drawTrophyHead(ctx, style, x, y, rot, u, s.vs * k);
+      break;
+    case 'hat':
+      drawLooseHat(ctx, style, x, y, rot, s.vs * k * 1.1);
+      break;
+    case 'torso':
+      drawTrophyTorso(ctx, style, x, y, rot, u);
+      break;
+    default:
+      drawTrophyObject(ctx, x, y, rot, u);
+      break;
+  }
+}
+
+/** True when this file knows how to draw the thing. Checked before staging. */
+function hasTrophyArt(t: TrophyKind): boolean {
+  return (
+    t === 'spine' || t === 'heart' || t === 'arm' || t === 'leg' ||
+    t === 'head' || t === 'hat' || t === 'torso' || t === 'object'
+  );
+}
+
+// ── Motion ───────────────────────────────────────────────────────────────────
+
+/**
+ * The trophy, plus the several places it just was.
+ *
+ * Motion blur is the whole reason a tornado reads as a tornado rather than as a
+ * prop teleporting round a circle: at 60Hz a limb travelling three revolutions
+ * a second lands in a different quadrant every frame, and without the ghosts
+ * the eye simply loses it.
+ */
+function trophyTrail(
+  s: Stage,
+  n: number,
+  at: (i: number) => { x: number; y: number; rot: number; k?: number },
+): void {
+  const ctx = s.ctx;
+  const count = s.reduced ? Math.min(2, n) : n;
+  for (let i = count; i >= 1; i--) {
+    const p = at(i);
+    ctx.save();
+    ctx.globalAlpha *= 0.42 * (1 - i / (count + 1));
+    drawTrophy(s, p.x, p.y, p.rot, p.k ?? 1);
+    ctx.restore();
+  }
+  const p = at(0);
+  drawTrophy(s, p.x, p.y, p.rot, p.k ?? 1);
+}
+
+/** A thick arc of speed, swept about (cx, cy) from `a0` to `a1`. */
+function arcSmear(
+  s: Stage,
+  cx: number,
+  cy: number,
+  rx: number,
+  ry: number,
+  a0: number,
+  a1: number,
+  width: number,
+  color: string,
+  alpha: number,
+): void {
+  if (alpha <= 0.01 || width <= 0.05) return;
+  const ctx = s.ctx;
+  ctx.save();
+  ctx.globalAlpha *= clamp(alpha, 0, 1);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, Math.abs(rx), Math.abs(ry), 0, a0, a1, a1 < a0);
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** A straight streak of speed. The javelin's contrail, the discus's line. */
+function lineSmear(
+  s: Stage,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  width: number,
+  color: string,
+  alpha: number,
+): void {
+  if (alpha <= 0.01) return;
+  const ctx = s.ctx;
+  ctx.save();
+  ctx.globalAlpha *= clamp(alpha, 0, 1);
+  capsule(ctx, x1, y1, x2, y2, Math.max(0.4, width), color, 'none');
+  ctx.restore();
+}
+
+/**
+ * A ring of dust travelling out along the floor.
+ *
+ * Drawn as a flattened ellipse rather than a circle because the floor is a belt
+ * seen at an angle, and a round ring on it reads as a hoop standing up.
+ */
+function floorRing(s: Stage, x: number, y: number, r: number, alpha: number, color = '#cfc6b8'): void {
+  if (alpha <= 0.01 || r <= 0.5) return;
+  const ctx = s.ctx;
+  ctx.save();
+  ctx.globalAlpha *= clamp(alpha, 0, 1);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = Math.max(1, 3 - r * 0.012);
+  ctx.beginPath();
+  ctx.ellipse(x, y, r, r * Z_SCALE * 0.62, 0, 0, TAU);
+  ctx.stroke();
+  ctx.restore();
+}
+
+/**
+ * What is left where the victim was standing.
+ *
+ * The flourish renderers do not re-stage the finisher they follow — half the
+ * book ends with no body at all (kicked into orbit, folded into a box, dropped
+ * down a tunnel) — so the aftermath is one honest mark on the floor rather than
+ * a corpse that half the finishers never produced.
+ */
+function aftermath(s: Stage): void {
+  if (s.gore > 0) {
+    bloodPool(s, s.vx, s.gy, s.vh * 0.5, 1);
+  } else {
+    dustPool(s, s.vx, s.gy, s.vh * 0.42, 1);
+    if (s.mechanical) {
+      for (let i = 0; i < 5; i++) {
+        const j = jitter(s.seed, i + 40);
+        poly(
+          s.ctx,
+          [
+            s.vx + j * s.vh * 0.4, s.gy - 1,
+            s.vx + j * s.vh * 0.4 + 3, s.gy - 4,
+            s.vx + j * s.vh * 0.4 + 5, s.gy - 1,
+          ],
+          i & 1 ? STEEL : STEEL_DARK,
+          INK,
+          0.8,
+        );
+      }
+    }
+  }
+}
+
 /** A rectangular machine face with vents and blinking status lights. */
 function drawRack(ctx: C2D, x: number, y: number, w: number, h: number, f: number): void {
   roundRect(ctx, x - w * 0.5, y - h, w, h, 2, '#2b303a', INK, 2);
@@ -824,13 +1287,19 @@ export interface FatalityDeps {
    * the caller did not have an opinion about.
    */
   reducedMotion?: boolean;
+  /** Everyone currently in the fight, for the follow-through to sweep. */
+  crowd?: () => Fighter[];
 }
+
+/** Nothing to sweep. Frozen and shared, so the no-crowd path allocates nothing. */
+const NO_CROWD: readonly Fighter[] = Object.freeze([]) as readonly Fighter[];
 
 export class FatalityDirector {
   private readonly fx: Fx;
   private readonly audio: AudioBus;
   private readonly cam: Camera;
   private readonly rng: Rng;
+  private readonly crowd: () => readonly Fighter[];
   private gore: Settings['gore'];
   private reduced: boolean;
 
@@ -842,6 +1311,38 @@ export class FatalityDirector {
   private killer: Fighter | null = null;
   private victim: Fighter | null = null;
   private frame = 0;
+
+  /**
+   * The follow-through, decided at `start()` so the letterbox and the camera
+   * know how long the whole show is before the first frame of it is drawn.
+   * Null whenever there is nothing in the killer's hands.
+   */
+  private fl: FatalityFlourish | null = null;
+  private flVis: FlourishVisual | null = null;
+  private flFrame = 0;
+  private flDur = 0;
+  private flStruck = false;
+  private inFlourish = false;
+  /** What a thrown trophy is aimed at, chosen once when the flourish begins. */
+  private aim: Fighter | null = null;
+
+  /** Reused so the sweep allocates nothing per hit. */
+  private readonly hitProps: HitProperties = {
+    damage: 0,
+    hitstun: 0,
+    blockstun: 0,
+    hitstop: 0,
+    knockback: { x: 0, y: 0 },
+    pushback: 0,
+    reaction: 'sweep',
+    level: 'unblockable',
+    chip: 0,
+    meterGain: 0,
+    meterGainVictim: 0,
+    shake: 0,
+  };
+  private readonly caught: Fighter[] = [];
+  private readonly sim: SimContext;
 
   private savedZoom = 1;
   private targetX = 0;
@@ -860,12 +1361,64 @@ export class FatalityDirector {
     this.audio = deps.audio;
     this.cam = deps.cam;
     this.rng = deps.rng;
+    this.crowd = deps.crowd ?? (() => NO_CROWD);
     this.gore = deps.gore;
     this.reduced =
       deps.reducedMotion ??
       (typeof matchMedia === 'function'
         ? matchMedia('(prefers-reduced-motion: reduce)').matches
         : false);
+
+    /*
+     * A SimContext for the sweep, and only for the sweep.
+     *
+     * `Fighter.takeHit` is the ONE damage route in this game — hitstun, the
+     * knockdown, the blood, the drop, the combo counter and the death all hang
+     * off it — so the follow-through goes through it too rather than inventing
+     * a second one that would get three of those five right. It wants a
+     * SimContext, and the director does not own the fight's one; what it needs
+     * out of it, though, is small and entirely satisfiable from here.
+     *
+     *   fighters      — the crowd, which is exactly what the caller supplies
+     *   fx / audio    — the director's own, already the fight's own
+     *   rng           — the shared seeded stream, as the determinism rule says
+     *   spawnHit      — nothing: a flourish is resolved here, not queued
+     *   spawn         — nothing, and faithfully so: `Level.spawn` refuses
+     *                   outright while a finisher is on stage, so a dropped
+     *                   weapon leaves the hand and does not become a pickup
+     *                   either way
+     *   requestHitstop— swallowed. Six guards caught by one swing would each
+     *                   ask for their own freeze and stack five they did not
+     *                   earn; the director spends one, sized to the crowd, in
+     *                   `strikeCrowd`.
+     */
+    const self = this;
+    this.sim = {
+      get frame(): number {
+        return self.frame;
+      },
+      get rng(): Rng {
+        return self.rng;
+      },
+      get fighters(): readonly Fighter[] {
+        return self.crowd();
+      },
+      spawnHit(): void {
+        /* resolved directly; see above */
+      },
+      spawn(): void {
+        /* the map is frozen; see above */
+      },
+      requestHitstop(): void {
+        /* the director owns the freeze; see above */
+      },
+      get fx(): Fx {
+        return self.fx;
+      },
+      get audio(): AudioBus {
+        return self.audio;
+      },
+    };
 
     this.stage = {
       ctx: null as unknown as C2D,
@@ -886,6 +1439,14 @@ export class FatalityDirector {
       gore: 1,
       reduced: this.reduced,
       seed: 0,
+      ff: 0,
+      ft: 0,
+      fdur: 1,
+      trophy: 'none',
+      caught: 0,
+      tx: 0,
+      ty: 0,
+      ts: 1,
     };
   }
 
@@ -988,6 +1549,8 @@ export class FatalityDirector {
     this._active = true;
     this._done = false;
 
+    this.chooseFlourish(def, s);
+
     this.savedZoom = this.cam.baseZoom;
     this.targetX = s.mx - VIEW_W * 0.5;
 
@@ -1004,29 +1567,382 @@ export class FatalityDirector {
     if (!this._active) return;
     this._active = false;
     this._done = true;
+    this.inFlourish = false;
     this.cam.zoom = this.savedZoom;
   }
 
   update(): void {
     if (!this._active) return;
     const s = this.stage;
-    s.f = this.frame;
-    s.t = clamp(this.frame / s.dur, 0, 1);
 
-    this.driveCamera(s);
-    this.playScheduledCues(s);
-    if (this.vis?.tick) this.vis.tick(s);
+    if (this.inFlourish) {
+      this.updateFlourish(s);
+    } else {
+      s.f = this.frame;
+      s.t = clamp(this.frame / s.dur, 0, 1);
+
+      this.driveCamera(s);
+      this.playScheduledCues(s);
+      if (this.vis?.tick) this.vis.tick(s);
+    }
 
     for (let i = 0; i < SPLAT_MAX; i++) {
       if (this.spLife[i] > 0) this.spLife[i]--;
     }
 
+    if (this.inFlourish) {
+      this.flFrame++;
+      if (this.flFrame > this.flDur) this.finish();
+      return;
+    }
+
     this.frame++;
     if (this.frame > s.dur) {
-      this._active = false;
-      this._done = true;
-      this.cam.zoom = this.savedZoom;
+      // The finisher is over. If there is something in the killer's hands, the
+      // room is about to find out about it; otherwise this is the end, exactly
+      // as it has always been.
+      if (this.flVis) this.beginFlourish(s);
+      else this.finish();
     }
+  }
+
+  /** Retire, hand the camera back, and report done. The one way out. */
+  private finish(): void {
+    this._active = false;
+    this._done = true;
+    this.inFlourish = false;
+    this.cam.zoom = this.savedZoom;
+  }
+
+  // ── the follow-through ─────────────────────────────────────────────────────
+
+  /** The flourish on stage, if one is running. Null the rest of the time. */
+  get flourish(): FatalityFlourish | null {
+    return this._active && this.inFlourish ? this.fl : null;
+  }
+
+  /**
+   * Decide the second act, at the same moment as the first.
+   *
+   * Deciding it up front rather than when the finisher runs out is what lets
+   * the letterbox and the camera know the length of the WHOLE show before they
+   * draw a frame of it — bars that retract at the finisher's last frame and
+   * then have to slam back in for the flourish look like a bug, because they
+   * are one.
+   *
+   * `pickFlourish` consumes at most one number from the shared stream and only
+   * when it returns something, which is the same bargain `pickFatality` makes.
+   */
+  private chooseFlourish(def: FatalityDef, s: Stage): void {
+    this.fl = null;
+    this.flVis = null;
+    this.flFrame = 0;
+    this.flDur = 0;
+    this.flStruck = false;
+    this.inFlourish = false;
+    this.aim = null;
+    s.trophy = 'none';
+    s.caught = 0;
+    s.ff = 0;
+    s.ft = 0;
+    s.fdur = 1;
+
+    const trophy = def.trophy;
+    if (trophy === undefined || trophy === 'none') return;
+    if (this.gore === 'off') return;
+    if (!hasTrophyArt(trophy)) return;
+
+    const fl = pickFlourish(trophy, this.rng, this.gore);
+    if (!fl) return;
+    const vis = FLOURISH_VISUALS[fl.visual];
+    // Same refusal as `start`: a flourish this file cannot draw never plays,
+    // and the finisher simply ends the way it used to.
+    if (!vis) return;
+
+    this.fl = fl;
+    this.flVis = vis;
+    // Bounded on purpose. The scene gives a finisher its own duration plus a
+    // fixed grace before it cancels the whole thing out from under us, so a
+    // content entry with a silly duration in it costs a clipped flourish rather
+    // than a fight that never resumes.
+    this.flDur = clamp(Math.round(fl.duration), 20, MAX_FLOURISH);
+    s.trophy = trophy;
+    s.fdur = this.flDur;
+  }
+
+  /** Total frames of the whole show, finisher plus follow-through. */
+  private get showDur(): number {
+    return this.stage.dur + (this.flVis ? this.flDur : 0);
+  }
+
+  /** Frames elapsed across the whole show, for the letterbox and the banner. */
+  private get showFrame(): number {
+    return this.inFlourish ? this.stage.dur + this.flFrame : this.frame;
+  }
+
+  private beginFlourish(s: Stage): void {
+    const fl = this.fl;
+    const vis = this.flVis;
+    const killer = this.killer;
+    if (!fl || !vis || !killer) {
+      this.finish();
+      return;
+    }
+
+    this.inFlourish = true;
+    this.flFrame = 0;
+    this.flStruck = false;
+    s.ff = 0;
+    s.ft = 0;
+    s.caught = 0;
+
+    // Where the throw is going. Fixed once, so the trophy does not chase a
+    // target that is about to be knocked flat by it.
+    const aim = this.nearestHostile(killer, fl.radius);
+    this.aim = aim;
+    if (aim) {
+      s.tx = aim.pos.x;
+      s.ts = depthScale(aim.pos.z);
+      s.ty = GROUND_Y + aim.pos.z * Z_SCALE - Math.max(0, aim.pos.y);
+    } else {
+      // An empty room still gets the throw. It just goes over the horizon, and
+      // the flourish plays out as a visual with nothing on the end of it.
+      const far = fl.radius < 0 ? 150 : clamp(fl.radius * 0.6, 60, 190);
+      s.tx = s.kx + s.dir * far;
+      s.ts = s.ks;
+      s.ty = s.ky;
+    }
+  }
+
+  private updateFlourish(s: Stage): void {
+    const vis = this.flVis;
+    s.ff = this.flFrame;
+    s.ft = clamp(this.flFrame / Math.max(1, this.flDur), 0, 1);
+
+    this.driveFlourishCamera(s);
+    this.playFlourishCues();
+    if (vis) {
+      if (!this.flStruck && s.ft >= vis.strike) {
+        this.flStruck = true;
+        this.strikeCrowd(s);
+      }
+      if (vis.tick) vis.tick(s);
+    }
+  }
+
+  /**
+   * The flourish's own cue list, spread across it.
+   *
+   * Same shape as `playScheduledCues` and for the same reason: the content
+   * entry names the sounds, the director owns the clock, and a renderer is left
+   * free to add whatever punctuation its own choreography needs on top.
+   */
+  private playFlourishCues(): void {
+    const fl = this.fl;
+    if (!fl) return;
+    const cues = fl.sfx;
+    const n = cues.length;
+    if (n === 0) return;
+    for (let i = 0; i < n; i++) {
+      const at = n === 1 ? 2 : Math.round(this.flDur * (0.02 + 0.66 * (i / (n - 1))));
+      if (this.flFrame === at) this.audio.play(cues[i], { pitch: 1 - i * 0.05, gain: 0.8 });
+    }
+  }
+
+  /**
+   * Everyone hostile, alive, and inside the shape — knocked flat.
+   *
+   * Damage goes through `Fighter.takeHit`, which is the fight's own route and
+   * therefore the only one that gets hitstun, the knockdown, the blood, the
+   * dropped weapon and the killer's combo counter all correct at once.
+   *
+   * The killer, the corpse and anyone on the killer's own team are never in it:
+   * friendly fire is not the joke, and a co-op partner standing next to the
+   * finish would otherwise be the single most reliable way to lose a life.
+   */
+  private strikeCrowd(s: Stage): void {
+    const fl = this.fl;
+    const vis = this.flVis;
+    const killer = this.killer;
+    if (!fl || !vis || !killer) return;
+
+    const list = this.crowd();
+    const caught = this.caught;
+    caught.length = 0;
+
+    // 'point' throws are centred on where the trophy lands rather than on the
+    // hand that threw it, so a javelin knocks over the man it hit and the two
+    // beside him rather than the whole room.
+    const point = vis.reach === 'point';
+    const cx = point ? s.tx : killer.pos.x;
+    const cz = point && this.aim ? this.aim.pos.z : killer.pos.z;
+    const r = point ? SPLASH : fl.radius;
+    const r2 = r < 0 ? Infinity : r * r;
+    // A throw with nothing to throw at landed on nobody, and there is no circle
+    // to draw around a target that does not exist.
+    const dead = point && !this.aim;
+
+    for (let i = 0; i < list.length && !dead; i++) {
+      const f = list[i];
+      if (f === killer || f === this.victim) continue;
+      if (!f.alive) continue;
+      if (f.team === killer.team) continue;
+
+      if (vis.reach === 'lane') {
+        // A corridor, not a circle: everything from the killer's toes out to
+        // `radius` in the direction they are facing, a third of the belt wide.
+        const along = (f.pos.x - killer.pos.x) * s.dir;
+        if (along < -14 || (fl.radius >= 0 && along > fl.radius)) continue;
+        if (Math.abs(f.pos.z - killer.pos.z) > LANE_DEPTH) continue;
+      } else if (r2 !== Infinity) {
+        const dx = f.pos.x - cx;
+        // Depth weighted into screen terms, or a sweep that looks like it
+        // covers the whole belt reaches half of it and vice versa.
+        const dz = (f.pos.z - cz) * Z_SCALE;
+        if (dx * dx + dz * dz > r2) continue;
+      }
+      caught.push(f);
+    }
+
+    // Stable order regardless of what the provider hands back, so the numbers
+    // each hit takes off the shared stream come off it in the same order every
+    // time this runs.
+    caught.sort(byId);
+
+    const props = this.hitProps;
+    props.damage = fl.damage;
+    props.hitstun = 26;
+    props.blockstun = 12;
+    // Zero: the director spends ONE freeze below, sized to the whole crowd.
+    // Six guards each asking for their own would stack five nobody earned.
+    props.hitstop = 0;
+    props.pushback = 0;
+    props.reaction = fl.reaction;
+    // A flourish is not a move with a start-up you could have read. Guarding it
+    // is not the fantasy, and a guard who happened to be holding block through
+    // somebody else's death should not be the one left standing.
+    props.level = 'unblockable';
+    props.chip = 0;
+    props.meterGain = 0.015;
+    props.meterGainVictim = 0.01;
+    props.shake = 0;
+
+    let landed = 0;
+    let wet = 0;
+    for (let i = 0; i < caught.length; i++) {
+      const f = caught[i];
+      // Deterministic scatter: the pack does not fall over in formation.
+      props.knockback.x = 3.1 + this.rng.range(-0.5, 0.9);
+      props.knockback.y = fl.reaction === 'launch' ? 3.4 + this.rng.range(0, 1.2) : 0;
+      if (f.takeHit(props, cx, this.sim, killer)) {
+        landed++;
+        if (!f.mechanical) wet++;
+        this.crowdImpact(f);
+      }
+    }
+    caught.length = 0;
+    s.caught = landed;
+
+    // Bigger crowd, bigger everything.
+    const heft = Math.min(landed, 6);
+    this.hit(4 + heft * 2.4, 14 + heft * 3, wet > 0 ? Math.min(wet, 5) * 2 : 0);
+    if (landed > 0) {
+      this.fx.slowmo(this.reduced ? 0.55 : 0.1, 5 + heft * 2);
+      if (!this.reduced) this.cam.punch(0.05 + heft * 0.02);
+      this.fx.aberration(0.4 + heft * 0.25, 10 + heft * 2);
+      this.cue(wet > 0 ? 'hit_flesh' : 'hit_metal', 0.8, Math.min(1, 0.5 + heft * 0.12));
+      if (landed >= 2) {
+        this.fx.text({
+          text: `${landed} DOWN`,
+          x: killer.pos.x,
+          y: 58,
+          z: killer.pos.z,
+          color: '#ffe14a',
+          size: 9 + heft,
+          life: 52,
+          rise: 0.42,
+          style: landed >= 4 ? 'critical' : 'bonus',
+        });
+      }
+    } else if (fl.damage > 0) {
+      // Nobody there. The swing still happened, and still moved the air.
+      this.cue('whiff', 0.85, 0.6);
+    }
+  }
+
+  /** Blood off a body, sparks off a chassis, and a frame of white on both. */
+  private crowdImpact(f: Fighter): void {
+    this.fx.impactFrame(f.id, this.reduced ? 3 : 5);
+    const gore = goreMul(this.gore);
+    const up = -Math.PI * 0.5;
+    CROWD_SPEC.x = f.pos.x;
+    CROWD_SPEC.y = Math.max(0, f.pos.y) + 16;
+    CROWD_SPEC.z = f.pos.z;
+    CROWD_SPEC.angle = up;
+    CROWD_SPEC.spread = 2.2;
+    if (f.mechanical) {
+      CROWD_SPEC.count = 10;
+      CROWD_SPEC.colors = SPARK_COLORS;
+      CROWD_SPEC.shape = 'spark';
+      CROWD_SPEC.additive = true;
+      CROWD_SPEC.speed[0] = 1.4;
+      CROWD_SPEC.speed[1] = 3.8;
+      CROWD_SPEC.gravity = 0.22;
+      CROWD_SPEC.size[0] = 1.1;
+      CROWD_SPEC.size[1] = 1.9;
+      CROWD_SPEC.life[0] = 14;
+      CROWD_SPEC.life[1] = 26;
+    } else if (gore > 0) {
+      CROWD_SPEC.count = Math.round(9 * gore);
+      CROWD_SPEC.colors = BLOOD_COLORS;
+      CROWD_SPEC.shape = 'blood';
+      CROWD_SPEC.additive = false;
+      CROWD_SPEC.speed[0] = 1.2;
+      CROWD_SPEC.speed[1] = 3.4;
+      CROWD_SPEC.gravity = 0.34;
+      CROWD_SPEC.size[0] = 1.7;
+      CROWD_SPEC.size[1] = 2.8;
+      CROWD_SPEC.life[0] = 24;
+      CROWD_SPEC.life[1] = 40;
+    } else {
+      // Gore off still needs the hit to read, so it reads as dust.
+      CROWD_SPEC.count = 7;
+      CROWD_SPEC.colors = DUST_COLORS;
+      CROWD_SPEC.shape = 'smoke';
+      CROWD_SPEC.additive = false;
+      CROWD_SPEC.speed[0] = 0.6;
+      CROWD_SPEC.speed[1] = 1.9;
+      CROWD_SPEC.gravity = 0.02;
+      CROWD_SPEC.size[0] = 2.6;
+      CROWD_SPEC.size[1] = 4.2;
+      CROWD_SPEC.life[0] = 20;
+      CROWD_SPEC.life[1] = 34;
+    }
+    this.fx.particles(CROWD_SPEC);
+  }
+
+  /** The closest thing within `reach` that would rather this had not happened. */
+  private nearestHostile(killer: Fighter, reach: number): Fighter | null {
+    const list = this.crowd();
+    const max = reach < 0 ? Infinity : reach * reach;
+    let best: Fighter | null = null;
+    let bestD = Infinity;
+    for (let i = 0; i < list.length; i++) {
+      const f = list[i];
+      if (f === killer || f === this.victim) continue;
+      if (!f.alive || f.team === killer.team) continue;
+      const dx = f.pos.x - killer.pos.x;
+      const dz = (f.pos.z - killer.pos.z) * Z_SCALE;
+      const d = dx * dx + dz * dz;
+      if (d > max) continue;
+      // Ties broken by id, so two guards standing on the same spot pick the
+      // same one on every run.
+      if (d < bestD || (d === bestD && best !== null && f.id < best.id)) {
+        bestD = d;
+        best = f;
+      }
+    }
+    return best;
   }
 
   /**
@@ -1055,6 +1971,21 @@ export class FatalityDirector {
 
     const lead = this.frame < SLAM_IN ? 0.34 : 0.12;
     cam.x = lerp(cam.x, this.targetX, this.reduced ? 0.2 : lead);
+  }
+
+  /**
+   * Let go of the close-up, because the crowd is the shot now.
+   *
+   * The finisher's own zoom-out has already run by the time this takes over, so
+   * this only has to keep the framing honest: back at the fight's own zoom, and
+   * centred between the killer and whatever they are about to hit.
+   */
+  private driveFlourishCamera(s: Stage): void {
+    const cam = this.cam;
+    cam.zoom = lerp(cam.zoom, this.savedZoom * FLOURISH_ZOOM, this.reduced ? 0.12 : 0.2);
+    const mid = (s.kx + s.tx) * 0.5;
+    const want = clamp(mid, s.kx - 110, s.kx + 110) - VIEW_W * 0.5;
+    cam.x = lerp(cam.x, want, this.reduced ? 0.1 : 0.16);
   }
 
   /** Spread the def's cue list across the first two thirds of the film. */
@@ -1108,7 +2039,8 @@ export class FatalityDirector {
     // Nothing to draw if the whole performance is off the side of the view.
     if (s.mx - cam.x < -260 || s.mx - cam.x > VIEW_W + 260) return;
     ctx.save();
-    this.vis.draw(s);
+    if (this.inFlourish && this.flVis) this.flVis.draw(s);
+    else this.vis.draw(s);
     ctx.restore();
   }
 
@@ -1118,8 +2050,13 @@ export class FatalityDirector {
     const s = this.stage;
     const t = s.t;
 
-    const inK = easeOut(clamp(this.frame / BAR_IN, 0, 1));
-    const outK = 1 - easeIn(clamp((this.frame - (s.dur - 14)) / 14, 0, 1));
+    // Measured across the WHOLE show — finisher plus follow-through — so the
+    // bars do not retract on the finisher's last frame and then slam back in
+    // for the second act.
+    const shown = this.showFrame;
+    const total = this.showDur;
+    const inK = easeOut(clamp(shown / BAR_IN, 0, 1));
+    const outK = 1 - easeIn(clamp((shown - (total - 14)) / 14, 0, 1));
     const bar = BAR_H * inK * outK;
     if (bar > 0.5) {
       ctx.fillStyle = '#07060b';
@@ -1133,7 +2070,9 @@ export class FatalityDirector {
     this.drawSplatter(ctx);
 
     const at = this.vis?.banner ?? BANNER_AT;
-    if (t >= at) {
+    if (this.inFlourish) {
+      this.drawBanner(ctx, 1, bar);
+    } else if (t >= at) {
       this.drawBanner(ctx, clamp((t - at) / Math.max(0.02, 1 - at), 0, 1), bar);
     }
   }
@@ -1197,6 +2136,47 @@ export class FatalityDirector {
     ctx.strokeText(def.banner, 0, 10);
     ctx.fillStyle = '#e8e2ff';
     ctx.fillText(def.banner, 0, 10);
+    ctx.restore();
+
+    this.drawFlourishTag(ctx, cy);
+  }
+
+  /**
+   * The follow-through's own name, slammed in UNDER the finisher's card.
+   *
+   * A second card in the same style would fight the first one for the eye;
+   * this is deliberately smaller and hangs off the bottom of it, so it reads as
+   * a subtitle to the joke already on screen rather than as a new joke.
+   */
+  private drawFlourishTag(ctx: C2D, cy: number): void {
+    const fl = this.fl;
+    if (!fl || !this.inFlourish) return;
+    const k = clamp(this.flFrame / 12, 0, 1);
+    const slam = this.reduced ? easeOut(k) : easeOutBack(k);
+    const name = fl.name;
+    const size = name.length > 16 ? 12 : 15;
+
+    ctx.save();
+    ctx.translate(VIEW_W * 0.5, cy + 27);
+    ctx.scale(clamp(slam, 0.02, 1.15), clamp(slam, 0.02, 1.15));
+    ctx.rotate(-0.024);
+
+    ctx.font = `900 ${size}px ${DISPLAY}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const w = ctx.measureText(name).width + 26;
+    ctx.fillStyle = 'rgba(9,7,14,0.82)';
+    ctx.fillRect(-w * 0.5, -10, w, 20);
+    ctx.fillStyle = '#ffe14a';
+    ctx.fillRect(-w * 0.5, 8, w, 1.6);
+
+    ctx.lineJoin = 'round';
+    ctx.miterLimit = 2;
+    ctx.lineWidth = size * 0.3;
+    ctx.strokeStyle = '#3a0206';
+    ctx.strokeText(name, 0, 0);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(name, 0, 0);
     ctx.restore();
   }
 }
@@ -4143,5 +5123,1242 @@ VISUALS.acquired_box = {
       s.d.hit(6, 14);
     }
     if (at(0.86)) s.d.cue('drop', 0.6, 0.5);
+  },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE FOLLOW-THROUGH. One entry per `FatalityFlourish.visual`.
+//
+// Same rules as the book above — no placeholders, no shared renderers, and an
+// unknown id is refused rather than drawn as nothing. These are shorter films
+// than the finishers and they have a different job: the finisher was a close-up
+// on two people, this is a wide shot of a room, and the thing the eye has to
+// follow is the trophy rather than a face. Hence the trails: at 60Hz a femur
+// going round three and a half times lands in a different quadrant every frame,
+// and without the ghosts behind it the eye simply loses the prop.
+//
+// Every one of them opens with `aftermath(s)`, which is the mark the finisher
+// left on the floor. None of them re-stage the finisher itself: half the book
+// ends with no body at all, so there is nothing to re-stage.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const FLOURISH_VISUALS: Record<string, FlourishVisual> = {};
+
+/** Screen x of the killer's working hand, with the arm at `ang` from straight down. */
+function handX(s: Stage, ang: number, reach = 0.5): number {
+  return s.kx + s.dir * (s.kh * 0.05 + Math.sin(ang) * s.kh * reach);
+}
+
+/**
+ * ...and the y of it.
+ *
+ * Same sign convention as the pose helpers: `ang` is the shoulder rotation, 0
+ * is hanging straight down, and NEGATIVE lifts the arm — which is why raising
+ * a hand adds a negative cosine and moves UP the screen.
+ */
+function handY(s: Stage, ang: number, reach = 0.5): number {
+  return s.ky - s.kh * 0.78 + Math.cos(ang) * s.kh * reach;
+}
+
+/** Arms out, weight low: the frame a spin is built on. */
+function poseWheel(i: number, k: number): Pose {
+  const p = P(i);
+  spine(p, -0.12, -0.1, 0.04, 0.08);
+  arms(p, -1.15 - k * 0.25, 0.1, -1.2 - k * 0.25, 0.08);
+  hands(p, -0.15, -0.18);
+  legs(p, 0.22 + k * 0.1, 0.42 + k * 0.2, -0.24 - k * 0.1, 0.44 + k * 0.2);
+  hips(p, 0, 0, -1.4 * k);
+  head2(p, -0.3 * k, -0.4 * k);
+  return p;
+}
+
+/** Both hands overhead, gripping something heavy. Slams and dunks start here. */
+function poseHoist(i: number, k: number): Pose {
+  const p = P(i);
+  const d = clamp(k, 0, 1);
+  spine(p, -0.3 * d, -0.22 * d, -0.1 * d, -0.25 * d);
+  arms(p, -2.15 * d - 0.1, 0.2, -2.2 * d - 0.1, 0.18);
+  hands(p, -0.2, -0.2);
+  legs(p, -0.12 * d, 0.2 + 0.2 * d, 0.14 * d, 0.22 + 0.2 * d);
+  hips(p, 0, 0, -0.8 * d);
+  head2(p, -0.5 * d, -0.35 * d);
+  return p;
+}
+
+/** A body turning on the spot, faked the only way 2D allows. */
+function spinBody(s: Stage, ang: number, pose: Pose, dx = 0, dy = 0): void {
+  const c = Math.cos(ang);
+  const face = (c >= 0 ? s.dir : (-s.dir as Facing)) as Facing;
+  // The squash IS the turn: a rig has no third axis, so the silhouette narrows
+  // as the shoulders come edge-on and widens again as they come round.
+  const sx = Math.max(0.3, Math.abs(c));
+  squash(s, s.kx + dx, s.ky + dy, sx, 1, () => {
+    actor(s, s.killer, s.kx + dx, s.ky + dy, pose, face, s.ks);
+  });
+}
+
+/** The floor under a spin: grit picked up and thrown outward. */
+function spinDust(s: Stage, k: number, ang: number): void {
+  if (k <= 0 || k >= 1) return;
+  const n = s.reduced ? 3 : 6;
+  for (let i = 0; i < n; i++) {
+    const a = ang * 0.6 + (i * TAU) / n;
+    const r = s.kh * (0.35 + 0.45 * k) * (0.7 + 0.3 * hash(i * 3.7));
+    const x = s.kx + Math.cos(a) * r;
+    const y = s.gy - Math.abs(Math.sin(a)) * 3 - k * 4;
+    s.ctx.save();
+    s.ctx.globalAlpha *= 0.35 * (1 - k * 0.4);
+    ellipse(s.ctx, x, y, 3.4 + k * 3, 1.6 + k * 1.4, 0, DUST_COLORS[i % DUST_COLORS.length], 'none');
+    s.ctx.restore();
+  }
+}
+
+/** Where a thrown trophy is on a flat-ish arc from the hand to the target. */
+function throwX(s: Stage, u: number, fromX: number): number {
+  return lerp(fromX, s.tx, u);
+}
+
+function throwY(s: Stage, u: number, fromY: number, toY: number, lift: number): number {
+  return lerp(fromY, toY, u) - Math.sin(u * Math.PI) * lift;
+}
+
+// ── TORNADO — plant a foot and turn until the room is horizontal ──────────────
+
+FLOURISH_VISUALS.tornado = {
+  strike: 0.52,
+  reach: 'self',
+  draw(s) {
+    const t = s.ft;
+    const wind = seg(t, 0, 0.16);
+    const spin = seg(t, 0.16, 0.84);
+    const stop = seg(t, 0.84, 1);
+    const dir = s.dir;
+    aftermath(s);
+
+    const spun = easeInOut(spin);
+    const turns = 3.6;
+    const ang = -Math.PI * 0.5 - wind * 0.7 + spun * TAU * turns;
+    const cx = s.kx;
+    const cy = s.ky - s.kh * (0.62 + spin * 0.08 - stop * 0.1);
+    const out = 0.42 + 0.5 * Math.max(wind * 0.4, spin);
+    const rx = s.kh * out;
+    const ry = rx * 0.34;
+
+    spinDust(s, spin, ang);
+
+    // A full ring of speed once it is properly going, and a bright leading arc
+    // hard behind the trophy for the whole spin.
+    if (spin > 0.05 && stop < 1) {
+      const heat = Math.sin(clamp(spin, 0, 1) * Math.PI);
+      arcSmear(s, cx, cy, rx, ry, 0, TAU, Math.max(1.4, s.kh * 0.07), s.gore > 0 ? BLOOD_DARK : STEEL_DARK, 0.2 * heat);
+      arcSmear(s, cx, cy, rx, ry, ang - 2.3, ang, Math.max(2, s.kh * 0.12), s.gore > 0 ? BLOOD_LIGHT : STEEL, 0.45 * heat);
+    }
+
+    spinBody(s, ang, poseWheel(1, spin - stop * 0.6), 0, stop > 0 ? Math.sin(stop * Math.PI) * -2 : 0);
+
+    trophyTrail(s, 7, (i) => {
+      const a = ang - i * 0.3;
+      return {
+        x: cx + Math.cos(a) * rx,
+        y: cy + Math.sin(a) * ry,
+        rot: a + Math.PI * 0.5,
+      };
+    });
+
+    if (s.caught > 0 && s.ft > 0.52) {
+      // A dust ring going out along the floor, sized to how many it took.
+      const k = seg(t, 0.52, 0.78);
+      floorRing(s, cx, s.gy, s.kh * (0.6 + s.caught * 0.5) * easeOut(k), (1 - k) * 0.8);
+    }
+    if (stop > 0.2 && stop < 0.9) {
+      shout(s, s.caught > 2 ? 'HUP' : 'HNGH', s.kx + dir * 14, s.ky - s.kh * 1.35, stop, 9, '#ffe8b0');
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.ff === Math.round(s.fdur * u);
+    if (at(0.16)) s.d.cue('weapon_swing', 0.7);
+    // Four whooshes across the spin, rising, so the ear hears it speed up too.
+    for (let i = 0; i < 4; i++) {
+      if (at(0.24 + i * 0.13)) s.d.cue('whiff', 0.8 + i * 0.16, 0.4);
+    }
+    if (at(0.86)) s.d.cue('land', 0.9, 0.5);
+  },
+};
+
+// ── JAVELIN — one target, and that target leaves the postcode ─────────────────
+
+FLOURISH_VISUALS.javelin = {
+  strike: 0.5,
+  reach: 'point',
+  draw(s) {
+    const t = s.ft;
+    const load = seg(t, 0, 0.26);
+    const step = seg(t, 0.26, 0.34);
+    const fly = seg(t, 0.34, 0.5);
+    const after = seg(t, 0.5, 0.72);
+    const dir = s.dir;
+    aftermath(s);
+
+    // Wound up behind the ear, then everything through the hips at once.
+    const kp = P(1);
+    if (fly > 0) {
+      const f = easeOut(clamp(fly * 1.6, 0, 1));
+      spine(kp, 0.34 * f, 0.24 * f, 0.06, 0.12 * f);
+      arms(kp, -0.5 - f * 0.2, 0.5, lerp(-2.5, 0.9, f), lerp(0.9, 0.2, f));
+      legs(kp, -0.5 * f, 0.34, 0.62 * f, 0.5, 0.12, 0.2);
+      hips(kp, 0.2 * f, 0, -1.4 * f);
+      head2(kp, 0.2 * f, 0.3 * f);
+    } else {
+      const b = easeOut(load) - step * 0.2;
+      spine(kp, -0.3 * b, -0.22 * b, 0.1, 0.16 * b);
+      arms(kp, -0.5, 0.4, -2.5 * b - 0.1, 0.9 * b + 0.1);
+      legs(kp, 0.35 * b, 0.3, -0.4 * b, 0.42, 0.1, 0.1);
+      hips(kp, -0.18 * b, 0, -0.8 * b);
+      head2(kp, -0.3 * b, -0.2 * b);
+    }
+    kill(s, dir * step * 5, 0, kp);
+
+    const hx = handX(s, -2.4 + easeOut(clamp(fly * 1.6, 0, 1)) * 3.3, 0.52);
+    const hy = handY(s, -2.4 + easeOut(clamp(fly * 1.6, 0, 1)) * 3.3, 0.52);
+    const toY = s.ty - s.kh * 0.55;
+
+    if (fly <= 0) {
+      // Still cocked. Held level, pointing where it is going.
+      drawTrophy(s, hx, hy, Math.PI * 0.5 * dir + load * 0.25 * dir);
+    } else if (fly < 1) {
+      const u = easeOut(fly);
+      const px = throwX(s, u, hx);
+      const py = throwY(s, u, hy, toY, s.kh * 0.32);
+      const rot = Math.PI * 0.5 * dir;
+      // The contrail: three lines of decreasing weight back down the flight.
+      for (let i = 1; i <= 3; i++) {
+        const b = clamp(u - i * 0.075, 0, 1);
+        lineSmear(
+          s,
+          throwX(s, b, hx), throwY(s, b, hy, toY, s.kh * 0.32),
+          px, py,
+          2.6 - i * 0.6,
+          '#fff6d8',
+          0.3 / i,
+        );
+      }
+      drawTrophy(s, px, py, rot);
+    } else if (after < 1) {
+      // Landed, embedded, and quivering.
+      const q = s.reduced ? 0 : Math.sin(s.ff * 0.9) * (1 - after) * 0.12;
+      drawTrophy(s, s.tx, toY, Math.PI * 0.5 * dir + q, s.ts / Math.max(0.1, s.vs));
+    } else {
+      const fall = seg(t, 0.72, 1);
+      drawTrophy(s, s.tx, lerp(toY, s.ty - 3, easeIn(fall)), lerp(Math.PI * 0.5 * dir, Math.PI * dir, fall));
+    }
+
+    if (fly >= 1 && after > 0 && after < 0.6 && s.caught > 0) {
+      burst(s.ctx, s.tx, toY, s.kh * 0.7 * Math.sin(after / 0.6 * Math.PI), 9, '#fff3c4', 0.4);
+    }
+    if (after > 0.3 && after < 1 && s.caught === 0) {
+      shout(s, '. . .', s.kx + dir * 20, s.ky - s.kh * 1.3, after, 9, '#cfc8e0');
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.ff === Math.round(s.fdur * u);
+    if (at(0.28)) s.d.cue('grunt', 0.85, 0.7);
+    if (at(0.35)) s.d.cue('whiff', 0.65);
+    if (at(0.76)) s.d.cue('drop', 0.8, 0.5);
+  },
+};
+
+// ── BOWLING — underarm, along the floor, down a lane of guards ────────────────
+
+FLOURISH_VISUALS.bowling = {
+  strike: 0.56,
+  reach: 'lane',
+  draw(s) {
+    const t = s.ft;
+    const back = seg(t, 0, 0.2);
+    const swing = seg(t, 0.2, 0.3);
+    const roll = seg(t, 0.3, 0.86);
+    const dir = s.dir;
+    aftermath(s);
+
+    const kp = P(1);
+    if (roll > 0) {
+      // Followed through, one arm out, watching it go. Nobody moves after they
+      // have bowled; they just lean.
+      const w = easeOut(clamp(roll * 3, 0, 1));
+      spine(kp, 0.2 * w, 0.14 * w, 0.04, 0.1 * w);
+      arms(kp, -0.4, 0.4, 1.0 * w, 0.2);
+      legs(kp, -0.55 * w, 0.5, 0.4 * w, 0.7, 0.2, 0.3);
+      hips(kp, 0.14 * w, 0, -1.2 * w);
+    } else {
+      const b = easeOut(back) - swing * 0.4;
+      spine(kp, 0.3 * b, 0.22 * b, 0.06, 0.2 * b);
+      arms(kp, -0.4, 0.4, -1.5 * b, 0.3);
+      legs(kp, 0.4 * b, 0.5, -0.3 * b, 0.4, 0.1, 0.1);
+      hips(kp, 0.2 * b, 0, -2 * b);
+      head2(kp, 0.3 * b, 0.4 * b);
+    }
+    kill(s, 0, 0, kp);
+
+    // The lane runs slightly INTO the screen, which is what sells the floor as
+    // a floor instead of as a wall: the ball shrinks and climbs as it recedes,
+    // by exactly the amount Z_SCALE says a step back up the belt is worth.
+    const laneLen = Math.min(220, Math.abs(s.tx - s.kx) + 30);
+    const recede = Z_DEPTH * 0.28 * Z_SCALE;
+    const u = easeOut(roll);
+
+    if (roll > 0 && roll < 1) {
+      // Two gutter lines, drawn from the killer's feet out, so the eye reads a
+      // lane before the ball reaches the end of it.
+      s.ctx.save();
+      s.ctx.globalAlpha *= 0.22;
+      for (let i = -1; i <= 1; i += 2) {
+        capsule(
+          s.ctx,
+          s.kx + dir * s.kh * 0.3, s.gy - 1 + i * 5,
+          s.kx + dir * (s.kh * 0.3 + laneLen), s.gy - 1 - recede * 0.5 + i * 3,
+          0.9,
+          '#cfc6b8',
+          'none',
+        );
+      }
+      s.ctx.restore();
+      // Grit thrown up behind it.
+      for (let i = 1; i <= 4; i++) {
+        const b = clamp(u - i * 0.06, 0, 1);
+        s.ctx.save();
+        s.ctx.globalAlpha *= 0.22 / i;
+        ellipse(
+          s.ctx,
+          s.kx + dir * (s.kh * 0.4 + b * laneLen),
+          lerp(s.gy - 1, s.gy - 1 - recede, b * 0.5),
+          4 + i, 1.6, 0, DUST_COLORS[i % DUST_COLORS.length], 'none',
+        );
+        s.ctx.restore();
+      }
+    }
+
+    const spun = (back * 0.4 + u * 9) * dir;
+    if (roll > 0) {
+      trophyTrail(s, s.reduced ? 1 : 3, (i) => {
+        const b = clamp(u - i * 0.045, 0, 1);
+        return {
+          x: s.kx + dir * (s.kh * 0.4 + b * laneLen),
+          y: lerp(s.gy - 2, s.gy - 2 - recede, b * 0.5),
+          rot: spun - i * 0.5 * dir,
+          k: 0.95 - b * 0.15,
+        };
+      });
+    } else {
+      const a = -0.4 - easeOut(back) * 1.1 + swing * 1.6;
+      drawTrophy(s, handX(s, a, 0.5), handY(s, a, 0.5), spun);
+    }
+
+    if (s.caught >= 3 && t > 0.56) {
+      shout(s, 'STRIKE', s.kx + dir * 60, s.gy - s.kh * 1.9, seg(t, 0.58, 0.9), 13, '#ffe14a');
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.ff === Math.round(s.fdur * u);
+    if (at(0.3)) s.d.cue('drop', 0.7, 0.8);
+    // A rolling rumble, ticking down in pitch as it gets further away.
+    if (s.ff > s.fdur * 0.32 && s.ff < s.fdur * 0.84 && s.ff % 7 === 0) {
+      s.d.cue('dash', 0.5 + (s.ff / s.fdur) * 0.3, 0.16);
+    }
+  },
+};
+
+// ── HELICOPTER — overhead, faster, faster, then look at something else ────────
+
+FLOURISH_VISUALS.helicopter = {
+  strike: 0.62,
+  reach: 'self',
+  draw(s) {
+    const t = s.ft;
+    const raise = seg(t, 0, 0.18);
+    const spin = seg(t, 0.18, 0.62);
+    const release = seg(t, 0.62, 0.82);
+    const bored = seg(t, 0.8, 1);
+    const dir = s.dir;
+    aftermath(s);
+
+    if (bored > 0.2) {
+      // Not watching. Never watching.
+      kill(s, 0, 0, poseSmug(1, Math.sin(s.ff * 0.12)));
+    } else {
+      const kp = P(1);
+      const u = easeOut(raise);
+      spine(kp, -0.1 * u, -0.08 * u, -0.04, -0.1 * u);
+      arms(kp, -0.3, 0.4, -2.4 * u - 0.1, 0.12);
+      hands(kp, 0, -0.25);
+      legs(kp, 0.1, 0.16, -0.12, 0.18);
+      head2(kp, -0.35 * u, -0.2 * u);
+      // Lifted off the heels by his own rotor. Not by much.
+      kill(s, 0, s.reduced ? 0 : Math.sin(s.ff * 0.5) * spin * -1.4, kp);
+    }
+
+    const cx = handX(s, -2.5, 0.5);
+    const cy = s.ky - s.kh * 1.34;
+    // Rotor speed ramps hard, so the ring goes from "a thing on a stick" to a
+    // solid disc without ever passing through "a thing on a stick, quickly".
+    const rate = easeIn(spin);
+    const ang = raise * 1.2 + rate * TAU * 7;
+    const rx = s.kh * (0.3 + 0.62 * easeOut(spin));
+    const ry = rx * 0.26;
+
+    if (spin > 0.1 && release < 1) {
+      const heat = Math.min(1, spin * 1.6) * (1 - release);
+      arcSmear(s, cx, cy, rx, ry, 0, TAU, Math.max(2, s.kh * 0.14 * heat), '#dfe6ff', 0.16 * heat);
+      arcSmear(s, cx, cy, rx, ry, ang - 3.4, ang, Math.max(2, s.kh * 0.11), s.gore > 0 ? BLOOD_LIGHT : STEEL, 0.4 * heat);
+    }
+
+    if (release < 1) {
+      trophyTrail(s, s.reduced ? 2 : 8, (i) => {
+        const a = ang - i * 0.34;
+        return { x: cx + Math.cos(a) * rx, y: cy + Math.sin(a) * ry, rot: a + Math.PI * 0.5 };
+      });
+    } else {
+      // Let go, straight out, gone over the scenery.
+      const u = easeOut(seg(t, 0.62, 1));
+      const px = cx + dir * u * 320;
+      const py = cy - u * 90 + u * u * 40;
+      s.ctx.save();
+      s.ctx.globalAlpha *= clamp(1 - u * 1.1, 0, 1);
+      drawTrophy(s, px, py, ang + u * 18);
+      s.ctx.restore();
+    }
+
+    // The downwash, which is the part that actually knocks people over.
+    if (release > 0 && release < 1) {
+      const k = easeOut(release);
+      floorRing(s, s.kx, s.gy, s.kh * (0.8 + 3.4 * k), (1 - k) * 0.85, '#dfe6ff');
+      floorRing(s, s.kx, s.gy, s.kh * (0.4 + 2.2 * k), (1 - k) * 0.5);
+    }
+    if (bored > 0.3) {
+      shout(s, 'WHAT', s.kx + dir * 16, s.ky - s.kh * 1.4, bored, 8, '#cfc8e0');
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.ff === Math.round(s.fdur * u);
+    if (at(0.2)) s.d.cue('weapon_swing', 0.9, 0.6);
+    // A rotor is a whiff played faster and faster until it is a note.
+    if (s.ff > s.fdur * 0.2 && s.ff < s.fdur * 0.62) {
+      const k = (s.ff - s.fdur * 0.2) / (s.fdur * 0.42);
+      const every = Math.max(3, Math.round(11 - k * 8));
+      if (s.ff % every === 0) s.d.cue('whiff', 0.7 + k * 1.1, 0.22);
+    }
+    if (at(0.63)) {
+      s.d.cue('explosion', 1.5, 0.4);
+      s.d.hit(4, 16);
+      dust(s, s.kx, s.gy, 18, 3.2);
+    }
+  },
+};
+
+// ── GOLF — tee it up and put it flat through the front row ────────────────────
+
+FLOURISH_VISUALS.golf_drive = {
+  strike: 0.44,
+  reach: 'lane',
+  draw(s) {
+    const t = s.ft;
+    const tee = seg(t, 0, 0.18);
+    const address = seg(t, 0.18, 0.3);
+    const back = seg(t, 0.3, 0.4);
+    const swing = seg(t, 0.4, 0.46);
+    const fly = seg(t, 0.46, 0.9);
+    const dir = s.dir;
+    aftermath(s);
+
+    const teeX = s.kx + dir * s.kh * 0.62;
+    const teeY = s.gy - 2;
+
+    // A committed golf swing is all shoulders: the arms barely change, the
+    // spine does the work, and the follow-through ends up behind the head.
+    const kp = P(1);
+    const b = easeOut(back) * (1 - swing);
+    const f = easeOut(swing);
+    spine(kp, 0.28 - b * 0.5 + f * 0.3, 0.2 - b * 0.35 + f * 0.2, 0.05, 0.18 - b * 0.2);
+    arms(kp, 1.1 - b * 2.6 + f * 2.2, 0.3, 1.15 - b * 2.7 + f * 2.3, 0.28);
+    hands(kp, -0.2, -0.2);
+    legs(kp, -0.2, 0.3, 0.24, 0.34, 0.1, 0.1);
+    hips(kp, -0.1 * b + 0.24 * f, 0, -1.2 * (b + f));
+    head2(kp, -0.2 * b, -0.15 * b);
+    kill(s, 0, 0, kp);
+
+    // The club-arc, which is the whole reason a golf swing reads at all.
+    if (swing > 0 && swing < 1) {
+      const hxc = s.kx + dir * s.kh * 0.1;
+      const hyc = s.ky - s.kh * 0.72;
+      arcSmear(
+        s, hxc, hyc, s.kh * 0.78, s.kh * 0.78,
+        -Math.PI * (dir > 0 ? 1.15 : -0.15), -Math.PI * (dir > 0 ? 0.15 : 0.85),
+        Math.max(2, s.kh * 0.09), '#fff6d8', 0.55 * (1 - swing),
+      );
+    }
+
+    if (fly <= 0) {
+      const lift = tee < 1 ? (1 - easeOut(tee)) * s.kh * 0.9 : 0;
+      const wob = address > 0 && back <= 0 ? Math.sin(s.ff * 0.6) * 0.06 : 0;
+      drawTrophy(s, teeX, teeY - lift, wob * dir);
+      if (tee >= 1 && fly <= 0) {
+        // The tee. One line, and it is a golf course.
+        capsule(s.ctx, teeX, teeY, teeX, teeY + 3, 0.8, '#e6dcc4', INK, 0.6);
+      }
+    } else {
+      const u = easeOut(fly);
+      const len = Math.min(240, Math.abs(s.tx - teeX) + 60);
+      const px = teeX + dir * u * len;
+      const py = teeY - Math.sin(u * Math.PI * 0.85) * s.kh * 1.5 - u * 6;
+      for (let i = 1; i <= 4; i++) {
+        const c = clamp(u - i * 0.06, 0, 1);
+        lineSmear(
+          s,
+          teeX + dir * c * len, teeY - Math.sin(c * Math.PI * 0.85) * s.kh * 1.5 - c * 6,
+          px, py, 1.8 - i * 0.3, '#ffffff', 0.26 / i,
+        );
+      }
+      s.ctx.save();
+      s.ctx.globalAlpha *= clamp(1.2 - u, 0, 1);
+      drawTrophy(s, px, py, u * 22 * dir, 1 - u * 0.35);
+      s.ctx.restore();
+      if (fly > 0.1 && fly < 0.6) {
+        shout(s, 'FORE', s.kx + dir * 22, s.ky - s.kh * 1.5, fly / 0.6, 10, '#ffe14a');
+      }
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.ff === Math.round(s.fdur * u);
+    if (at(0.06)) s.d.cue('drop', 1.4, 0.4);
+    if (at(0.4)) s.d.cue('whiff', 0.9, 0.7);
+    if (at(0.45)) {
+      s.d.cue('bat_crack', 1.1);
+      dust(s, s.kx + s.dir * s.kh * 0.6, s.gy, 10, 2.2);
+    }
+    if (at(0.9)) s.d.cue('coin', 1.7, 0.35);
+  },
+};
+
+// ── PILE DRIVER — both hands, straight down, floor passes the message on ──────
+
+FLOURISH_VISUALS.ground_slam = {
+  strike: 0.46,
+  reach: 'self',
+  draw(s) {
+    const t = s.ft;
+    const hoist = seg(t, 0, 0.32);
+    const hang = seg(t, 0.32, 0.4);
+    const slam = seg(t, 0.4, 0.46);
+    const held = seg(t, 0.46, 0.8);
+    const dir = s.dir;
+    aftermath(s);
+
+    const down = easeIn(slam);
+    const kp = slam > 0
+      ? poseThrust(1, down, -0.4)
+      : poseHoist(1, easeOut(hoist) * (1 + hang * 0.06));
+    if (slam > 0) {
+      // Thrust bends forward; this one wants to be driving straight down.
+      arms(kp, -0.5 + down * 1.6, 0.2, -0.55 + down * 1.65, 0.2);
+      spine(kp, 0.15 + down * 0.5, 0.1 + down * 0.35, 0.05, 0.2 + down * 0.3);
+      legs(kp, -0.3 - down * 0.2, 0.4 + down * 0.9, 0.3 + down * 0.2, 0.42 + down * 0.9, 0.2, 0.2);
+      hips(kp, 0, 0, -4 * down);
+    }
+    kill(s, 0, slam > 0 ? down * 2 : -hoist * 1.5, kp);
+
+    const topY = s.ky - s.kh * (1.5 + hang * 0.1);
+    const py = lerp(topY, s.gy - s.kh * 0.14, down);
+    const px = s.kx + dir * s.kh * 0.16;
+    if (slam > 0 && slam < 1) {
+      lineSmear(s, px, topY, px, py, Math.max(2, s.kh * 0.12), '#fff6d8', 0.5);
+    }
+    trophyTrail(s, slam > 0 && slam < 1 ? 4 : 0, (i) => {
+      const b = clamp(down - i * 0.16, 0, 1);
+      return { x: px, y: lerp(topY, s.gy - s.kh * 0.14, b), rot: Math.PI * 0.5 + i * 0.05 };
+    });
+
+    if (held > 0) {
+      const k = easeOut(held);
+      floorRing(s, s.kx, s.gy, s.kh * (0.5 + 3.2 * k), (1 - k) * 0.9);
+      floorRing(s, s.kx, s.gy, s.kh * (0.3 + 1.9 * k), (1 - k) * 0.55, '#8a8090');
+      // Cracks, radiating, drawn once and then held.
+      if (held < 0.9) {
+        s.ctx.save();
+        s.ctx.globalAlpha *= clamp(1 - held * 0.6, 0, 1);
+        for (let i = 0; i < 5; i++) {
+          const a = -Math.PI + (i / 4) * Math.PI;
+          const len = s.kh * (0.9 + hash(i * 4.3) * 1.4) * easeOut(held);
+          zigzag(
+            s.ctx,
+            s.kx, s.gy - 1,
+            s.kx + Math.cos(a) * len, s.gy - 1 - Math.sin(a) * len * 0.16,
+            2.2, 4, '#2a2530', 1.2,
+          );
+        }
+        s.ctx.restore();
+      }
+    }
+    if (hang > 0.1 && slam <= 0) {
+      shout(s, 'HRRK', s.kx + dir * 12, s.ky - s.kh * 1.8, hang, 9, '#ffe8b0');
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.ff === Math.round(s.fdur * u);
+    if (at(0.06)) s.d.cue('grunt', 0.75, 0.7);
+    if (at(0.41)) s.d.cue('whiff', 0.55);
+    if (at(0.47)) {
+      s.d.cue('explosion', 0.8, 0.8);
+      s.d.cue('land', 0.5);
+      dust(s, s.kx, s.gy, 26, 4.2);
+    }
+  },
+};
+
+// ── WHIP — thirty-three vertebrae of rawhide ─────────────────────────────────
+
+FLOURISH_VISUALS.whip = {
+  strike: 0.5,
+  reach: 'self',
+  draw(s) {
+    const t = s.ft;
+    const lash = seg(t, 0.28, 0.5);
+    const crack = seg(t, 0.5, 0.58);
+    const recoil = seg(t, 0.58, 0.86);
+    const dir = s.dir;
+    aftermath(s);
+
+    const kp = P(1);
+    const l = easeOut(lash) - recoil * 0.35;
+    spine(kp, -0.3 + l * 0.7, -0.2 + l * 0.5, 0.06, -0.14 + l * 0.4);
+    arms(kp, -0.4, 0.4, lerp(-2.3, 1.2, clamp(l, 0, 1)), lerp(0.8, 0.15, clamp(l, 0, 1)));
+    legs(kp, -0.3 + l * 0.6, 0.34, 0.4 - l * 0.5, 0.5, 0.1, 0.15);
+    hips(kp, -0.15 + l * 0.36, 0, -1.4 * clamp(l, 0, 1));
+    kill(s, 0, 0, kp);
+
+    const a0 = lerp(-2.3, 1.2, clamp(l, 0, 1));
+    const hx = handX(s, a0, 0.5);
+    const hy = handY(s, a0, 0.5);
+    // The lash: a curve whose far end travels much further than its near end,
+    // which is the whole trick — the tip is doing several times the speed of
+    // the hand and the taper is what says so.
+    const reach = s.kh * (0.4 + 2.1 * easeOut(clamp(lash, 0, 1)) * (1 - recoil * 0.7));
+    const tipX = hx + dir * reach;
+    const tipY = hy + s.kh * (0.5 - easeOut(clamp(lash, 0, 1)) * 0.7) + Math.sin(s.ff * 0.4) * 2 * (1 - lash);
+    const sag = s.kh * (0.9 * (1 - clamp(lash, 0, 1)) - crack * 0.3);
+
+    const SEGS = 12;
+    for (let i = 0; i < SEGS; i++) {
+      const u0 = i / SEGS;
+      const u1 = (i + 1) / SEGS;
+      const bend0 = Math.sin(u0 * Math.PI) * sag;
+      const bend1 = Math.sin(u1 * Math.PI) * sag;
+      const w = Math.max(0.5, s.kh * 0.055 * (1 - u0 * 0.75));
+      capsule(
+        s.ctx,
+        lerp(hx, tipX, u0), lerp(hy, tipY, u0) + bend0,
+        lerp(hx, tipX, u1), lerp(hy, tipY, u1) + bend1,
+        w,
+        s.trophy === 'arm' ? s.victim.style.jacketColor : (i & 1 ? BONE : BONE_SHADE),
+        INK,
+        1,
+      );
+    }
+    drawTrophy(s, tipX, tipY, Math.PI * 0.5 * dir, 0.7);
+
+    if (crack > 0 && crack < 1) {
+      const k = Math.sin(crack * Math.PI);
+      burst(s.ctx, tipX, tipY, s.kh * 0.6 * k, 8, '#ffffff', 0.2);
+      shout(s, 'CRACK', tipX, tipY - s.kh * 0.5, crack, 11, '#ffe14a');
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.ff === Math.round(s.fdur * u);
+    if (at(0.26)) s.d.cue('chain_whip', 0.7, 0.6);
+    if (at(0.48)) s.d.cue('whiff', 1.4, 0.5);
+    if (at(0.51)) {
+      s.d.cue('bone_crack', 1.5, 0.8);
+      s.d.cue('chain_whip', 1.5, 0.7);
+    }
+  },
+};
+
+// ── PIÑATA — bat it until it gives up its contents ───────────────────────────
+
+FLOURISH_VISUALS.pinata = {
+  strike: 0.72,
+  reach: 'self',
+  draw(s) {
+    const t = s.ft;
+    const hang = seg(t, 0, 0.14);
+    const beat = seg(t, 0.14, 0.72);
+    const burstK = seg(t, 0.72, 0.8);
+    const rain = seg(t, 0.76, 1);
+    const dir = s.dir;
+    aftermath(s);
+
+    const HITS = 4;
+    const phase = beat * HITS;
+    const idx = Math.min(HITS - 1, Math.floor(phase));
+    const swingK = phase - idx;
+    const landing = beat > 0 && beat < 1 && swingK > 0.6;
+
+    kill(s, 0, 0, beat > 0 && beat < 1 ? poseSwing(1, clamp((swingK - 0.15) / 0.6, 0, 1)) : poseReach(1, hang * 0.4));
+
+    // Strung up from somewhere above the frame, swinging further every time it
+    // is hit, which is what makes the fourth swing look like a decision.
+    const anchorX = s.kx + dir * s.kh * 0.9;
+    const anchorY = s.gy - s.kh * 3.2;
+    const amp = 0.28 + beat * 0.5;
+    const sway = Math.sin(s.ff * 0.16 + hang * 2) * amp * (1 - burstK);
+    const len = s.kh * 2.1;
+    const px = anchorX + Math.sin(sway) * len;
+    const py = anchorY + Math.cos(sway) * len;
+
+    if (burstK < 1) {
+      s.ctx.save();
+      s.ctx.globalAlpha *= 0.7;
+      capsule(s.ctx, anchorX, anchorY, px, py, 0.7, '#c8bda6', 'none');
+      s.ctx.restore();
+      const wob = landing ? 0.2 * dir : 0;
+      drawTrophy(s, px, py, sway + wob, 1 + burstK * 0.4);
+    }
+    if (landing) {
+      burst(s.ctx, px, py, s.kh * 0.4, 7, '#fff3c4', idx);
+    }
+    if (burstK > 0 && burstK < 1) {
+      const k = easeOut(burstK);
+      burst(s.ctx, px, py, s.kh * 1.4 * k, 11, '#ffd166', 0.3);
+      burst(s.ctx, px, py, s.kh * 0.9 * k, 8, '#ffffff', 1.2);
+    }
+    if (rain > 0.02) {
+      // The contents. Nobody looks at what they are, which is for the best.
+      const k = easeIn(rain);
+      for (let i = 0; i < 12; i++) {
+        const j = jitter(s.seed, i + 12);
+        const rx = px + j * s.kh * 1.5;
+        const ry = lerp(py, s.gy - 2, clamp(k * (0.6 + hash(i * 2.3) * 0.7), 0, 1));
+        ellipse(
+          s.ctx, rx, ry, 2.2, 2.8, j * 3,
+          s.gore > 0 ? BLOOD_COLORS[i % 3] : CONFETTI_COLORS[i % CONFETTI_COLORS.length],
+          INK, 0.7,
+        );
+      }
+    }
+    if (rain > 0.3) {
+      shout(s, 'OLE', s.kx + dir * 16, s.ky - s.kh * 1.4, seg(t, 0.82, 1), 11, '#ffe14a');
+    }
+  },
+  tick(s) {
+    const HITS = 4;
+    for (let i = 0; i < HITS; i++) {
+      const at = Math.round(s.fdur * (0.14 + (0.58 * (i + 0.72)) / HITS));
+      if (s.ff === at) {
+        s.d.cue(i === HITS - 1 ? 'bat_crack' : 'punch_heavy', 1.1 - i * 0.1, 0.7);
+        s.d.hit(3 + i * 1.4, 9);
+      }
+    }
+    if (s.ff === Math.round(s.fdur * 0.73)) {
+      s.d.cue('hit_flesh', 0.7);
+      s.d.cue('laugh', 1.2, 0.5);
+      confetti(s, s.kx + s.dir * 24, s.gy - s.kh * 1.6, 40);
+    }
+  },
+};
+
+// ── HOT POTATO — lobbed to a stranger who catches it before he thinks ─────────
+
+FLOURISH_VISUALS.hot_potato = {
+  strike: 0.56,
+  reach: 'point',
+  draw(s) {
+    const t = s.ft;
+    const wind = seg(t, 0, 0.18);
+    const lob = seg(t, 0.18, 0.44);
+    const hold = seg(t, 0.44, 0.56);
+    const drop = seg(t, 0.6, 0.86);
+    const dir = s.dir;
+    aftermath(s);
+
+    // Underarm, friendly, entirely without malice. That is the joke.
+    const w = easeOut(wind) * (1 - lob);
+    const f = easeOut(lob);
+    if (lob >= 1) {
+      kill(s, 0, 0, poseSmug(1, Math.sin(s.ff * 0.1)));
+    } else {
+      const kp = P(1);
+      spine(kp, 0.1 * w - 0.12 * f, 0.08 * w, 0.04, 0.1 * w);
+      arms(kp, -0.4, 0.4, -0.9 * w + f * 1.5, 0.5 - f * 0.35);
+      legs(kp, 0.14, 0.2, -0.16, 0.22);
+      kill(s, 0, 0, kp);
+    }
+
+    const hx = handX(s, -0.9 + f * 2.4, 0.48);
+    const hy = handY(s, -0.9 + f * 2.4, 0.48);
+    const catchY = s.ty - s.kh * 0.72;
+
+    if (lob > 0 && drop <= 0) {
+      const u = easeOut(lob);
+      const px = throwX(s, u, hx);
+      const py = throwY(s, u, hy, catchY, s.kh * 1.35);
+      drawTrophy(s, px, py, u * 5 * dir);
+      if (lob >= 1 && hold > 0 && hold < 1) {
+        // Held at arm's length by somebody who has just worked out what it is.
+        shout(s, hold < 0.5 ? '?' : '!', s.tx + dir * 10, catchY - s.kh * 0.5, hold, 13, '#ffe14a');
+      }
+    } else if (lob <= 0) {
+      drawTrophy(s, hx, hy, -0.3 * dir);
+    } else {
+      // Dropped, because nobody wanted it in the first place.
+      const u = easeIn(drop);
+      drawTrophy(s, s.tx + dir * 4 * u, lerp(catchY, s.ty - 3, u), lerp(0, Math.PI * 0.55 * dir, u));
+    }
+    if (drop > 0.2) {
+      shout(s, '. . .', s.kx + dir * 18, s.ky - s.kh * 1.3, drop, 9, '#cfc8e0');
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.ff === Math.round(s.fdur * u);
+    if (at(0.2)) s.d.cue('whiff', 1.3, 0.4);
+    if (at(0.45)) s.d.cue('pickup', 0.8, 0.6);
+    if (at(0.5)) s.d.cue('grunt', 1.5, 0.5);
+    if (at(0.62)) s.d.cue('drop', 0.9, 0.6);
+  },
+};
+
+// ── SOUVENIR — pockets it, walks off, nothing happens to anybody ──────────────
+
+FLOURISH_VISUALS.souvenir = {
+  // Nothing to connect with. It still needs a moment, and this is where the
+  // shrug lands: `radius: 0` means the sweep finds nobody and says so quietly.
+  strike: 0.62,
+  reach: 'self',
+  draw(s) {
+    const t = s.ft;
+    const look = seg(t, 0, 0.24);
+    const wipe = seg(t, 0.26, 0.5);
+    const pocket = seg(t, 0.54, 0.74);
+    const off = seg(t, 0.78, 1);
+    const dir = s.dir;
+    aftermath(s);
+
+    const kp = P(1);
+    const l = easeOut(look);
+    const w = wipe > 0 && wipe < 1 ? Math.sin(wipe * Math.PI * 3) * 0.22 : 0;
+    const p = easeInOut(pocket);
+    spine(kp, 0.1 * l - 0.05 * p, 0.08 * l, 0.06 * l, 0.22 * l - 0.2 * p);
+    arms(kp, -0.35 - w, 0.5, lerp(-1.35, -0.15, p) + w, lerp(1.1, 0.35, p));
+    hands(kp, -0.2, -0.3);
+    legs(kp, 0.08 + off * 0.4, 0.16, -0.1 - off * 0.4, 0.2);
+    kill(s, off > 0 ? dir * easeIn(off) * 26 : 0, 0, kp);
+
+    if (pocket < 0.85) {
+      const a = lerp(-1.35, -0.15, p);
+      const k = 1 - p * 0.35;
+      drawTrophy(s, handX(s, a, 0.46) + dir * easeIn(off) * 26, handY(s, a, 0.46), 0.2 * dir + w, k);
+    }
+    if (wipe > 0.1 && wipe < 1) {
+      // A polish. On the sleeve. Like a apple.
+      for (let i = 0; i < 3; i++) {
+        const k = clamp(wipe * 3 - i, 0, 1);
+        if (k <= 0 || k >= 1) continue;
+        star(s.ctx, handX(s, -1.2, 0.46) + i * 3 * dir, handY(s, -1.2, 0.46) - 4 - i * 2, 2.2 * Math.sin(k * Math.PI), 4, '#ffffff', 'none');
+      }
+    }
+    if (pocket > 0.4 && off <= 0) {
+      shout(s, '. . .', s.kx + dir * 16, s.ky - s.kh * 1.3, seg(t, 0.6, 0.78), 9, '#cfc8e0');
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.ff === Math.round(s.fdur * u);
+    if (at(0.3)) s.d.cue('ui_move', 1.4, 0.25);
+    if (at(0.58)) s.d.cue('pickup', 0.7, 0.6);
+    if (at(0.8)) s.d.cue('coin', 1.5, 0.35);
+  },
+};
+
+// ── ALL HANDS — backhand, backhand, backhand, all the way round ───────────────
+
+FLOURISH_VISUALS.all_hands = {
+  strike: 0.66,
+  reach: 'self',
+  draw(s) {
+    const t = s.ft;
+    const turn = seg(t, 0.08, 0.88);
+    const dir = s.dir;
+    aftermath(s);
+
+    // Deliberate rather than fast: a quarter turn, a backhand, a pause, repeat.
+    const QUARTERS = 4;
+    const step = turn * QUARTERS;
+    const idx = Math.min(QUARTERS - 1, Math.floor(step));
+    const k = step - idx;
+    const swing = clamp((k - 0.45) / 0.35, 0, 1);
+    const ang = ((idx + easeInOut(clamp(k / 0.45, 0, 1))) / QUARTERS) * TAU;
+
+    const kp = P(1);
+    spine(kp, -0.06, -0.05, 0.03, 0.06);
+    arms(kp, -0.35, 0.45, lerp(-0.4, -1.75, swing), lerp(1.5, 0.2, swing));
+    hands(kp, -0.15, -0.3);
+    legs(kp, 0.12, 0.24, -0.14, 0.26);
+    spinBody(s, ang, kp);
+
+    const r = s.kh * (0.3 + swing * 0.62);
+    const cy = s.ky - s.kh * 0.86;
+    const a = Math.cos(ang) >= 0 ? 1 : -1;
+    const px = s.kx + a * dir * r;
+    const py = cy - swing * s.kh * 0.1;
+
+    if (swing > 0.05 && swing < 1) {
+      arcSmear(
+        s, s.kx, cy, r, r * 0.3,
+        a * dir > 0 ? Math.PI * 0.9 : -0.1, a * dir > 0 ? 0.1 : Math.PI * 1.1,
+        Math.max(1.6, s.kh * 0.08), s.gore > 0 ? BLOOD_LIGHT : STEEL, 0.4,
+      );
+    }
+    trophyTrail(s, swing > 0.05 && swing < 1 ? 3 : 0, (i) => {
+      const b = clamp(swing - i * 0.12, 0, 1);
+      return {
+        x: s.kx + a * dir * s.kh * (0.3 + b * 0.62),
+        y: cy - b * s.kh * 0.1,
+        rot: (Math.PI * 0.5 + b * 0.9) * a * dir,
+      };
+    });
+    if (swing > 0.6 && swing < 1) {
+      burst(s.ctx, px, py, s.kh * 0.34, 6, '#fff3c4', idx);
+    }
+    if (t > 0.9) {
+      shout(s, 'ATTENDANCE MANDATORY', s.kx, s.ky - s.kh * 1.7, seg(t, 0.9, 1), 8, '#ffe14a');
+    }
+  },
+  tick(s) {
+    for (let i = 0; i < 4; i++) {
+      const at = Math.round(s.fdur * (0.08 + (0.8 * (i + 0.72)) / 4));
+      if (s.ff === at) {
+        s.d.cue('weapon_swing', 1.1 - i * 0.06, 0.5);
+        s.d.cue('punch_heavy', 0.9 + i * 0.05, 0.6);
+        s.d.hit(3.5 + i * 1.2, 10);
+      }
+    }
+  },
+};
+
+// ── RETURN POLICY — thrown flat, and it comes home through the same people ────
+
+FLOURISH_VISUALS.boomerang = {
+  strike: 0.44,
+  reach: 'lane',
+  draw(s) {
+    const t = s.ft;
+    const wind = seg(t, 0, 0.16);
+    const out = seg(t, 0.16, 0.5);
+    const home = seg(t, 0.5, 0.84);
+    const grab = seg(t, 0.84, 1);
+    const dir = s.dir;
+    aftermath(s);
+
+    const kp = P(1);
+    const w = easeOut(wind) * (1 - out);
+    const f = easeOut(out);
+    if (grab > 0.3) {
+      arms(kp, -0.35, 0.45, -1.3, 0.5);
+      hands(kp, 0, -0.4);
+      spine(kp, -0.05, -0.05, 0.03, 0.05);
+      legs(kp, 0.1, 0.2, -0.12, 0.22);
+    } else {
+      spine(kp, -0.2 * w + 0.24 * f, -0.14 * w + 0.16 * f, 0.05, -0.1 * w);
+      arms(kp, -0.4, 0.45, lerp(-1.9, 1.3, f) - w * 0.4, lerp(0.7, 0.15, f));
+      legs(kp, -0.2 * w + 0.3 * f, 0.3, 0.24 * w - 0.24 * f, 0.36, 0.1, 0.1);
+      hips(kp, 0.2 * f, 0, -1.1 * f);
+    }
+    kill(s, 0, 0, kp);
+
+    const hx = handX(s, lerp(-1.9, 1.3, f), 0.5);
+    const hy = handY(s, lerp(-1.9, 1.3, f), 0.5);
+    const len = Math.min(200, Math.max(90, Math.abs(s.tx - s.kx) + 40));
+
+    if (out > 0 && grab < 1) {
+      // Out low and flat, round the far end, and back at head height, so the
+      // two passes never sit on top of each other.
+      const goingOut = home <= 0;
+      const u = goingOut ? easeOut(out) : easeIn(home);
+      const px = goingOut
+        ? lerp(hx, hx + dir * len, u)
+        : lerp(hx + dir * len, hx, u);
+      const py = goingOut
+        ? lerp(hy, hy - s.kh * 0.1, u) + Math.sin(u * Math.PI) * s.kh * 0.22
+        : lerp(hy - s.kh * 0.1, hy, u) - Math.sin(u * Math.PI) * s.kh * 0.5;
+      const spun = (out * 12 + home * 12) * dir;
+
+      // The flight path, dotted, so the return reads as a return.
+      s.ctx.save();
+      s.ctx.globalAlpha *= 0.22;
+      for (let i = 0; i <= 10; i++) {
+        const b = i / 10;
+        ellipse(
+          s.ctx,
+          lerp(hx, hx + dir * len, b),
+          lerp(hy, hy - s.kh * 0.1, b) + Math.sin(b * Math.PI) * s.kh * (goingOut ? 0.22 : -0.5),
+          1.1, 1.1, 0, '#cfc8e0', 'none',
+        );
+      }
+      s.ctx.restore();
+
+      trophyTrail(s, s.reduced ? 2 : 5, (i) => {
+        const b = clamp(u - i * 0.06, 0, 1);
+        const bx = goingOut ? lerp(hx, hx + dir * len, b) : lerp(hx + dir * len, hx, b);
+        const by = goingOut
+          ? lerp(hy, hy - s.kh * 0.1, b) + Math.sin(b * Math.PI) * s.kh * 0.22
+          : lerp(hy - s.kh * 0.1, hy, b) - Math.sin(b * Math.PI) * s.kh * 0.5;
+        return { x: bx, y: by, rot: spun - i * 0.6 * dir };
+      });
+    } else if (grab >= 1) {
+      drawTrophy(s, hx, hy, -0.2 * dir);
+    } else {
+      drawTrophy(s, hx, hy, lerp(-0.4, 0.4, w) * dir);
+    }
+
+    if (grab > 0.1 && grab < 0.7) {
+      burst(s.ctx, hx, hy, s.kh * 0.3 * Math.sin((grab / 0.7) * Math.PI), 6, '#fff3c4', 0.6);
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.ff === Math.round(s.fdur * u);
+    if (at(0.17)) s.d.cue('whiff', 0.8);
+    if (s.ff > s.fdur * 0.18 && s.ff < s.fdur * 0.84 && s.ff % 6 === 0) {
+      s.d.cue('chain_whip', 1.5, 0.12);
+    }
+    if (at(0.86)) s.d.cue('pickup', 0.9, 0.6);
+  },
+};
+
+// ── SLAM DUNK — up, hang there too long, down onto somebody's head ────────────
+
+FLOURISH_VISUALS.slam_dunk = {
+  strike: 0.62,
+  reach: 'point',
+  draw(s) {
+    const t = s.ft;
+    const crouch = seg(t, 0, 0.16);
+    const rise = seg(t, 0.16, 0.42);
+    const hang = seg(t, 0.42, 0.58);
+    const down = seg(t, 0.58, 0.64);
+    const land = seg(t, 0.64, 0.86);
+    const dir = s.dir;
+    aftermath(s);
+
+    // Toward the target and up, hang, then everything down at once.
+    const travel = easeInOut(clamp(rise + down * 0.4, 0, 1));
+    const kx = lerp(s.kx, s.tx - s.dir * s.kh * 0.5, travel);
+    const air = easeOut(rise) * (1 - easeIn(down)) - crouch * 0.06;
+    // The landing bounce, which is the only reason the floor reads as solid.
+    const ky = s.ky - air * s.kh * 1.35 + (land > 0 && land < 1 ? Math.sin(land * Math.PI) * 2 : 0);
+
+    const kp = air > 0.1 ? poseHoist(1, clamp(air * 1.4, 0, 1)) : poseKneel(1, crouch * 0.5);
+    if (down > 0 && land <= 0) {
+      const d = easeIn(down);
+      arms(kp, -2.1 + d * 3.4, 0.2, -2.15 + d * 3.45, 0.2);
+      spine(kp, -0.2 + d * 0.9, -0.14 + d * 0.6, 0.05, -0.2 + d * 0.7);
+      legs(kp, 0.6, 1.1, 0.5, 1.0, 0.3, 0.3);
+    }
+    actor(s, s.killer, kx, ky, kp, s.dir, s.ks);
+
+    const armAng = air > 0.1 && down <= 0 ? -2.2 : lerp(-2.2, 1.1, easeIn(down));
+    const px = kx + dir * (s.kh * 0.05 + Math.sin(armAng) * s.kh * 0.52);
+    const py = ky - s.kh * 0.78 + Math.cos(armAng) * s.kh * 0.52;
+
+    if (hang > 0.1 && down <= 0) {
+      // The hang. Held one beat longer than physics would like.
+      s.ctx.save();
+      s.ctx.globalAlpha *= 0.3 * Math.sin(hang * Math.PI);
+      for (let i = 1; i <= 3; i++) {
+        ellipse(s.ctx, kx, ky + i * 5, s.kh * 0.3, s.kh * 0.05, 0, '#cfc8e0', 'none');
+      }
+      s.ctx.restore();
+    }
+    if (down > 0 && down < 1) {
+      lineSmear(s, px, py - s.kh * 0.9, px, py, Math.max(2, s.kh * 0.12), '#fff6d8', 0.5);
+    }
+    drawTrophy(s, px, py, armAng * dir + Math.PI * (down > 0.5 ? 0.5 : 0));
+
+    if (land > 0 && land < 1) {
+      const k = easeOut(land);
+      floorRing(s, kx + dir * s.kh * 0.4, s.gy, s.kh * (0.4 + 2.4 * k), (1 - k) * 0.85);
+      burst(s.ctx, px, py, s.kh * 0.8 * (1 - k), 9, '#fff3c4', 0.9);
+    }
+    if (land > 0.3) {
+      shout(s, 'TWO POINTS', kx + dir * 20, ky - s.kh * 1.6, seg(t, 0.7, 1), 9, '#ffe14a');
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.ff === Math.round(s.fdur * u);
+    if (at(0.17)) s.d.cue('jump', 0.9, 0.7);
+    if (at(0.59)) s.d.cue('whiff', 0.6);
+    if (at(0.63)) {
+      s.d.cue('bone_crack', 0.7);
+      s.d.cue('land', 0.6);
+      dust(s, s.tx, s.gy, 18, 3);
+    }
+  },
+};
+
+// ── DRUM SOLO — two guards, one femur, alternating ───────────────────────────
+
+FLOURISH_VISUALS.drum_solo = {
+  strike: 0.5,
+  reach: 'self',
+  draw(s) {
+    const t = s.ft;
+    const ready = seg(t, 0, 0.1);
+    const solo = seg(t, 0.1, 0.86);
+    const finish = seg(t, 0.88, 1);
+    const dir = s.dir;
+    aftermath(s);
+
+    const TAPS = 9;
+    const phase = solo * TAPS;
+    const idx = Math.min(TAPS - 1, Math.floor(phase));
+    const k = phase - idx;
+    const side = idx & 1 ? -1 : 1;
+    const lift = solo > 0 && solo < 1 ? 1 - Math.sin(clamp(k / 0.62, 0, 1) * Math.PI * 0.5) : 1;
+
+    const kp = P(1);
+    const bob = solo > 0 && solo < 1 ? Math.sin(phase * Math.PI * 2) * 0.06 : 0;
+    spine(kp, -0.08 + bob, -0.06, 0.04, 0.1 + bob * 2);
+    arms(
+      kp,
+      lerp(-0.5, -1.5, side < 0 ? lift : 0.15) - ready * 0.1,
+      0.6,
+      lerp(-0.5, -1.5, side > 0 ? lift : 0.15),
+      0.55,
+    );
+    hands(kp, -0.2, -0.2);
+    legs(kp, 0.1, 0.2, -0.12, 0.22);
+    kill(s, 0, solo > 0 && solo < 1 ? bob * 8 : 0, kp);
+
+    // Two heads' worth of drum, implied rather than drawn: the crowd is real
+    // and already on screen, so this only owes the eye the impacts.
+    for (let i = -1; i <= 1; i += 2) {
+      const dx2 = s.kx + i * dir * s.kh * 0.66;
+      const dy2 = s.ky - s.kh * 0.92;
+      if (i === side && solo > 0 && solo < 1 && k > 0.55) {
+        const hitK = clamp((k - 0.55) / 0.3, 0, 1);
+        burst(s.ctx, dx2, dy2, s.kh * 0.3 * (1 - hitK), 6, '#fff3c4', idx);
+        // A note, leaving. It has nowhere to be.
+        s.ctx.save();
+        s.ctx.globalAlpha *= 1 - hitK;
+        const ny = dy2 - hitK * 16;
+        ellipse(s.ctx, dx2 + 4, ny, 2, 1.5, -0.4, '#ffe14a', INK, 0.7);
+        capsule(s.ctx, dx2 + 5.6, ny - 0.6, dx2 + 5.6, ny - 6, 0.5, '#ffe14a', 'none');
+        s.ctx.restore();
+      }
+    }
+
+    trophyTrail(s, s.reduced ? 1 : 3, (i) => {
+      const b = clamp(lift + i * 0.12, 0, 1);
+      const a2 = lerp(-0.5, -1.5, b);
+      return {
+        x: s.kx + side * dir * (s.kh * 0.06 + Math.sin(a2) * s.kh * 0.46) * -1,
+        y: s.ky - s.kh * 0.78 + Math.cos(a2) * s.kh * 0.46,
+        rot: (Math.PI * 0.35 + b * 0.5) * side * dir,
+        k: 0.85,
+      };
+    });
+
+    if (finish > 0.1) {
+      shout(s, 'TSS', s.kx + dir * 22, s.ky - s.kh * 1.45, finish, 10, '#dff2ff');
+    }
+  },
+  tick(s) {
+    const TAPS = 9;
+    for (let i = 0; i < TAPS; i++) {
+      const at = Math.round(s.fdur * (0.1 + (0.76 * (i + 0.72)) / TAPS));
+      if (s.ff === at) {
+        s.d.cue('punch_light', 1.5 - (i & 1) * 0.35, 0.4);
+        s.d.hit(1.8, 6);
+      }
+    }
+    if (s.ff === Math.round(s.fdur * 0.9)) {
+      s.d.cue('hit_metal', 1.9, 0.35);
+      s.d.cue('laugh', 1.1, 0.4);
+    }
+  },
+};
+
+// ── MASCOT — wears it, bows, holds the bow far too long ───────────────────────
+
+FLOURISH_VISUALS.mascot = {
+  strike: 0.66,
+  reach: 'self',
+  draw(s) {
+    const t = s.ft;
+    const raise = seg(t, 0, 0.22);
+    const wear = seg(t, 0.22, 0.34);
+    const pose2 = seg(t, 0.36, 0.56);
+    const bow = seg(t, 0.6, 0.7);
+    const hold = seg(t, 0.7, 1);
+    const dir = s.dir;
+    aftermath(s);
+
+    const b = easeOut(bow) * (1 - hold * 0.06);
+    const kp = P(1);
+    if (bow > 0) {
+      // The bow. From the waist. Held.
+      spine(kp, 0.95 * b, 0.6 * b, 0.2 * b, 0.5 * b);
+      arms(kp, -0.4 - b * 0.6, 0.4, 1.3 * b - 0.4, 0.3);
+      legs(kp, 0.1, 0.24 + b * 0.2, -0.12, 0.26 + b * 0.2);
+      hips(kp, 0.3 * b, 0, -1.4 * b);
+    } else {
+      const p = easeOutBack(clamp(pose2, 0, 1));
+      const u = easeOut(raise) * (1 - wear);
+      spine(kp, -0.12 * p, -0.1 * p, -0.06, -0.16 * p);
+      arms(kp, lerp(-0.4, -1.9, p) - u * 0.4, 0.35, lerp(-2.2 * (1 - wear) - 0.2, -1.95, p), 0.3);
+      hands(kp, -0.25, -0.25);
+      legs(kp, -0.16 * p, 0.2, 0.2 * p, 0.24);
+    }
+    kill(s, 0, 0, kp);
+
+    // On the head — which means on the HAT, which is where the rig keeps it.
+    const headX = s.kx + dir * s.kh * 0.04;
+    const headY = s.ky - s.kh * (1.02 + (bow > 0 ? -0.28 * b : 0));
+    if (wear >= 1) {
+      const wobble = s.reduced ? 0 : Math.sin(s.ff * 0.18) * 0.05;
+      const bowLean = bow > 0 ? b * 0.9 * dir : 0;
+      drawTrophy(s, headX + bowLean * s.kh * 0.4, headY + b * s.kh * 0.5, wobble * dir + bowLean, 1.05);
+    } else {
+      const u = easeOut(Math.max(raise * 0.6, wear));
+      const fromA = -2.2;
+      drawTrophy(
+        s,
+        lerp(handX(s, fromA, 0.5), headX, u),
+        lerp(handY(s, fromA, 0.5), headY, u),
+        lerp(0.5 * dir, 0, u),
+        1.05,
+      );
+    }
+
+    if (pose2 > 0.2 && bow <= 0) {
+      // Jazz hands, at a funeral.
+      for (let i = 0; i < 4; i++) {
+        const k = clamp(pose2 * 2 - i * 0.3, 0, 1);
+        if (k <= 0 || k >= 1) continue;
+        star(
+          s.ctx,
+          s.kx + (i - 1.5) * s.kh * 0.4,
+          s.ky - s.kh * (1.5 + i * 0.1),
+          3 * Math.sin(k * Math.PI),
+          5, '#ffe14a', 'none',
+        );
+      }
+    }
+    if (hold > 0.3) {
+      shout(s, '. . .', s.kx + dir * 24, s.ky - s.kh * 0.9, seg(t, 0.8, 1), 10, '#cfc8e0');
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.ff === Math.round(s.fdur * u);
+    if (at(0.24)) s.d.cue('pickup', 0.8, 0.6);
+    if (at(0.4)) s.d.cue('ui_select', 1.2, 0.4);
+    if (at(0.62)) s.d.cue('laugh', 0.9, 0.6);
+    if (at(0.68)) s.d.hit(3, 12);
+    if (at(0.86)) s.d.cue('ui_error', 0.6, 0.4);
   },
 };

@@ -178,6 +178,13 @@ export class HomeScene implements Scene {
   /** Unsubscribe for the keyboard-layout watch. See onLayoutSettled(). */
   private layoutOff: (() => void) | null = null;
 
+  /**
+   * The one line on the Controls page that prints a key name of its own. Kept
+   * so a layout landing late can rewrite it in place — rebuilding the page would
+   * yank the binding editor out from under whoever is using it.
+   */
+  private controlsNote: HTMLElement | null = null;
+
   private navHeld = 0;
   private navTimer = 0;
 
@@ -549,6 +556,7 @@ export class HomeScene implements Scene {
   }
 
   private detachRoot(): void {
+    this.controlsNote = null;
     if (!this.root) return;
     this.root.removeEventListener('keydown', this.onViewKey);
     this.root = null;
@@ -735,15 +743,28 @@ export class HomeScene implements Scene {
       slots: [0, 1],
       onChange: (next) => {
         this.game.applyBindings(next);
+        // The footnote names the interact key, so a player who has just moved it
+        // must not be left reading about where it used to be.
+        if (this.controlsNote) this.controlsNote.textContent = this.controlsNoteText();
         this.game.audio.play('ui_select', { gain: 0.5 });
       },
     });
 
     const notes = document.createElement('p');
     notes.className = 'hint';
-    notes.textContent =
-      'Double-tap a direction to dash. Block on the exact frame a hit lands to parry it and steal meter. ' +
-      'Players 3 and 4 need gamepads — plug them in and press a button.';
+    notes.textContent = this.controlsNoteText();
+    this.controlsNote = notes;
+
+    // The pad table below lists the right trigger, because Super is a move like
+    // any other. Pick up / Use is the one action whose pad control the table
+    // cannot show you a letter for until something is plugged in, and it is
+    // also the newest, so it gets said in words as well.
+    const padNote = document.createElement('p');
+    padNote.className = 'hint';
+    padNote.textContent =
+      'Pick up, swap and get on things with the LEFT TRIGGER — your pad calls it LT, ZL or L2 ' +
+      'depending on who made it, and the table below names it the way yours does. The right ' +
+      'trigger is your super.';
 
     const view = document.createElement('div');
     view.className = 'stack';
@@ -751,7 +772,7 @@ export class HomeScene implements Scene {
     // The same rule, printed for the other kind of controller: the pad panel
     // reads whatever is plugged in and names its buttons the way that pad names
     // them, and repaints itself when one is plugged in or pulled out.
-    view.appendChild(panel('Gamepad', gamepadPanel()));
+    view.appendChild(panel('Gamepad', padNote, gamepadPanel()));
     // No autofocus here, unlike the other pages: the point of this one is the
     // editor, so focus lands at the top of it rather than on the way out.
     view.appendChild(button('Back', () => this.go('menu'), { variant: 'tonal', wide: true }));
@@ -805,6 +826,25 @@ export class HomeScene implements Scene {
     return code ? keyLabel(code) : '—';
   }
 
+  /**
+   * The footnote under the binding editor.
+   *
+   * It names the interact key because that is the one action on the list whose
+   * existence is the news — weapons used to be collected by walking over them,
+   * which quietly did nothing once your hands were full, and vehicles could not
+   * be mounted at all. The key comes from the live binding through keyFor(), so
+   * it is correct on an AZERTY board and correct after a rebind.
+   */
+  private controlsNoteText(): string {
+    const use = this.keyFor(0, Btn.Interact);
+    return (
+      'Double-tap a direction to dash. Block on the exact frame a hit lands to parry it and steal ' +
+      `meter. ${use} takes the weapon at your feet — press it over another one to trade up, over a ` +
+      'bike or a truck to get on, and with nothing in reach to put down what you are carrying. ' +
+      'Players 3 and 4 need gamepads — plug them in and press a button.'
+    );
+  }
+
   /** The movement diamond as one word: 'WASD', 'ZQSD', 'Arrows', 'I/J/K/L'. */
   private moveKeys(slot: number): string {
     const map = this.bindingsFor(slot);
@@ -820,13 +860,21 @@ export class HomeScene implements Scene {
   }
 
   /**
-   * Detection landed, or the player switched keyboard mid-session. Only the
-   * multiplayer page prints key names of its own; the Controls page is the
-   * binding editor, which repaints itself and must not be rebuilt underneath a
-   * player who is halfway through pressing a key at it.
+   * Detection landed, or the player switched keyboard mid-session.
+   *
+   * The multiplayer page is rebuilt outright — it is three buttons and a
+   * sentence. The Controls page is not: it is the binding editor, which
+   * repaints itself and must not be rebuilt underneath a player who is halfway
+   * through pressing a key at it. Its one hand-written key name is patched in
+   * place instead.
    */
   private onLayoutSettled(): void {
-    if (!this.root || this.view !== 'multiplayer') return;
+    if (!this.root) return;
+    if (this.view === 'controls') {
+      if (this.controlsNote) this.controlsNote.textContent = this.controlsNoteText();
+      return;
+    }
+    if (this.view !== 'multiplayer') return;
     this.show('multiplayer');
   }
 

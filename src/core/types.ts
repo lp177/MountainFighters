@@ -125,6 +125,14 @@ export const Btn = {
    * next frame instead of never.
    */
   Analog: 1 << 13,
+  /**
+   * Pick it up, swap it, get on it, get off it.
+   *
+   * Weapons used to be collected by walking over them, which silently did
+   * nothing once your hands were full — so there was no way to trade a spent
+   * chain for the bat at your feet, and no way to mount anything at all.
+   */
+  Interact: 1 << 14,
 } as const;
 
 export type BtnMask = number;
@@ -1032,5 +1040,54 @@ export interface FatalityDef {
   gore: 'light' | 'heavy' | 'absurd';
   /** Bespoke renderer id, resolved by the fatality director. */
   visual: string;
+  sfx: SfxCue[];
+  /**
+   * What the killer is left holding when it is over.
+   *
+   * A finisher that ends with a spine in your hands and then quietly drops it
+   * wastes the best prop in the game — the trophy is what the follow-through
+   * swings, throws or bowls into whoever is still standing.
+   */
+  trophy?: TrophyKind;
+}
+
+export type TrophyKind =
+  | 'none'
+  | 'spine'
+  | 'heart'
+  | 'arm'
+  | 'leg'
+  | 'head'
+  | 'hat'
+  | 'torso'
+  | 'object'; // a keyboard, a door, whatever the kill involved
+
+/**
+ * The flourish after a fatality: what the killer does with the trophy while
+ * everyone else is still watching.
+ *
+ * Exists because a fatality in a crowded room used to be a private event — the
+ * victim died spectacularly and the six enemies around them stood and waited
+ * their turn. Swinging a torn-off leg through the lot of them is both funnier
+ * and better as a game: it rewards finishing someone in the middle of a pack.
+ */
+export interface FatalityFlourish {
+  id: string;
+  /** Goes on the banner under the fatality's own name. */
+  name: string;
+  /** Bespoke renderer id, resolved by the fatality director. */
+  visual: string;
+  duration: number;
+  /** Sweep radius in world units. -1 means everyone on screen. */
+  radius: number;
+  /** Damage to each fighter caught. Small on purpose: this is a bonus, not a nuke. */
+  damage: number;
+  /** What it does to everyone caught — usually a knockdown. */
+  reaction: HitReaction;
+  /** Trophies this works with. Empty means any. */
+  trophies?: TrophyKind[];
+  /** Relative odds. The rare ones are the surprise. */
+  weight: number;
+  gore: 'light' | 'heavy' | 'absurd';
   sfx: SfxCue[];
 }

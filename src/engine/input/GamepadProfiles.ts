@@ -70,7 +70,16 @@ export interface PadProfile {
   l2Axis?: number;
   r2Axis?: number;
 
-  /** Face-button LETTERS at each position, for the UI. Never for bindings. */
+  /**
+   * What is PRINTED on the control at each position, for the UI. Never for
+   * bindings.
+   *
+   * The triggers earn their entries here: `l2` carries Interact (pick up, swap,
+   * mount) and `r2` carries Super, so a controls screen prints both, and it
+   * prints what the pad in the player's hands actually says — LT on an Xbox
+   * pad, ZL on a Nintendo one, L2 on a DualSense or a Steam Deck. The position
+   * is identical on all four; only the engraving moves.
+   */
   labels: {
     south: string;
     east: string;

@@ -42,6 +42,7 @@ import type {
   Rng,
   SimContext,
   Team,
+  VehicleSection,
   VoiceProfile,
   WeaponKind,
 } from '@/core/types';
@@ -92,6 +93,23 @@ const OUTRO_FRAMES = 110;
 const PICKUP_LIFE = 1500;
 const PICKUP_REACH_X = 15;
 const PICKUP_REACH_Z = 13;
+/**
+ * How far a deliberate reach goes.
+ *
+ * Wider than PICKUP_REACH, which is the radius at which health walks into you
+ * by itself. This one is answering a button press, so it may be generous: a
+ * prompt that is visible and a key that does nothing is the worst of both.
+ */
+const INTERACT_REACH_X = 26;
+const INTERACT_REACH_Z = 18;
+const VEHICLE_REACH_X = 38;
+const VEHICLE_REACH_Z = 26;
+/** Below this the vehicle is parking, not ramming. */
+const RAM_SPEED = 3.2;
+/** Frames before the same body may be run over again. */
+const RAM_COOLDOWN = 26;
+/** Gap between vehicles when a whole couch turns up wanting one each. */
+const VEHICLE_SPACING = 54;
 /** How far in front of a swing a prop can be and still get wrecked. */
 const PROP_REACH_X = 40;
 const PROP_REACH_Z = 24;
@@ -138,6 +156,72 @@ const WEAPON_POOL: Partial<Record<EnemyKind, WeaponKind[]>> = {
 };
 
 const BEARDS: RigStyle['beardStyle'][] = ['none', 'stubble', 'bushy', 'forked'];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Vehicles
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface VehicleTuning {
+  /** Speed multiplier handed to `Fighter.setRiding`. */
+  speed: number;
+  /** Shown on the pickup prompt and on the mount flourish. */
+  name: string;
+  /** How far in front of the middle the business end reaches. */
+  nose: number;
+  /** Damage multiplier for running somebody over. */
+  ram: number;
+  /** Chassis, trim and lamp. */
+  body: string;
+  trim: string;
+  lamp: string;
+}
+
+/**
+ * The four things a map may put in your way, and how each of them drives.
+ *
+ * Only `moto` is used by the hand-authored maps, so it is the one that had to
+ * be good; the other three are on the generated campaign cadence and each gets
+ * a silhouette of its own rather than a bike with a different label.
+ */
+const VEHICLE_KINDS: Record<VehicleSection['kind'], VehicleTuning> = {
+  moto: { speed: 1, name: 'MOTO', nose: 24, ram: 1, body: '#c8402f', trim: '#f2f0ea', lamp: '#ffe6a8' },
+  cybertruck: {
+    speed: 0.88,
+    name: 'TRUCK',
+    nose: 34,
+    ram: 1.5,
+    body: '#b9bec8',
+    trim: '#7d8492',
+    lamp: '#ff5b4a',
+  },
+  hyperloop_pod: {
+    speed: 1.2,
+    name: 'POD',
+    nose: 30,
+    ram: 1.15,
+    body: '#dfe6f2',
+    trim: '#5fd0ff',
+    lamp: '#8fe3ff',
+  },
+  rocket: {
+    speed: 1.4,
+    name: 'ROCKET',
+    nose: 32,
+    ram: 1.35,
+    body: '#eef1f6',
+    trim: '#2f3644',
+    lamp: '#ff9c3d',
+  },
+};
+
+/** What a fighter would interact with right now. Consumed by the HUD prompt. */
+export interface InteractTarget {
+  kind: 'weapon' | 'vehicle';
+  /** Short noun for the thing itself: 'BAT', 'MOTO'. */
+  label: string;
+  /** What the press would actually do, for a prompt that wants a verb. */
+  action: 'take' | 'swap' | 'drop' | 'mount' | 'dismount';
+}
 
 /**
  * Wardrobe. Scaling a near-black suit only ever produces another near-black
@@ -233,6 +317,28 @@ interface Pickup {
   vy: number;
   life: number;
   spin: number;
+  /**
+   * Wear carried by THIS instance. A chain dropped with two swings left is
+   * still a chain with two swings left when it is picked back up — otherwise
+   * dropping and retaking a weapon would be a free repair.
+   */
+  durability: number;
+  ammo: number;
+}
+
+interface Vehicle {
+  kind: VehicleSection['kind'];
+  x: number;
+  z: number;
+  facing: Facing;
+  /** Signed speed. Mirrors the rider while ridden, coasts to a stop after. */
+  vx: number;
+  rider: Fighter | null;
+  /** Wheel rotation, kept inside one turn so it cannot drift into the floats. */
+  spin: number;
+  /** Mirrored off the rider each frame; presentation only. */
+  wheelie: number;
+  skid: number;
 }
 
 interface Projectile {
@@ -259,6 +365,10 @@ const D_PROP = 0;
 const D_PICKUP = 1;
 const D_FIGHTER = 2;
 const D_PROJ = 3;
+/** The chassis, drawn under its rider. */
+const D_VEHICLE = 4;
+/** Bars, glass and light bar — the bits that belong IN FRONT of the rider. */
+const D_VEHICLE_FRONT = 5;
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -276,6 +386,10 @@ export class Level {
   private readonly props: Prop[] = [];
   private readonly pickups: Pickup[] = [];
   private readonly projectiles: Projectile[] = [];
+  private readonly vehicles: Vehicle[] = [];
+
+  /** Frames before a given body may be run over again, by fighter id. */
+  private readonly ramCooldown = new Map<number, number>();
 
   private readonly lives = new Map<number, number>();
   private readonly respawn = new Map<number, number>();
@@ -304,6 +418,8 @@ export class Level {
   private bossTuning: AiTuning | null = null;
   private phase = 0;
   private cardTimer = 0;
+  /** Set once when the boss walks on; consumed by takeBossStart(). */
+  private bossStarted = false;
   private outro = 0;
 
   private _complete = false;
@@ -352,6 +468,8 @@ export class Level {
       });
     }
 
+    this.buildVehicles();
+
     this.bossDef = def.boss ? (BOSSES.find((b) => b.id === def.boss) ?? null) : null;
     this.rebuildRoster();
     this.audio.music(def.music);
@@ -363,6 +481,21 @@ export class Level {
 
   get failed(): boolean {
     return this._failed;
+  }
+
+  /**
+   * Returns the boss exactly once, on the frame it arrives, so the scene can
+   * play its introduction. Consuming it clears the flag.
+   */
+  takeBossStart(): BossDef | null {
+    if (!this.bossStarted) return null;
+    this.bossStarted = false;
+    return this.bossDef ?? null;
+  }
+
+  /** Where the boss is standing, for the introduction to frame it. */
+  get bossPos(): { x: number; z: number } | null {
+    return this.boss ? { x: this.boss.f.pos.x, z: this.boss.f.pos.z } : null;
   }
 
   get bossActive(): boolean {
@@ -472,6 +605,10 @@ export class Level {
     if (this.boss) this.updateBoss(ctx);
 
     this.updateProps(ctx);
+    // Reaching for something happens before the vehicles move, so mounting is
+    // answered on the frame it was asked for rather than one behind.
+    this.updateInteract(ctx);
+    this.updateVehicles(ctx);
     this.updatePickups();
     this.updateProjectiles(ctx);
 
@@ -518,7 +655,21 @@ export class Level {
       }
       case 'weapon': {
         const w = weaponOf(d.kind ?? d.weapon);
-        if (w) this.dropWeapon(w, x, y, zz, numberOf(d.vy, 3));
+        // Durability and ammo ride along when a fighter throws one down, so a
+        // weapon that has been used stays used.
+        if (w) {
+          this.dropWeapon(
+            w,
+            x,
+            y,
+            zz,
+            numberOf(d.vy, 3),
+            typeof d.durability === 'number' && Number.isFinite(d.durability)
+              ? d.durability
+              : undefined,
+            typeof d.ammo === 'number' && Number.isFinite(d.ammo) ? d.ammo : undefined,
+          );
+        }
         break;
       }
       case 'health':
@@ -878,6 +1029,9 @@ export class Level {
       z: this.def.depth * 0.5,
       style: bd.style,
       skeleton: bd.rigOverride === 'shiba' ? DWARF_SKELETON : HUMAN_SKELETON,
+      // What actually draws this boss. Without it every non-humanoid boss was
+      // rendered as a person: the Shiba was a spiky orange dwarf.
+      bossRig: bd.rigOverride,
       health: bd.health,
       speed: 1.05,
       power: 1.35,
@@ -911,7 +1065,11 @@ export class Level {
     this.units.push(this.boss);
     this.rebuildRoster();
 
-    this.cardTimer = BOSS_CARD_FRAMES;
+    // The old card was a 190-frame text plate over a fight that had already
+    // started behind it — unreadable, and it hid the thing you needed to watch.
+    // FightScene now plays a cinematic instead and waits for a keypress.
+    this.cardTimer = 0;
+    this.bossStarted = true;
     this.audio.music(bd.music);
     this.audio.play('super_charge');
     this.fx.flash('#ffffff', 8, 0.5);
@@ -1149,6 +1307,367 @@ export class Level {
     }
   }
 
+  // ── interaction ────────────────────────────────────────────────────────────
+
+  /**
+   * Answer whatever the interact button asked for.
+   *
+   * Weapons used to be hoovered up by walking over them, and the collection was
+   * skipped outright once your hands were full — so an armed player could not
+   * trade a spent chain for the bat at their feet, and there was no way to get
+   * on anything at all. This is that key.
+   *
+   * The order of the answers is the order of the stakes: get off the thing you
+   * are riding, get on the thing next to you, take (or trade) the weapon at
+   * your feet, and failing all three, put down what you are holding. That last
+   * one is not a fallback for its own sake — going bare-fisted on purpose is a
+   * real choice, and a key that always does SOMETHING is a key players trust.
+   *
+   * A press that finds nothing is deliberately NOT consumed: it sits in the
+   * fighter's buffer for a few frames, so pressing just before you reach the
+   * bat still picks the bat up.
+   */
+  private updateInteract(ctx: SimContext): void {
+    for (const p of this.players) {
+      if (!p.interactPending) continue;
+
+      if (p.riding) {
+        const v = this.vehicleOf(p);
+        if (v) this.dismount(v);
+        else p.setRiding(false);
+        p.consumeInteract();
+        continue;
+      }
+
+      // Mid-swing, mid-flinch, on the floor or in the air: not now. The press
+      // stays buffered and lands the moment the body is free.
+      if (!p.canInteract) continue;
+
+      const v = this.vehicleNear(p);
+      if (v) {
+        this.mount(p, v, ctx);
+        p.consumeInteract();
+        continue;
+      }
+
+      const i = this.weaponNear(p);
+      if (i >= 0) {
+        this.takeWeapon(i, p, ctx);
+        p.consumeInteract();
+        continue;
+      }
+
+      if (p.weapon) {
+        p.dropWeapon(ctx);
+        p.consumeInteract();
+      }
+    }
+  }
+
+  /**
+   * What this fighter would interact with right now, or null.
+   *
+   * Cheap enough to call once per player per frame from the HUD: two short
+   * linear scans over things there are single digits of.
+   */
+  interactTargetFor(f: Fighter): InteractTarget | null {
+    if (f.riding) {
+      const v = this.vehicleOf(f);
+      return { kind: 'vehicle', label: v ? VEHICLE_KINDS[v.kind].name : 'RIDE', action: 'dismount' };
+    }
+    if (!f.canInteract) return null;
+
+    const v = this.vehicleNear(f);
+    if (v) return { kind: 'vehicle', label: VEHICLE_KINDS[v.kind].name, action: 'mount' };
+
+    const i = this.weaponNear(f);
+    if (i >= 0) {
+      return {
+        kind: 'weapon',
+        label: weaponName(this.pickups[i].weapon),
+        action: f.weapon ? 'swap' : 'take',
+      };
+    }
+    if (f.weapon) return { kind: 'weapon', label: weaponName(f.weapon), action: 'drop' };
+    return null;
+  }
+
+  /** Index of the nearest weapon lying within reach, or -1. */
+  private weaponNear(f: Fighter): number {
+    let best = -1;
+    let bestD = Infinity;
+    for (let i = 0; i < this.pickups.length; i++) {
+      const it = this.pickups[i];
+      if (it.kind !== 'weapon' || !it.weapon) continue;
+      // Still bouncing: let it land first.
+      if (it.y > 10) continue;
+      const dx = Math.abs(it.x - f.pos.x);
+      if (dx > INTERACT_REACH_X) continue;
+      const dz = Math.abs(it.z - f.pos.z);
+      if (dz > INTERACT_REACH_Z) continue;
+      const d = dx + dz * 0.8;
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Take the weapon at index `i`, trading away whatever is already in hand.
+   *
+   * The old one is dropped as a REAL pickup — same entity, same wear — before
+   * the new one is taken, which is the whole point of the exchange. Order
+   * matters only in that the drop appends to `pickups`, so `i` still refers to
+   * the weapon being taken when it is spliced out.
+   */
+  private takeWeapon(i: number, p: Fighter, ctx: SimContext): void {
+    const it = this.pickups[i];
+    if (!it || it.kind !== 'weapon' || !it.weapon) return;
+    if (p.weapon) p.dropWeapon(ctx);
+    this.collect(it, p);
+    const at = this.pickups.indexOf(it);
+    if (at >= 0) this.pickups.splice(at, 1);
+  }
+
+  // ── vehicles ───────────────────────────────────────────────────────────────
+
+  /**
+   * Park the map's vehicles in its VehicleSection.
+   *
+   * One each. A four-player couch fighting over a single bike is not a treat,
+   * it is a queue — and the section is wide enough that spacing them out costs
+   * nothing.
+   */
+  private buildVehicles(): void {
+    const spec = this.def.vehicle;
+    if (!spec) return;
+    if (!(spec.kind in VEHICLE_KINDS)) return;
+
+    const w = this.def.width;
+    const from = clamp(Math.min(spec.from, spec.to), 0, 1) * w;
+    const to = clamp(Math.max(spec.from, spec.to), 0, 1) * w;
+    const last = Math.max(from, to - 24);
+    const n = clamp(this.players.length, 1, 4);
+
+    for (let i = 0; i < n; i++) {
+      const x = clamp(Math.min(from + 34 + i * VEHICLE_SPACING, last), 20, w - 20);
+      this.vehicles.push({
+        kind: spec.kind,
+        x,
+        z: clamp(this.def.depth * (0.42 + i * 0.13), 4, this.def.depth - 4),
+        facing: 1,
+        vx: 0,
+        rider: null,
+        spin: 0,
+        wheelie: 0,
+        skid: 0,
+      });
+    }
+  }
+
+  private vehicleOf(f: Fighter): Vehicle | null {
+    for (const v of this.vehicles) {
+      if (v.rider === f) return v;
+    }
+    return null;
+  }
+
+  /** The nearest unridden vehicle within reach, or null. */
+  private vehicleNear(f: Fighter): Vehicle | null {
+    let best: Vehicle | null = null;
+    let bestD = Infinity;
+    for (const v of this.vehicles) {
+      if (v.rider) continue;
+      const dx = Math.abs(v.x - f.pos.x);
+      if (dx > VEHICLE_REACH_X) continue;
+      const dz = Math.abs(v.z - f.pos.z);
+      if (dz > VEHICLE_REACH_Z) continue;
+      const d = dx + dz * 0.8;
+      if (d < bestD) {
+        bestD = d;
+        best = v;
+      }
+    }
+    return best;
+  }
+
+  private mount(p: Fighter, v: Vehicle, ctx: SimContext): void {
+    const tune = VEHICLE_KINDS[v.kind];
+    v.rider = p;
+    v.x = p.pos.x;
+    v.z = p.pos.z;
+    v.facing = p.facing;
+    v.vx = 0;
+    p.setRiding(true, tune.speed);
+
+    this.audio.play('engine', { pan: this.pan(v.x), gain: 0.9 });
+    this.fx.text({
+      text: tune.name,
+      x: p.pos.x,
+      y: 62,
+      z: p.pos.z,
+      color: tune.lamp,
+      size: 11,
+      life: 46,
+      rise: 0.4,
+      style: 'bonus',
+    });
+    this.fx.shake({ magnitude: 3, duration: 12 });
+    this.fx.particles({
+      count: 10,
+      x: v.x - v.facing * 16,
+      y: 6,
+      z: v.z,
+      angle: v.facing > 0 ? Math.PI : 0,
+      spread: 0.8,
+      speed: [0.8, 2.6],
+      life: [14, 30],
+      size: [1.6, 3.4],
+      colors: ['#c9c4d6', '#8f8aa0', '#5c5566'],
+      gravity: -0.02,
+      drag: 0.92,
+      shape: 'smoke',
+      fade: 'ease',
+    });
+    // Anything that was in the queue for this frame is not what they meant.
+    ctx.audio.voice(p.voice, 'taunt');
+  }
+
+  /**
+   * Hand the body back.
+   *
+   * Safe to call for any reason — the button, a hit that took the rider out of
+   * the saddle, or death — because every one of those has to leave a fighter
+   * who can walk and a vehicle somebody can get back on.
+   */
+  private dismount(v: Vehicle): void {
+    const r = v.rider;
+    v.rider = null;
+    v.vx = 0;
+    v.wheelie = 0;
+    if (!r) return;
+
+    r.setRiding(false);
+    // Step the chassis forward so the two silhouettes come apart.
+    v.x = clamp(v.x + v.facing * 14, 8, this.def.width - 8);
+    this.audio.play('tyres', { pan: this.pan(v.x), gain: 0.5, pitch: 1.1 });
+    this.fx.particles({
+      count: 6,
+      x: v.x,
+      y: 3,
+      z: v.z,
+      angle: v.facing > 0 ? Math.PI : 0,
+      spread: 1.1,
+      speed: [0.6, 2],
+      life: [10, 22],
+      size: [1.4, 2.8],
+      colors: ['#d8d0c2', '#a29a8c'],
+      gravity: -0.01,
+      drag: 0.9,
+      shape: 'smoke',
+      fade: 'ease',
+    });
+  }
+
+  private updateVehicles(ctx: SimContext): void {
+    if (this.ramCooldown.size > 0) {
+      for (const id of Array.from(this.ramCooldown.keys())) {
+        const n = (this.ramCooldown.get(id) ?? 0) - 1;
+        if (n <= 0) this.ramCooldown.delete(id);
+        else this.ramCooldown.set(id, n);
+      }
+    }
+
+    for (const v of this.vehicles) {
+      const r = v.rider;
+      // Knocked out of the saddle, or knocked out entirely.
+      if (r && (!r.alive || !r.riding)) this.dismount(v);
+
+      if (v.rider) {
+        const p = v.rider;
+        v.x = p.pos.x;
+        v.z = p.pos.z;
+        v.facing = p.facing;
+        v.vx = p.rideSpeed;
+        v.wheelie = p.rideWheelieAmount;
+        v.skid = p.rideSkid;
+        this.ram(v, ctx);
+      } else {
+        // Let go at speed, it rolls to a stop rather than stopping dead.
+        v.vx *= 0.9;
+        if (Math.abs(v.vx) < 0.05) v.vx = 0;
+        v.x = clamp(v.x + v.vx, 8, this.def.width - 8);
+        if (v.skid > 0) v.skid--;
+      }
+
+      v.spin = (v.spin + v.vx * 0.09) % (Math.PI * 2);
+    }
+  }
+
+  /**
+   * Running people over.
+   *
+   * Deliberately not a hitbox: it belongs to the vehicle, not to any move the
+   * rider is doing, and it fires from speed alone. One body may only be hit
+   * every RAM_COOLDOWN frames, so ploughing through a wave is a series of
+   * separate impacts rather than sixty in a second.
+   */
+  private ram(v: Vehicle, ctx: SimContext): void {
+    const rider = v.rider;
+    if (!rider) return;
+    const speed = Math.abs(v.vx);
+    if (speed < RAM_SPEED) return;
+
+    const tune = VEHICLE_KINDS[v.kind];
+    const dir = v.vx > 0 ? 1 : -1;
+
+    // Furniture does not survive this at all, which is the point of putting a
+    // bike on a map that opens with nine breakables in a row.
+    for (const pr of this.props) {
+      if (pr.broken) continue;
+      const dx = (pr.x - v.x) * dir;
+      if (dx < -8 || dx > tune.nose) continue;
+      if (Math.abs(pr.z - v.z) > PROP_REACH_Z) continue;
+      this.damageProp(pr, pr.maxHp + 1);
+    }
+
+    for (const u of this.units) {
+      if (u.dead) continue;
+      const f = u.f;
+      if (!f.alive) continue;
+      if ((this.ramCooldown.get(f.id) ?? 0) > 0) continue;
+      const dx = (f.pos.x - v.x) * dir;
+      if (dx < -8 || dx > tune.nose) continue;
+      if (Math.abs(f.pos.z - v.z) > Z_HIT_TOLERANCE) continue;
+      if (f.pos.y > 40) continue;
+
+      this.ramCooldown.set(f.id, RAM_COOLDOWN);
+      if (!f.takeHit(ramHit(speed, tune.ram), v.x, ctx, rider)) continue;
+
+      this.fx.shake({ magnitude: 6, duration: 14, dirX: 1, dirY: 0.4 });
+      this.fx.particles({
+        count: 14,
+        x: f.pos.x,
+        y: 20,
+        z: f.pos.z,
+        angle: dir > 0 ? 0 : Math.PI,
+        spread: 1.3,
+        speed: [2, 6],
+        life: [14, 32],
+        size: [1.2, 3],
+        colors: ['#ffe14a', '#ff8a3d', '#ffffff'],
+        gravity: 0.2,
+        drag: 0.94,
+        shape: 'spark',
+        additive: true,
+      });
+      this.audio.play('tyres', { pan: this.pan(v.x), gain: 0.4, pitch: 1.2 });
+      ctx.requestHitstop(4);
+    }
+  }
+
   // ── props, pickups, projectiles ─────────────────────────────────────────────
 
   private updateProps(ctx: SimContext): void {
@@ -1231,7 +1750,16 @@ export class Level {
     this._score += 50;
   }
 
-  private dropWeapon(kind: WeaponKind, x: number, y: number, z: number, vy: number): void {
+  private dropWeapon(
+    kind: WeaponKind,
+    x: number,
+    y: number,
+    z: number,
+    vy: number,
+    durability?: number,
+    ammo?: number,
+  ): void {
+    const def = WEAPONS[kind];
     this.pickups.push({
       kind: 'weapon',
       weapon: kind,
@@ -1242,6 +1770,8 @@ export class Level {
       vy,
       life: PICKUP_LIFE,
       spin: 0,
+      durability: durability !== undefined ? durability : (def?.durability ?? -1),
+      ammo: ammo !== undefined ? ammo : (def?.ammo ?? 0),
     });
     this.audio.play('drop', { pan: this.pan(x) });
   }
@@ -1257,6 +1787,8 @@ export class Level {
       vy: 3,
       life: PICKUP_LIFE,
       spin: 0,
+      durability: 0,
+      ammo: 0,
     });
   }
 
@@ -1271,6 +1803,8 @@ export class Level {
       vy: 3,
       life: PICKUP_LIFE,
       spin: 0,
+      durability: 0,
+      ammo: 0,
     });
   }
 
@@ -1292,12 +1826,23 @@ export class Level {
         continue;
       }
       if (it.y > 2) continue;
+      /*
+       * Weapons are NOT collected by walking over them.
+       *
+       * That is what made the report: the old rule quietly skipped the pickup
+       * once your hands were full, so an armed player walking over a better
+       * weapon got nothing, no prompt and no way to trade. Taking one is now a
+       * deliberate press — see `updateInteract`.
+       *
+       * Health and meter still come to you. Those are not a choice, and making
+       * somebody press a key for a health pack would be a downgrade.
+       */
+      if (it.kind === 'weapon') continue;
 
       for (const p of this.players) {
         if (!p.alive || !p.grounded) continue;
         if (Math.abs(p.pos.x - it.x) > PICKUP_REACH_X) continue;
         if (Math.abs(p.pos.z - it.z) > PICKUP_REACH_Z) continue;
-        if (it.kind === 'weapon' && p.weapon) continue;
         this.collect(it, p);
         this.pickups.splice(i, 1);
         break;
@@ -1307,7 +1852,7 @@ export class Level {
 
   private collect(it: Pickup, p: Fighter): void {
     if (it.kind === 'weapon' && it.weapon) {
-      p.giveWeapon(it.weapon);
+      p.giveWeapon(it.weapon, it.durability, it.ammo);
       this.fx.text({
         text: WEAPONS[it.weapon]?.name.toUpperCase() ?? 'WEAPON',
         x: p.pos.x,
@@ -1448,6 +1993,12 @@ export class Level {
         case D_PROJ:
           this.drawProjectile(ctx, this.projectiles[it.i]);
           break;
+        case D_VEHICLE:
+          this.drawVehicle(ctx, this.vehicles[it.i], false);
+          break;
+        case D_VEHICLE_FRONT:
+          this.drawVehicle(ctx, this.vehicles[it.i], true);
+          break;
         default:
           break;
       }
@@ -1481,6 +2032,13 @@ export class Level {
       push(pr.z, D_PROP, i);
     }
     for (let i = 0; i < this.pickups.length; i++) push(this.pickups[i].z, D_PICKUP, i);
+    // Pushed before the fighters and at the same depth: the sort is stable, so
+    // the chassis lands under its rider. The front layer is nudged a hair
+    // nearer the camera so bars and glass land in front of them.
+    for (let i = 0; i < this.vehicles.length; i++) {
+      push(this.vehicles[i].z, D_VEHICLE, i);
+      push(this.vehicles[i].z + 0.05, D_VEHICLE_FRONT, i);
+    }
     for (let i = 0; i < this.fighters.length; i++) {
       // The director draws its own two. See beginFatality().
       if (this.finisher && this.isStaged(this.fighters[i].id)) continue;
@@ -1629,6 +2187,232 @@ export class Level {
     ctx.restore();
   }
 
+  /**
+   * The vehicle, in the same bold-outline vector house style as the props.
+   *
+   * Drawn in two passes around its rider: `front` is the handful of parts that
+   * belong in FRONT of a body sitting on the thing — bars, glass, straps —
+   * without which the rider reads as standing on top of a shape rather than
+   * riding it.
+   *
+   * Local space inside the transform: x=0 is the middle of the vehicle, y=0 the
+   * ground line at its depth, +x forward whichever way it is pointing.
+   */
+  private drawVehicle(ctx: C2D, v: Vehicle, front: boolean): void {
+    if (!v) return;
+    const sy = GROUND_Y + v.z * Z_SCALE;
+    const tune = VEHICLE_KINDS[v.kind];
+
+    if (!front) {
+      shadow(ctx, v.x, sy, v.kind === 'moto' ? 19 : 26, 0.32);
+      if (v.skid > 0) this.drawSkid(ctx, v, sy);
+    }
+
+    ctx.save();
+    ctx.translate(v.x, sy);
+    ctx.scale(v.facing, 1);
+    if (v.wheelie > 0) {
+      // Pivot on the back wheel, which is what a wheelie is.
+      ctx.translate(-16, 0);
+      ctx.rotate(-v.wheelie * 0.5);
+      ctx.translate(16, 0);
+    }
+
+    switch (v.kind) {
+      case 'cybertruck':
+        if (front) this.drawTruckFront(ctx, tune);
+        else this.drawTruckBody(ctx, v, tune);
+        break;
+      case 'hyperloop_pod':
+        if (front) this.drawPodFront(ctx, tune);
+        else this.drawPodBody(ctx, v, tune);
+        break;
+      case 'rocket':
+        if (front) this.drawRocketFront(ctx, tune);
+        else this.drawRocketBody(ctx, v, tune);
+        break;
+      case 'moto':
+      default:
+        if (front) this.drawMotoFront(ctx, v, tune);
+        else this.drawMotoBody(ctx, v, tune);
+        break;
+    }
+
+    ctx.restore();
+  }
+
+  /** Two black streaks where the rubber went. */
+  private drawSkid(ctx: C2D, v: Vehicle, sy: number): void {
+    const dir = v.vx >= 0 ? 1 : -1;
+    ctx.save();
+    ctx.globalAlpha = clamp(v.skid / 14, 0, 1) * 0.5;
+    ctx.strokeStyle = '#100d14';
+    ctx.lineWidth = 2.6;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(v.x - dir * 40, sy + 1);
+    ctx.lineTo(v.x - dir * 12, sy + 1);
+    ctx.moveTo(v.x - dir * 34, sy + 3);
+    ctx.lineTo(v.x - dir * 8, sy + 3);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /** A spoked wheel at (x, y) with radius r, turned by `spin`. */
+  private drawWheel(ctx: C2D, x: number, y: number, r: number, spin: number, rim: string): void {
+    ellipse(ctx, x, y, r, r, 0, '#17151c', INK, 2);
+    ellipse(ctx, x, y, r * 0.42, r * 0.42, 0, rim, INK, 1.4);
+    ctx.save();
+    ctx.strokeStyle = rim;
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    for (let k = 0; k < 3; k++) {
+      const a = spin + (k * Math.PI) / 3;
+      ctx.moveTo(x - Math.cos(a) * r * 0.82, y - Math.sin(a) * r * 0.82);
+      ctx.lineTo(x + Math.cos(a) * r * 0.82, y + Math.sin(a) * r * 0.82);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  private drawMotoBody(ctx: C2D, v: Vehicle, t: VehicleTuning): void {
+    this.drawWheel(ctx, -16, -8, 8, v.spin, '#8f8aa0');
+    this.drawWheel(ctx, 16, -7.5, 7.5, v.spin, '#8f8aa0');
+
+    // swingarm, forks, exhaust
+    capsule(ctx, -16, -8, -3, -13, 2.4, '#3c4152', INK, 1.6);
+    capsule(ctx, 16, -7.5, 12, -22, 2.2, t.trim, INK, 1.6);
+    capsule(ctx, -3, -12, -22, -7, 2.2, '#a9a4b6', INK, 1.4);
+
+    // tank and tail, one continuous slab of colour
+    poly(
+      ctx,
+      [-19, -18, -6, -25, 8, -24, 14, -18, 12, -13, -6, -12, -18, -13],
+      t.body,
+      INK,
+      1.8,
+    );
+    poly(ctx, [-6, -25, 8, -24, 6, -21, -5, -22], '#ffffff', 'none', 0);
+    roundRect(ctx, -22, -22, 15, 5, 2.5, '#241f28', INK, 1.6);
+    roundRect(ctx, -9, -16, 13, 8, 2, '#4a4152', INK, 1.6);
+
+    // a lick of flame down the tank, because of course
+    poly(ctx, [-14, -17, -4, -19, 2, -16, -6, -15], t.lamp, 'none', 0);
+  }
+
+  private drawMotoFront(ctx: C2D, v: Vehicle, t: VehicleTuning): void {
+    capsule(ctx, 12, -24, 21, -26, 2, '#2b2731', INK, 1.6);
+    capsule(ctx, 19, -27, 23, -27, 1.6, t.trim, INK, 1.2);
+    ellipse(ctx, 19, -20, 4.2, 4.6, 0, t.lamp, INK, 1.6);
+
+    if (Math.abs(v.vx) > 1.2) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = 0.34;
+      poly(ctx, [21, -24, 54, -30, 56, -10, 21, -16], t.lamp, 'none', 0);
+      ctx.restore();
+    }
+  }
+
+  private drawTruckBody(ctx: C2D, v: Vehicle, t: VehicleTuning): void {
+    this.drawWheel(ctx, -19, -9, 9, v.spin, '#6f6a7c');
+    this.drawWheel(ctx, 19, -9, 9, v.spin, '#6f6a7c');
+
+    // One wedge. That is the entire design, and it is the joke.
+    poly(ctx, [-29, -10, -27, -25, 4, -31, 31, -17, 31, -10], t.body, INK, 2);
+    poly(ctx, [-24, -24, 2, -29, 22, -19, -22, -19], '#171a22', 'none', 0);
+    poly(ctx, [-29, -12, 31, -12, 31, -10, -29, -10], t.trim, 'none', 0);
+
+    // The panel gaps nobody could close.
+    ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(-6, -30);
+    ctx.lineTo(-4, -12);
+    ctx.moveTo(14, -26);
+    ctx.lineTo(16, -12);
+    ctx.stroke();
+  }
+
+  private drawTruckFront(ctx: C2D, t: VehicleTuning): void {
+    roundRect(ctx, 22, -20, 10, 2.4, 1.2, t.lamp, INK, 1.2);
+    ctx.save();
+    ctx.globalAlpha = 0.22;
+    poly(ctx, [-22, -24, 2, -29, 20, -20, -20, -20], '#bfe8ff', 'none', 0);
+    ctx.restore();
+    capsule(ctx, -24, -24, 2, -30, 1.6, t.trim, 'none', 0);
+  }
+
+  private drawPodBody(ctx: C2D, v: Vehicle, t: VehicleTuning): void {
+    const hover = 7 + Math.sin(this.tick * 0.12) * 1.4;
+
+    // The tube it was always going to be, seen end on.
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.4;
+    ellipse(ctx, 0, -hover + 4, 26, 4.5, 0, t.trim, 'none', 0);
+    ctx.restore();
+
+    capsule(ctx, -20, -hover - 13, 18, -hover - 13, 12, t.body, INK, 2);
+    poly(
+      ctx,
+      [18, -hover - 25, 33, -hover - 15, 33, -hover - 11, 18, -hover - 1],
+      t.body,
+      INK,
+      1.8,
+    );
+    poly(ctx, [-20, -hover - 24, -30, -hover - 30, -28, -hover - 8, -20, -hover - 2], t.trim, INK, 1.6);
+    roundRect(ctx, -14, -hover - 9, 26, 3, 1.5, t.trim, 'none', 0);
+    ellipse(ctx, 30, -hover - 13, 2.6, 2.6, 0, t.lamp, INK, 1.2);
+
+    if (Math.abs(v.vx) > 1) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = clamp(Math.abs(v.vx) / 9, 0.2, 0.7);
+      ellipse(ctx, -32, -hover - 13, 9, 5, 0, t.trim, 'none', 0);
+      ellipse(ctx, -28, -hover - 13, 5, 3, 0, '#ffffff', 'none', 0);
+      ctx.restore();
+    }
+  }
+
+  private drawPodFront(ctx: C2D, t: VehicleTuning): void {
+    const hover = 7 + Math.sin(this.tick * 0.12) * 1.4;
+    ctx.save();
+    ctx.globalAlpha = 0.32;
+    // A bubble canopy tall enough to have the passenger actually inside it.
+    ellipse(ctx, 2, -hover - 27, 16, 13, -0.1, '#cdf1ff', 'none', 0);
+    ctx.restore();
+    capsule(ctx, -13, -hover - 34, 17, -hover - 24, 1.4, t.trim, 'none', 0);
+  }
+
+  private drawRocketBody(ctx: C2D, v: Vehicle, t: VehicleTuning): void {
+    // The sled it is bolted to, since nobody thought about landing.
+    this.drawWheel(ctx, -18, -5, 5, v.spin, '#6f6a7c');
+    this.drawWheel(ctx, 14, -5, 5, v.spin, '#6f6a7c');
+    capsule(ctx, -20, -7, 18, -7, 2.4, t.trim, INK, 1.6);
+
+    if (Math.abs(v.vx) > 1) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = 0.55 + 0.25 * Math.sin(this.tick * 0.6);
+      poly(ctx, [-22, -22, -44, -17, -22, -12], t.lamp, 'none', 0);
+      poly(ctx, [-22, -20, -34, -17, -22, -14], '#ffffff', 'none', 0);
+      ctx.restore();
+    }
+
+    capsule(ctx, -18, -18, 14, -18, 9, t.body, INK, 2);
+    poly(ctx, [14, -27, 32, -18, 14, -9], t.body, INK, 1.8);
+    poly(ctx, [-18, -27, -26, -32, -24, -12, -18, -9], t.trim, INK, 1.6);
+    roundRect(ctx, -6, -22, 12, 3, 1.5, t.trim, 'none', 0);
+    ellipse(ctx, 26, -18, 2.4, 2.4, 0, t.lamp, INK, 1.2);
+  }
+
+  private drawRocketFront(ctx: C2D, t: VehicleTuning): void {
+    // Two straps. This is not a cockpit; it is a man tied to a firework.
+    capsule(ctx, -8, -30, -6, -12, 1.8, t.trim, INK, 1.2);
+    capsule(ctx, 4, -30, 6, -12, 1.8, t.trim, INK, 1.2);
+  }
+
   private drawProjectile(ctx: C2D, pj: Projectile): void {
     const sy = GROUND_Y + pj.z * Z_SCALE - pj.y - 24;
     ctx.save();
@@ -1761,6 +2545,37 @@ function numberOf(v: unknown, fallback: number): number {
 function weaponOf(v: unknown): WeaponKind | null {
   if (typeof v === 'string' && v in WEAPONS) return v as WeaponKind;
   return null;
+}
+
+function weaponName(kind: WeaponKind | null): string {
+  if (!kind) return 'WEAPON';
+  return WEAPONS[kind]?.name.toUpperCase() ?? 'WEAPON';
+}
+
+/**
+ * Being hit by a moving vehicle.
+ *
+ * Blowback, so it launches and then bounces off the wall, and damage that
+ * climbs with speed — the difference between being nudged in a car park and
+ * being taken off your feet at forty is the entire appeal.
+ */
+function ramHit(speed: number, mul: number): HitProperties {
+  const power = clamp(speed / 8, 0.25, 1.25);
+  return {
+    damage: (8 + speed * 2.1) * mul,
+    hitstun: 28,
+    blockstun: 16,
+    hitstop: 6,
+    knockback: { x: 7 + speed * 0.7, y: 4.4 + power * 2 },
+    pushback: 0,
+    reaction: 'blowback',
+    level: 'mid',
+    chip: DEFAULT_CHIP,
+    meterGain: 0.04,
+    meterGainVictim: 0.06,
+    shake: 6,
+    sfx: 'bone_crack',
+  };
 }
 
 function propColors(kind: PropSpawn['kind']): string[] {

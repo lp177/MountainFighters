@@ -27,7 +27,13 @@ chassis, with a great deal of screen shake.
   riot shields, security robots, autonomous vacuums, IoT fridges that fight
   back, delivery drones, unpaid interns, and lobbyists.
 - **Weapons get dropped and picked up** — chains, bats, iron bars, riot
-  shields, a Cybertruck door. Vehicle sections when walking gets boring.
+  shields, a Cybertruck door. One key takes what is at your feet, and pressing
+  it over something better trades the two, so being armed never means being
+  stuck with what you are holding.
+- **Eleven of the seventy maps park something with an engine** in your way — a
+  bike, a Cybertruck, a hyperloop pod, a rocket. Same key to get on, same key to
+  get off. Riding is roughly twice a run, and running a guard over does more
+  than punching him would.
 - **An opening cinematic** that shows you the kidnapping rather than
   explaining it: the cottage, the headlights, the door coming off its hinges,
   the lab, and seven dwarfs putting on the leather. Skippable, and it only
@@ -48,10 +54,17 @@ chassis, with a great deal of screen shake.
 | Special | `H` | `Numpad 3` | Y / △ |
 | Block | `Shift` | `Numpad .` | RB / R1 |
 | Grab | `R` | `Numpad 5` | LB / L1 |
-| Super | `T` | `Numpad +` | RT / R2 |
+| Pick up / Use | `E` | `Numpad 4` | LT / L2 / ZL |
+| Super | `T` | `Numpad +` | RT / R2 / ZR |
 | Pause | `Esc` | `Esc` | Start |
 
 Double-tap a direction to dash. Block just as a hit lands to parry.
+
+**Pick up / Use** is one key for everything at your feet: take the weapon lying
+there, trade the one in your hands for it, get on the bike, get off the bike,
+or — with nothing in reach — put down what you are carrying. When there is
+something to press it on, the key and what it would do float above your dwarf's
+head, named the way your own keyboard or your own pad names it.
 
 **Those are key positions, not letters.** Every binding is stored by where the
 key physically sits on the board, so the movement diamond is the same four keys

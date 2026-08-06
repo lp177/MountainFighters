@@ -14,18 +14,20 @@
  * caller hands in, not by wall clock, so a 144Hz display does not run the
  * animations at 144Hz. None of it feeds back into the simulation.
  *
- * It also owns the one thing on screen that is not in a corner: the floating
- * player marker over each player's head. That lives here because the marker and
- * the panel have to agree about which colour a player is, and because `drawHud`
- * is already the game's screen-space layer — see the PLAYER MARKERS section for
- * how a screen-space overlay is pinned to a world-space head.
+ * It also owns the two things on screen that are not in a corner: the floating
+ * player marker over each player's head, and the interact prompt above it. Both
+ * live here because they have to agree with the panel about which colour a
+ * player is, and because `drawHud` is already the game's screen-space layer —
+ * see the PLAYER MARKERS section for how a screen-space overlay is pinned to a
+ * world-space head.
  */
 
-import type { Bone, BossDef, RigStyle } from '@/core/types';
+import type { Bone, BossDef, RigStyle, WeaponKind } from '@/core/types';
 import type { Fighter } from '@/game/Fighter';
-import type { Level } from '@/game/Level';
+import type { InteractTarget, Level } from '@/game/Level';
 import type { Camera } from '@/render/Camera';
 
+import { Btn } from '@/core/types';
 import { clamp, easeOutBack, lerp } from '@/core/math';
 import {
   FIGHT_ZOOM,
@@ -42,6 +44,10 @@ import { ellipse, poly, roundRect } from '@/render/Shapes';
 import { CLIPS, sampleClip } from '@/render/rig/Anim';
 import { resolvePose } from '@/render/rig/Skeleton';
 import { drawCharacter } from '@/render/rig/CharacterRig';
+import { codeForBit, defaultBindingsFor } from '@/engine/input/Bindings';
+import { keyLabel } from '@/engine/input/Layout';
+import { connectedGamepads, padProfile } from '@/engine/input/GamepadSource';
+import { loadSave } from '@/engine/Save';
 import { DWARFS } from '@/content/dwarfs';
 import { BOSSES } from '@/content/bosses';
 
@@ -58,6 +64,15 @@ export interface HudOptions {
   mapTotal?: number;
   /** Hide the whole thing during title cards and cutscenes. */
   hidden?: boolean;
+  /**
+   * Live keyboard bindings per local slot, for the interact prompt.
+   *
+   * Optional because the prompt has a working fallback (see `bindingsFor`), and
+   * because a HUD that could only name a key when its caller remembered to hand
+   * one over would print the wrong key most of the time. A caller that already
+   * holds `Settings.bindings` should pass it: it is exact and it costs nothing.
+   */
+  bindings?: Record<number, Record<string, number>>;
 }
 
 // ── Palette ──────────────────────────────────────────────────────────────────
@@ -108,6 +123,18 @@ const CHIP_MIN = 0.0016;
 /** Frames a finished combo readout lingers before it fades. */
 const COMBO_LINGER = 46;
 
+/** Fraction of the interact prompt's ease-in covered per frame. */
+const PROMPT_RISE = 0.16;
+/**
+ * Frames the "you can put this down again" prompt is shown for.
+ *
+ * Re-armed only when the weapon in hand CHANGES, because dropping is the one
+ * interact target that is always available while armed — left ungated it would
+ * park a label over the player's head for the entire time they carry a bat,
+ * which is the opposite of what a prompt is for.
+ */
+const DROP_HINT_FRAMES = 110;
+
 // ── Per-fighter animation state ──────────────────────────────────────────────
 
 interface HudState {
@@ -123,6 +150,16 @@ interface HudState {
   hurt: number;
   /** Frames since this player last did anything. Drives the marker fade. */
   markIdle: number;
+  /** Which kind of controller this player last steered with. See `stepDevice`. */
+  onPad: boolean;
+  /** 0..1 ease-in of the interact prompt, restarted whenever it changes. */
+  promptPop: number;
+  /** What the prompt said last frame, so a different answer re-pops it. */
+  promptKey: string;
+  /** Weapon in hand last frame; a change re-arms the drop hint. */
+  promptWeapon: WeaponKind | null;
+  /** Frames the drop hint has left. See DROP_HINT_FRAMES. */
+  dropHint: number;
   frame: number;
 }
 
@@ -143,6 +180,11 @@ function stateFor(id: number, healthFrac: number): HudState {
       meterPulse: 0,
       hurt: 0,
       markIdle: 0,
+      onPad: guessOnPad(id),
+      promptPop: 0,
+      promptKey: '',
+      promptWeapon: null,
+      dropHint: 0,
       frame: -1,
     };
     states.set(id, s);
@@ -153,6 +195,8 @@ function stateFor(id: number, healthFrac: number): HudState {
 /** Drop the animation state. Call between maps so a new fight starts clean. */
 export function resetHud(): void {
   states.clear();
+  padCacheFrame = -1e9;
+  bindingCacheFrame = -1e9;
 }
 
 // ── Text ─────────────────────────────────────────────────────────────────────
@@ -312,7 +356,12 @@ function weaponWear(f: Fighter): { left: number; max: number; ammo: number } {
   };
 }
 
-function stepState(s: HudState, f: Fighter, frame: number): void {
+function stepState(
+  s: HudState,
+  f: Fighter,
+  frame: number,
+  target: InteractTarget | null = null,
+): void {
   const steps = s.frame < 0 ? 1 : clamp(frame - s.frame, 0, 6);
   s.frame = frame;
 
@@ -357,7 +406,11 @@ function stepState(s: HudState, f: Fighter, frame: number): void {
     if (bars > s.bars) s.meterPulse = 1;
     s.bars = bars;
     if (s.meterPulse > 0) s.meterPulse = Math.max(0, s.meterPulse - 0.03);
+
+    stepPrompt(s, f, target);
   }
+
+  stepDevice(s, f);
 }
 
 function drawPanel(
@@ -702,23 +755,20 @@ function chevron(ctx: C2D, cx: number, tipY: number, fill: string, outline: stri
 }
 
 /**
- * One player's marker, pinned to the head the renderer has just drawn.
+ * Where the top of this fighter's head is on screen, written into HEAD.
  *
  * `f.drawPos` — not `f.pos` — is the anchor. pos is a whole simulation step
  * ahead of the interpolated body, which is eleven world units at the moment
- * someone leaves the ground; the marker would detach every time anybody jumped.
+ * someone leaves the ground; anything pinned to it would detach every time
+ * somebody jumped.
+ *
+ * Returns false when the head is far enough off screen that nothing hung above
+ * it could be seen. Shared by the marker and the interact prompt so the two can
+ * never disagree about where a player's head is.
  */
-function drawMarker(
-  ctx: C2D,
-  f: Fighter,
-  s: HudState,
-  cam: Camera,
-  frame: number,
-  still: boolean,
-): void {
-  // Players only. An enemy wearing one of these would be a lie.
-  if (f.team !== 'player' || !f.alive) return;
+const HEAD = { x: 0, y: 0 };
 
+function headScreen(f: Fighter, cam: Camera): boolean {
   const d = f.drawPos;
   const zoom = cam.zoom > 0.05 ? cam.zoom : 1;
   // Rig scale, exactly as Fighter.render hands it to drawCharacter: the dwarf's
@@ -741,10 +791,26 @@ function drawMarker(
     sy = sx * sn + sy * c;
     sx = rx;
   }
-  sx += VIEW_W * 0.5;
-  sy += VIEW_H * 0.5;
+  HEAD.x = sx + VIEW_W * 0.5;
+  HEAD.y = sy + VIEW_H * 0.5;
 
-  if (sx < -24 || sx > VIEW_W + 24 || sy > VIEW_H + 24) return;
+  return !(HEAD.x < -24 || HEAD.x > VIEW_W + 24 || HEAD.y > VIEW_H + 24);
+}
+
+/** One player's marker, pinned to the head the renderer has just drawn. */
+function drawMarker(
+  ctx: C2D,
+  f: Fighter,
+  s: HudState,
+  cam: Camera,
+  frame: number,
+  still: boolean,
+): void {
+  // Players only. An enemy wearing one of these would be a lie.
+  if (f.team !== 'player' || !f.alive) return;
+  if (!headScreen(f, cam)) return;
+  const sx = HEAD.x;
+  const sy = HEAD.y;
 
   // Idle bob, one-sided so the marker only ever floats further from the head,
   // and phase-shifted per player so four of them do not pulse as one.
@@ -769,6 +835,311 @@ function drawMarker(
   ctx.restore();
 }
 
+// ── The interact prompt ──────────────────────────────────────────────────────
+
+/*
+ * WHY THIS EXISTS AT ALL.
+ *
+ * Weapons used to be collected by walking over them, which silently did nothing
+ * once your hands were full, and vehicles could not be mounted by any means.
+ * There is now a key for all of it — but a key nobody is told about is a key
+ * that does not exist, and the report that produced this feature was a player
+ * saying, correctly, "we don't have a key for taking weapon on ground". They
+ * had one by then. Nothing on screen said so.
+ *
+ * So: when a player is standing over something the button would act on, the
+ * button and the verb float above their head. It goes above the player marker
+ * rather than beside the item, because the item is at their feet, which is
+ * exactly where the fight is; a label there would sit on top of the thing it is
+ * describing.
+ *
+ * WHAT IT PRINTS. Never a hard-coded letter. The keyboard is bound by physical
+ * POSITION (see Bindings.ts) and the label is read back through the
+ * layout-aware `keyLabel`, so an AZERTY player is told to press the key their
+ * board actually calls E, someone who rebound it is told about the key they
+ * chose, and a player on a pad is told what THEIR pad prints on the trigger —
+ * LT, ZL or L2, depending on whose hardware it is.
+ */
+
+/** Screen px between the top of the player marker and the bottom of the pill. */
+const PROMPT_GAP = 4;
+const PROMPT_H = 12;
+const PROMPT_FONT = 7;
+/**
+ * How high the pill may climb before it is into the score and map strip.
+ *
+ * Rarely reached: interacting requires both feet on the floor, so the head it
+ * hangs over is somewhere between y≈198 and y≈286 on the belt. It is here for
+ * the mounted case and for anything that ever moves the camera.
+ */
+const PROMPT_MIN_Y = 76;
+
+/**
+ * Cached device facts.
+ *
+ * Both of the questions below — what is plugged in, and what is bound — have
+ * answers that change perhaps twice in a session and would otherwise be asked
+ * sixty times a second. They are re-asked on a slow timer instead, so a pad
+ * plugged in or a key rebound mid-fight lands within a second, and the draw
+ * path stays a draw path. Nothing here is asked at all unless a prompt is
+ * actually on screen.
+ */
+const DEVICE_TTL = 45;
+let padCache: number[] = [];
+let padCacheFrame = -1e9;
+let bindingCache: Record<number, Record<string, number>> | null = null;
+let bindingCacheFrame = -1e9;
+
+function stale(at: number, frame: number): boolean {
+  return frame < at || frame - at >= DEVICE_TTL;
+}
+
+function padIndices(frame: number): number[] {
+  if (stale(padCacheFrame, frame)) {
+    try {
+      padCache = connectedGamepads();
+    } catch {
+      padCache = [];
+    }
+    padCacheFrame = frame;
+  }
+  return padCache;
+}
+
+/**
+ * The keyboard map for a slot.
+ *
+ * `opts.bindings` when the caller has the live settings; otherwise the saved
+ * ones, which are what the live ones were written from — a rebind saves
+ * immediately, so the two agree within the TTL above. Falling back to the
+ * shipped defaults would print W to somebody who rebound it, which is the one
+ * failure this whole path exists to avoid.
+ */
+function bindingsFor(
+  slot: number,
+  frame: number,
+  override?: Record<number, Record<string, number>>,
+): Record<string, number> {
+  if (override) return override[slot] ?? defaultBindingsFor(slot);
+  if (stale(bindingCacheFrame, frame)) {
+    try {
+      bindingCache = loadSave().settings.bindings;
+    } catch {
+      bindingCache = null;
+    }
+    bindingCacheFrame = frame;
+  }
+  return bindingCache?.[slot] ?? defaultBindingsFor(slot);
+}
+
+/**
+ * A first guess at which controller a slot is holding, before they have moved.
+ *
+ * Nothing plugged in means a keyboard whatever the slot number says. Otherwise
+ * slots three and four are pads by construction — there is no third half of a
+ * keyboard for them to sit on — and one and two start as keyboards. Either way
+ * `stepDevice` corrects it on the first step the player takes.
+ */
+function guessOnPad(slot: number): boolean {
+  let pads = 0;
+  try {
+    pads = connectedGamepads().length;
+  } catch {
+    pads = 0;
+  }
+  return pads > 0 && slot >= 2;
+}
+
+/**
+ * Fighter latches whether its input claimed to be analog; the HUD only reads it,
+ * the same bargain `weaponWear` strikes with weapon durability.
+ */
+function movedOnStick(f: Fighter): boolean {
+  return (f as unknown as { analogMove?: boolean }).analogMove === true;
+}
+
+/**
+ * Which controller is in this player's hands, decided by the only evidence that
+ * reaches this far: `Btn.Analog`, which a pad sets on every frame it reports a
+ * direction and a keyboard never sets at all.
+ *
+ * Latched rather than sampled, because the prompt has to be right while the
+ * player is standing perfectly still over a bat — which is precisely when no
+ * direction is being held and there is nothing to read. Walking under one's own
+ * steam with the bit clear is equally good evidence the other way, so putting
+ * the pad down and going back to the keyboard is handled too.
+ */
+function stepDevice(s: HudState, f: Fighter): void {
+  if (movedOnStick(f)) {
+    s.onPad = true;
+    return;
+  }
+  const state = f.state;
+  if (state === 'walk' || state === 'run' || state === 'dash') s.onPad = false;
+}
+
+/**
+ * The button this player would press, named the way their own hardware names
+ * it. Null when nothing can honestly be printed — better no prompt than a
+ * prompt naming a key that does nothing.
+ */
+function interactButton(
+  f: Fighter,
+  s: HudState,
+  frame: number,
+  padOrder: number,
+  opts?: HudOptions,
+): string | null {
+  if (s.onPad) {
+    // Pads are handed to slots in ascending order, so the nth pad-driven player
+    // is holding the nth pad. Its vendor is what decides whether the left
+    // trigger says LT, ZL or L2 — the POSITION is the same on all of them.
+    const pads = padIndices(frame);
+    const index = pads.length > 0 ? pads[clamp(padOrder, 0, pads.length - 1)] : undefined;
+    const p = index === undefined ? null : padProfile(index);
+    if (p && (p.l2 >= 0 || typeof p.l2Axis === 'number')) return p.labels.l2;
+    // The pad has been unplugged, or it reports no left trigger and therefore
+    // cannot reach Interact at all. Fall through to the keyboard: whoever is
+    // still playing is playing on something, and it is not that.
+  }
+  const code = codeForBit(bindingsFor(f.id, frame, opts?.bindings), Btn.Interact);
+  return code ? keyLabel(code) : null;
+}
+
+/**
+ * The last word of a weapon's name: 'Aluminium Bat' -> 'BAT', 'Length of
+ * Rebar' -> 'REBAR'. A prompt is read at a glance in the middle of a fight, and
+ * SWAP FOR MECHANICAL KEYBOARD is a sentence, not a glance.
+ */
+function shortNoun(label: string): string {
+  const parts = label.trim().split(/\s+/);
+  const last = parts[parts.length - 1] ?? '';
+  return last.length > 0 ? last : label;
+}
+
+/** What the press would do, in the fewest words that stay unambiguous. */
+function promptVerb(t: InteractTarget): string {
+  switch (t.action) {
+    case 'swap':
+      return `SWAP FOR ${shortNoun(t.label)}`;
+    case 'drop':
+      return `DROP ${shortNoun(t.label)}`;
+    case 'mount':
+      return 'RIDE';
+    case 'dismount':
+      return 'GET OFF';
+    default:
+      // Taking it. The thing is at your feet and drawn there, so naming it as
+      // well would be the label telling you what you are already looking at.
+      return 'PICK UP';
+  }
+}
+
+/**
+ * Advance the prompt's own animation, and decide whether the drop hint is still
+ * welcome. One step per simulation frame, like everything else in this file.
+ */
+function stepPrompt(s: HudState, f: Fighter, t: InteractTarget | null): void {
+  if (f.weapon !== s.promptWeapon) {
+    s.promptWeapon = f.weapon;
+    s.dropHint = f.weapon ? DROP_HINT_FRAMES : 0;
+  }
+  if (s.dropHint > 0) s.dropHint--;
+
+  const key = t ? `${t.action}:${t.label}` : '';
+  if (key !== s.promptKey) {
+    s.promptKey = key;
+    s.promptPop = 0;
+  }
+  if (t) s.promptPop = Math.min(1, s.promptPop + PROMPT_RISE);
+}
+
+/**
+ * Is there anything worth saying about this target?
+ *
+ * Everything except `drop`, which is the answer the interact key gives when
+ * there is nothing else within reach — true for most of the time anybody is
+ * carrying anything, and therefore not news after the first couple of seconds.
+ */
+function promptWanted(s: HudState, t: InteractTarget | null): t is InteractTarget {
+  if (!t) return false;
+  return t.action !== 'drop' || s.dropHint > 0;
+}
+
+/**
+ * The pill: a keycap in the player's own colour, then the verb.
+ *
+ * Sized off the measured text rather than off a guess, because the button on it
+ * may be 'E', 'Num 4', 'L Shift' or '←' depending on whose keyboard this is.
+ */
+function drawPrompt(
+  ctx: C2D,
+  cx: number,
+  top: number,
+  button: string,
+  verb: string,
+  tint: string,
+  scale: number,
+  alpha: number,
+): void {
+  const capW = Math.max(9, nameWidth(ctx, button, PROMPT_FONT) + 7);
+  const verbW = nameWidth(ctx, verb, PROMPT_FONT);
+  const w = 4 + capW + 5 + verbW + 5;
+  const x = cx - w * 0.5;
+  const base = top + PROMPT_H - 3.6;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  if (scale !== 1) {
+    // About the bottom edge, so it grows up out of the marker rather than
+    // through it.
+    ctx.translate(cx, top + PROMPT_H);
+    ctx.scale(scale, scale);
+    ctx.translate(-cx, -(top + PROMPT_H));
+  }
+
+  roundRect(ctx, x, top, w, PROMPT_H, 3, FRAME_BG, INK, 1.4);
+  roundRect(ctx, x + 4, top + 2, capW, PROMPT_H - 4, 2, tint, INK, 1.2);
+  // Ink on the player's colour: the keycap reads as a physical key, and it is
+  // the same hue as their marker and their panel, so a four-player couch can
+  // tell whose prompt it is without reading it.
+  text(ctx, button, x + 4 + capW * 0.5, base, PROMPT_FONT, INK, 'center');
+  text(ctx, verb, x + 4 + capW + 5, base, PROMPT_FONT, TEXT, 'left');
+  ctx.restore();
+}
+
+/** One player's prompt, stacked above their marker. */
+function drawInteractPrompt(
+  ctx: C2D,
+  f: Fighter,
+  s: HudState,
+  cam: Camera,
+  t: InteractTarget,
+  padOrder: number,
+  still: boolean,
+  opts?: HudOptions,
+): void {
+  if (f.team !== 'player' || !f.alive) return;
+  const button = interactButton(f, s, s.frame, padOrder, opts);
+  if (!button) return;
+  if (!headScreen(f, cam)) return;
+
+  // Above the marker, and above the whole height the marker's idle bob can
+  // reach, so the two never touch and the pill never bobs in sympathy.
+  const tip = Math.max(MARK_MIN_TIP_Y, HEAD.y - MARK_GAP);
+  const markTop = tip - MARK_CHEV_H - 2.5 - MARK_NUM_SIZE * 0.78 - MARK_BOB;
+  const top = Math.max(PROMPT_MIN_Y, markTop - PROMPT_GAP - PROMPT_H);
+
+  const scale = still ? 1 : easeOutBack(s.promptPop);
+  // The drop hint is on a timer rather than on a target going out of reach, so
+  // it is the one prompt that has to see itself out.
+  const leaving = t.action === 'drop' ? clamp(s.dropHint / 20, 0, 1) : 1;
+  const alpha = (still ? 1 : clamp(s.promptPop * 1.8, 0, 1)) * leaving;
+  if (alpha <= 0.01 || scale <= 0.01) return;
+
+  drawPrompt(ctx, HEAD.x, top, button, promptVerb(t), PLAYER_COLORS[playerIndex(f)], scale, alpha);
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 export function drawHud(
@@ -788,15 +1159,30 @@ export function drawHud(
   const still = holdStill();
 
   const slots = layout(players.length);
+  // Pads are handed to slots in ascending order, so counting the pad-driven
+  // players as we pass them gives each one the pad it is actually holding.
+  let padOrder = 0;
   for (let i = 0; i < players.length; i++) {
     const f = players[i];
     const slot = slots[i];
     if (!slot) break;
     const s = stateFor(f.id, f.maxHealth > 0 ? f.health / f.maxHealth : 0);
-    stepState(s, f, frame);
+    // Asked before the state is stepped, so the prompt's ease-in starts on the
+    // very frame the thing came within reach. Two short linear scans over
+    // things there are single digits of; see Level.interactTargetFor.
+    const target = f.team === 'player' && f.alive ? level.interactTargetFor(f) : null;
+    stepState(s, f, frame, target);
     const name = opts?.names?.[f.id] ?? dwarfName(f);
     drawPanel(ctx, f, slot, s, frame, level.livesFor(f.id), name);
-    if (cam) drawMarker(ctx, f, s, cam, frame, still);
+    const mine = s.onPad ? padOrder++ : 0;
+    if (cam) {
+      drawMarker(ctx, f, s, cam, frame, still);
+      // After the marker, so the pill is never drawn under a chevron it is
+      // meant to sit above.
+      if (promptWanted(s, target)) {
+        drawInteractPrompt(ctx, f, s, cam, target, mine, still, opts);
+      }
+    }
   }
 
   // Score and map strip, centred so it survives any player count.

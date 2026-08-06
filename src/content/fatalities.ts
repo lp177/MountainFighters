@@ -37,9 +37,35 @@
  *
  * `sfx` may only name cues that already exist in `SfxCue` — the repo ships no
  * audio files, and a cue with no synthesis recipe is silence.
+ *
+ * ── TROPHIES ────────────────────────────────────────────────────────────────
+ *
+ * `trophy` is what the finisher LEAVES, and it is the hook the follow-through
+ * hangs off — see `FLOURISHES` at the bottom of this file. It is read off the
+ * renderer rather than off the name, by two rules applied in order:
+ *
+ *   1. Something came off a body and is still in the shot: a spine, a heart, an
+ *      arm, a leg, a head, a hat, half a torso. That.
+ *   2. Otherwise the portable prop the kill was performed with or produced —
+ *      a pickaxe, a chain, a stapler, a car door, a brick, a taped box.
+ *      `'object'`.
+ *
+ * Scenery is not a trophy. A cubicle that grew out of the floor, a brick wall,
+ * a hatch, a rocket, an airlock and a car are all things the killer is standing
+ * next to rather than holding, and a finisher that ends with the killer's hands
+ * demonstrably empty — kicked over the horizon, buried, de-rendered, filed in a
+ * drawer — is honestly `'none'`. Half this book is `'none'`, and that is the
+ * right answer: the follow-through is a reward for the kills that hand you
+ * something, not a tax on the ones that do not.
  */
 
-import type { FatalityDef, Rng, Settings } from '@/core/types';
+import type {
+  FatalityDef,
+  FatalityFlourish,
+  Rng,
+  Settings,
+  TrophyKind,
+} from '@/core/types';
 
 export const FATALITIES: FatalityDef[] = [
   // ───────────────────────────────────────────────────────────────────────────
@@ -55,6 +81,9 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'heavy',
     visual: 'spine_pull',
     sfx: ['grunt', 'bone_crack', 'hit_flesh'],
+    // Held up, admired, and then dropped in the dirt — which is exactly the
+    // waste the follow-through exists to stop.
+    trophy: 'spine',
   },
   {
     id: 'organ_harvest',
@@ -66,6 +95,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'absurd',
     visual: 'heart_bite',
     sfx: ['hit_flesh', 'bone_crack', 'laugh'],
+    // One bite out of it. Still beating, still throwable.
+    trophy: 'heart',
   },
   {
     id: 'severance_package',
@@ -77,6 +108,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'light',
     visual: 'orbit_kick',
     sfx: ['kick', 'whiff', 'coin'],
+    // He clears the atmosphere in one piece and takes it all with him.
+    trophy: 'none',
   },
   {
     id: 'downsizing',
@@ -88,6 +121,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'heavy',
     visual: 'rack_drop',
     sfx: ['whiff', 'explosion', 'hit_metal'],
+    // A whole server rack, standing on a pair of shoes. It has wheels.
+    trophy: 'object',
   },
   {
     id: 'hi_ho',
@@ -99,6 +134,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'absurd',
     visual: 'pickaxe_split',
     sfx: ['weapon_swing', 'bone_crack', 'hit_flesh'],
+    // The pickaxe. It never leaves his hands in the first place.
+    trophy: 'object',
   },
   {
     id: 'chain_letter',
@@ -110,6 +147,9 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'heavy',
     visual: 'chain_decap',
     sfx: ['chain_whip', 'bone_crack', 'hit_flesh'],
+    // The head is a hundred and fifty units away and still spinning. The chain
+    // is the thing that stayed.
+    trophy: 'object',
   },
   {
     id: 'recycling',
@@ -121,6 +161,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'light',
     visual: 'barrel_fold',
     sfx: ['drop', 'hit_metal', 'bat_crack'],
+    // One green barrel, lid stomped flat, contents included.
+    trophy: 'object',
   },
   {
     id: 'terms_of_service',
@@ -132,6 +174,9 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'light',
     visual: 'eula_scroll',
     sfx: ['ui_error', 'ui_move', 'drop'],
+    // The contract ages with the reader and crumbles with him. Nothing is left
+    // but the pile.
+    trophy: 'none',
   },
   {
     id: 'synergy',
@@ -143,6 +188,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'absurd',
     visual: 'confetti_tear',
     sfx: ['grunt', 'bone_crack', 'laugh'],
+    // He finishes holding one of the two smaller teams in each hand.
+    trophy: 'torso',
   },
   {
     id: 'vesting_cliff',
@@ -154,6 +201,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'heavy',
     visual: 'off_frame_toss',
     sfx: ['whiff', 'hit_flesh', 'glass'],
+    // What comes back lands on his face, and he wipes it off.
+    trophy: 'none',
   },
   {
     id: 'exit_interview',
@@ -165,6 +214,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'heavy',
     visual: 'handshake_keep',
     sfx: ['grunt', 'bone_crack', 'drop'],
+    // It comes away at the shoulder. He offers it back. Nobody takes it.
+    trophy: 'arm',
   },
   {
     id: 'culture_fit',
@@ -176,6 +227,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'absurd',
     visual: 'unscrew_head',
     sfx: ['bone_crack', 'glass', 'laugh'],
+    // Held aloft, hat still on, still slowly turning.
+    trophy: 'head',
   },
   {
     id: 'return_to_office',
@@ -187,6 +240,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'light',
     visual: 'cubicle_seal',
     sfx: ['drop', 'hit_metal', 'ui_error'],
+    // The partitions grew out of the floor. They are not coming with him.
+    trophy: 'none',
   },
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -202,6 +257,9 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'light',
     visual: 'hat_eat',
     sfx: ['pickup', 'grunt', 'laugh'],
+    // The belch brings one scrap of pom-pom back up, and that is the entire
+    // trophy. Swinging it at a crowd is exactly as pathetic as it sounds.
+    trophy: 'hat',
   },
   {
     id: 'roof_toss',
@@ -213,6 +271,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'light',
     visual: 'hat_roof',
     sfx: ['whiff', 'ui_error', 'land'],
+    // On the ledge, out of reach of everyone, including the man who threw it.
+    trophy: 'none',
   },
   {
     id: 'pip',
@@ -224,6 +284,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'light',
     visual: 'pip_beating',
     sfx: ['punch_light', 'punch_light', 'ko'],
+    // The rolled-up document, softened by use.
+    trophy: 'object',
   },
   {
     id: 'non_disclosure',
@@ -235,6 +297,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'heavy',
     visual: 'staple_mouth',
     sfx: ['hit_metal', 'grunt', 'drop'],
+    // The stapler, still loaded.
+    trophy: 'object',
   },
   {
     id: 'grooming_policy',
@@ -246,6 +310,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'light',
     visual: 'beard_shave',
     sfx: ['taser', 'ui_error', 'drop'],
+    // Clippers, in hand, doing a job a taser was not designed for.
+    trophy: 'object',
   },
   {
     id: 'escorted',
@@ -257,6 +323,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'light',
     visual: 'escort_out',
     sfx: ['grunt', 'drop', 'ui_back'],
+    // He walks back in dusting his hands, which is the whole shot.
+    trophy: 'none',
   },
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -273,6 +341,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'light',
     visual: 'wontfix',
     sfx: ['ui_select', 'ui_error', 'ui_back'],
+    // He de-renders from the feet up. There is no body to take a part off.
+    trophy: 'none',
   },
   {
     id: 'shiba_leg',
@@ -285,6 +355,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'heavy',
     visual: 'shiba_leg',
     sfx: ['bone_crack', 'hit_flesh', 'laugh'],
+    // In the mouth, boot still on it, and he is not giving it back.
+    trophy: 'leg',
   },
   {
     id: 'shiba_bury',
@@ -297,6 +369,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'light',
     visual: 'shiba_bury',
     sfx: ['dash', 'drop', 'land'],
+    // Underground, backfilled, patted down.
+    trophy: 'none',
   },
   {
     id: 'check_ratio',
@@ -309,6 +383,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'light',
     visual: 'ratio_crush',
     sfx: ['ui_move', 'ui_error', 'explosion'],
+    // Nine replies deep into the floor. Nothing above ground to pick up.
+    trophy: 'none',
   },
   {
     id: 'fsd_park',
@@ -321,6 +397,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'heavy',
     visual: 'car_roll',
     sfx: ['engine', 'tyres', 'hit_flesh'],
+    // The killer is a car, and the car keeps all of its parts.
+    trophy: 'none',
   },
   {
     id: 'fsd_door',
@@ -333,6 +411,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'heavy',
     visual: 'falcon_door',
     sfx: ['hit_metal', 'glass', 'ui_error'],
+    // One falcon door, glass already gone, hinge negotiable.
+    trophy: 'object',
   },
   {
     id: 'boring_muck',
@@ -345,6 +425,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'absurd',
     visual: 'muck_brick',
     sfx: ['engine', 'hit_flesh', 'drop'],
+    // One brick, hat on top, grade A fill.
+    trophy: 'object',
   },
   {
     id: 'boring_tube',
@@ -357,6 +439,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'light',
     visual: 'tube_drop',
     sfx: ['drop', 'whiff', 'land'],
+    // The hatch shuts over him. Please stand clear.
+    trophy: 'none',
   },
   {
     id: 'nl_trial',
@@ -369,6 +453,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'heavy',
     visual: 'implant_fit',
     sfx: ['taser', 'bone_crack', 'robot_death'],
+    // The only hardware in the shot is screwed into his skull.
+    trophy: 'none',
   },
   {
     id: 'reg_ruling',
@@ -381,6 +467,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'light',
     visual: 'gavel_stamp',
     sfx: ['whiff', 'explosion', 'drop'],
+    // A gavel the size of a dwarf, already up in the air.
+    trophy: 'object',
   },
   {
     id: 'trump_delegate',
@@ -393,6 +481,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'light',
     visual: 'delegate_drag',
     sfx: ['grunt', 'drop', 'ui_back'],
+    // The staff took him away and the staff kept him.
+    trophy: 'none',
   },
   {
     id: 'trump_wall',
@@ -405,6 +495,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'heavy',
     visual: 'wall_drop',
     sfx: ['whiff', 'explosion', 'coin'],
+    // Six courses of brick is masonry, not a prop.
+    trophy: 'none',
   },
   {
     id: 'opt_fold',
@@ -417,6 +509,9 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'heavy',
     visual: 'fold_stack',
     sfx: ['robot_death', 'bone_crack', 'drop'],
+    // A dwarf folded into a warm square with crisp corners. It stacks. It also
+    // rolls.
+    trophy: 'torso',
   },
   {
     id: 'grok_hallucinate',
@@ -429,6 +524,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'light',
     visual: 'hallucinated',
     sfx: ['ui_error', 'glass', 'ui_back'],
+    // Confidently cited as never having existed. Citations have no body parts.
+    trophy: 'none',
   },
   {
     id: 'ship_rud',
@@ -441,6 +538,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'absurd',
     visual: 'rud_launch',
     sfx: ['super_charge', 'explosion', 'land'],
+    // One scorched boot lands at his feet, which is all that came back.
+    trophy: 'object',
   },
   {
     id: 'ship_static',
@@ -453,6 +552,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'heavy',
     visual: 'static_fire',
     sfx: ['engine', 'explosion', 'hit_flesh'],
+    // The man is a stencil on the floor. The hat floats down unharmed.
+    trophy: 'hat',
   },
   {
     id: 'mars_airlock',
@@ -465,6 +566,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'light',
     visual: 'airlock_vent',
     sfx: ['ui_error', 'whiff', 'glass'],
+    // Everything not bolted down went out with him, waving.
+    trophy: 'none',
   },
   {
     id: 'clone_kiss',
@@ -477,6 +580,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'heavy',
     visual: 'kiss_shatter',
     sfx: ['super_charge', 'glass', 'ko'],
+    // A knee-high pile of blue shards, none of which is a handle.
+    trophy: 'none',
   },
   {
     id: 'musk_schematic',
@@ -489,6 +594,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'absurd',
     visual: 'exploded_view',
     sfx: ['super_charge', 'bone_crack', 'super_blast'],
+    // Every part is labelled, and every part goes in the drawer.
+    trophy: 'none',
   },
   {
     id: 'musk_acquired',
@@ -501,6 +608,8 @@ export const FATALITIES: FatalityDef[] = [
     gore: 'light',
     visual: 'acquired_box',
     sfx: ['coin', 'drop', 'hit_metal'],
+    // One taped box with a dwarf in it and a one-dollar tag on the side.
+    trophy: 'object',
   },
 ];
 
@@ -533,6 +642,7 @@ const recent: string[] = [];
 /** Drop the history. Call between fights so a new map does not inherit one. */
 export function resetFatalityHistory(): void {
   recent.length = 0;
+  recentFlourish.length = 0;
 }
 
 const poolCache = new Map<string, FatalityDef[]>();
@@ -618,6 +728,388 @@ export function pickFatality(
 
     recent.push(last.id);
     if (recent.length > RECENT_MAX) recent.shift();
+    return last;
+  }
+  return null;
+}
+
+/** What a finisher left in the killer's hands. Unset means empty-handed. */
+export function trophyOf(f: FatalityDef): TrophyKind {
+  return f.trophy ?? 'none';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The follow-through
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * What the killer does with the trophy while the rest of the room is watching.
+ *
+ * A finisher in a crowd used to be a private event: the victim died
+ * spectacularly and the six guards around them stood politely and waited their
+ * turn. The flourish is the half of the joke the bystanders are in — the spine
+ * that was going to be dropped gets swung through the lot of them instead,
+ * which is funnier, and which makes finishing someone in the MIDDLE of a pack
+ * worth doing on purpose.
+ *
+ * ── HOW AN ENTRY IS READ ────────────────────────────────────────────────────
+ *
+ * Same two-edit rule as the finishers: `visual` names a bespoke renderer in the
+ * director's flourish table, and a flourish with no renderer never plays —
+ * `chooseFlourish` refuses to stage what it cannot draw and the finisher simply
+ * ends the way it always did. `visual` therefore names the MOVEMENT, not the
+ * joke: RETURN POLICY throws a boomerang and GOLF drives off a tee, so they
+ * point at `boomerang` and `golf_drive` however their banners read. No flourish
+ * visual collides with a `FatalityDef.visual` from the book above; keep it that
+ * way, in case the two tables are ever merged into one lookup.
+ *
+ * `radius` is world units around the killer, and -1 is everyone on screen. The
+ * throws read it as reach rather than as a blast: JAVELIN's 240 is how far it
+ * will look for one target, not a sphere of damage.
+ *
+ * `damage` is deliberately SMALL. A finisher just killed someone; this is the
+ * tip, not a second super. The knockdown is the reward — a room full of guards
+ * on their backs is worth far more than four points of chip.
+ *
+ * `trophies` keeps each one plausible: a spine whips, a head bowls, a heart
+ * does neither, and an omitted list means "anything the finisher left you
+ * holding". Nothing works with `'none'` — miming a tornado with empty hands is
+ * not a joke, it is a bug — and every other TrophyKind has at least SEVEN
+ * non-absurd flourishes, so no trophy quietly runs out of things to do at the
+ * default gore setting.
+ *
+ * The weights lean hard on TORNADO because it is the one that teaches the
+ * player the mechanic exists, and everything after it is the surprise. SOUVENIR
+ * is the exception that proves it: no damage, no crowd, no point, and funny
+ * precisely because the other fourteen are none of those things.
+ */
+
+/** Long, floppy, and hinged in the wrong places. A club, not a ball. */
+const LIMBS: TrophyKind[] = ['spine', 'arm', 'leg', 'object'];
+/** Small enough to tee up, lob underarm, or wear as a hat. */
+const ROUND: TrophyKind[] = ['heart', 'head', 'hat', 'object'];
+/** Enough mass to move the floor when it lands. */
+const HEFTY: TrophyKind[] = ['spine', 'arm', 'leg', 'head', 'torso', 'object'];
+/** Things that burst rather than snap. */
+const BURSTS: TrophyKind[] = ['heart', 'head', 'torso', 'hat', 'object'];
+/** Things you can hand to a stranger. A torso is not one of them. */
+const TOSSABLE: TrophyKind[] = ['spine', 'heart', 'arm', 'leg', 'head', 'hat', 'object'];
+
+export const FLOURISHES: FatalityFlourish[] = [
+  /**
+   * Plant a foot, hold it out at arm's length, and turn until the room is
+   * horizontal. The one the whole feature was asked for, and the most common by
+   * a wide margin so that nobody has to be told it is in the game.
+   */
+  {
+    id: 'tornado',
+    name: 'TORNADO',
+    visual: 'tornado',
+    duration: 88,
+    radius: 66,
+    damage: 5,
+    reaction: 'sweep',
+    weight: 26,
+    gore: 'heavy',
+    sfx: ['weapon_swing', 'hit_flesh', 'land'],
+  },
+  /** One target, one throw, and that target leaves the postcode. */
+  {
+    id: 'javelin',
+    name: 'JAVELIN',
+    visual: 'javelin',
+    duration: 66,
+    radius: 240,
+    damage: 10,
+    reaction: 'blowback',
+    weight: 15,
+    gore: 'heavy',
+    sfx: ['grunt', 'whiff', 'hit_flesh'],
+  },
+  /** Underarm, along the floor, down a lane of guards. Seven pins is a strike. */
+  {
+    id: 'bowling',
+    name: 'BOWLING',
+    visual: 'bowling',
+    duration: 100,
+    radius: 210,
+    damage: 6,
+    reaction: 'sweep',
+    trophies: ['head', 'torso'],
+    weight: 11,
+    gore: 'heavy',
+    sfx: ['drop', 'dash', 'hit_flesh'],
+  },
+  /** Overhead, faster, faster — then let go and look at something else. */
+  {
+    id: 'helicopter',
+    name: 'HELICOPTER',
+    visual: 'helicopter',
+    duration: 108,
+    radius: -1,
+    damage: 8,
+    reaction: 'crumple',
+    weight: 12,
+    gore: 'light',
+    sfx: ['weapon_swing', 'whiff', 'hit_flesh'],
+  },
+  /** Tee it up, address the ball, and put it flat through the front row. */
+  {
+    id: 'golf',
+    name: 'GOLF',
+    visual: 'golf_drive',
+    duration: 74,
+    radius: 190,
+    damage: 7,
+    reaction: 'blowback',
+    trophies: [...ROUND],
+    weight: 12,
+    gore: 'light',
+    sfx: ['whiff', 'bat_crack', 'coin'],
+  },
+  /** Both hands, straight down, and let the floor pass the message on. */
+  {
+    id: 'pile_driver',
+    name: 'PILE DRIVER',
+    visual: 'ground_slam',
+    duration: 70,
+    radius: 80,
+    damage: 5,
+    reaction: 'sweep',
+    trophies: [...HEFTY],
+    weight: 12,
+    gore: 'heavy',
+    sfx: ['grunt', 'explosion', 'land'],
+  },
+  /** Thirty-three vertebrae of rawhide. It was always going to end up as this. */
+  {
+    id: 'whip',
+    name: 'WHIP',
+    visual: 'whip',
+    duration: 78,
+    radius: 98,
+    damage: 6,
+    reaction: 'sweep',
+    trophies: ['spine', 'arm'],
+    weight: 9,
+    gore: 'heavy',
+    sfx: ['chain_whip', 'bone_crack', 'hit_flesh'],
+  },
+  /** Bat it until it gives up its contents. Everybody stands under it anyway. */
+  {
+    id: 'pinata',
+    name: 'PIÑATA',
+    visual: 'pinata',
+    duration: 116,
+    radius: 60,
+    damage: 4,
+    reaction: 'sweep',
+    trophies: [...BURSTS],
+    weight: 7,
+    gore: 'absurd',
+    sfx: ['bat_crack', 'hit_flesh', 'laugh'],
+  },
+  /** Lobbed to a stranger, who catches it before he has thought it through. */
+  {
+    id: 'hot_potato',
+    name: 'HOT POTATO',
+    visual: 'hot_potato',
+    duration: 98,
+    radius: 112,
+    damage: 3,
+    reaction: 'sweep',
+    trophies: [...TOSSABLE],
+    weight: 8,
+    gore: 'light',
+    sfx: ['whiff', 'grunt', 'drop'],
+  },
+  /**
+   * Pockets it. Walks off. Nothing happens to anybody.
+   *
+   * The rare quiet one, and worth every frame of the anticlimax: a flourish
+   * that always pays off has stopped being a joke by the third wave.
+   */
+  {
+    id: 'souvenir',
+    name: 'SOUVENIR',
+    visual: 'souvenir',
+    duration: 58,
+    radius: 0,
+    damage: 0,
+    reaction: 'light',
+    weight: 3,
+    gore: 'light',
+    sfx: ['pickup', 'coin'],
+  },
+  /** Backhand, backhand, backhand, all the way round. Attendance is mandatory. */
+  {
+    id: 'all_hands',
+    name: 'ALL HANDS',
+    visual: 'all_hands',
+    duration: 92,
+    radius: 72,
+    damage: 4,
+    reaction: 'heavy',
+    trophies: [...LIMBS],
+    weight: 9,
+    gore: 'light',
+    sfx: ['weapon_swing', 'punch_heavy', 'grunt'],
+  },
+  /** Thrown flat, and it comes back through the same people on the way home. */
+  {
+    id: 'return_policy',
+    name: 'RETURN POLICY',
+    visual: 'boomerang',
+    duration: 104,
+    radius: 170,
+    damage: 4,
+    reaction: 'sweep',
+    trophies: [...LIMBS],
+    weight: 7,
+    gore: 'heavy',
+    sfx: ['whiff', 'chain_whip', 'hit_flesh'],
+  },
+  /** Up, hang there longer than is reasonable, and down onto somebody's head. */
+  {
+    id: 'slam_dunk',
+    name: 'SLAM DUNK',
+    visual: 'slam_dunk',
+    duration: 82,
+    radius: 46,
+    damage: 9,
+    reaction: 'crumple',
+    trophies: ['head', 'heart', 'hat', 'torso', 'object'],
+    weight: 8,
+    gore: 'heavy',
+    sfx: ['jump', 'bone_crack', 'land'],
+  },
+  /** Two guards, one femur, alternating. Nobody asked for a solo. */
+  {
+    id: 'drum_solo',
+    name: 'DRUM SOLO',
+    visual: 'drum_solo',
+    duration: 112,
+    radius: 54,
+    damage: 3,
+    reaction: 'stun',
+    trophies: ['spine', 'arm', 'leg', 'head', 'object'],
+    weight: 6,
+    gore: 'light',
+    sfx: ['punch_light', 'punch_light', 'laugh'],
+  },
+  /**
+   * Wears it. Takes a bow. Holds the bow far too long.
+   *
+   * Almost no damage: the guards go down from second-hand embarrassment, which
+   * is the only status effect in this game anybody has ever deserved.
+   */
+  {
+    id: 'mascot',
+    name: 'MASCOT',
+    visual: 'mascot',
+    duration: 104,
+    radius: 88,
+    damage: 1,
+    reaction: 'stun',
+    trophies: ['head', 'hat', 'torso', 'object'],
+    weight: 4,
+    gore: 'absurd',
+    sfx: ['pickup', 'laugh', 'ui_error'],
+  },
+];
+
+/**
+ * Flourishes played recently, most recent last. Same reasoning as `recent`
+ * above, and cleared by the same `resetFatalityHistory()`, so a caller that
+ * already resets between fights needs no second call.
+ */
+const recentFlourish: string[] = [];
+
+const flourishCache = new Map<TrophyKind, FatalityFlourish[]>();
+
+/**
+ * Every flourish that works with a given trophy, in table order.
+ *
+ * Cached and shared — treat the result as read-only. `'none'` gets an empty
+ * list, because empty hands have nothing to perform with.
+ */
+export function flourishesFor(trophy: TrophyKind): FatalityFlourish[] {
+  const cached = flourishCache.get(trophy);
+  if (cached) return cached;
+
+  const out: FatalityFlourish[] = [];
+  if (trophy !== 'none') {
+    for (const f of FLOURISHES) {
+      const only = f.trophies;
+      if (only !== undefined && only.length > 0 && only.indexOf(trophy) < 0) continue;
+      out.push(f);
+    }
+  }
+  flourishCache.set(trophy, out);
+  return out;
+}
+
+/**
+ * `strict` 0 bans everything in the history, 1 bans only the last one played,
+ * 2 bans nothing — the same relaxing ladder the finishers use, which matters
+ * more here because the trophy has already cut the pool down before the ban
+ * gets a look at it.
+ */
+function flourishEligible(f: FatalityFlourish, cap: number, strict: number): boolean {
+  if (f.weight <= 0) return false;
+  if (GORE_RANK[f.gore] > cap) return false;
+  if (strict >= 2) return true;
+  if (strict === 1) {
+    return recentFlourish.length === 0 || recentFlourish[recentFlourish.length - 1] !== f.id;
+  }
+  return recentFlourish.indexOf(f.id) < 0;
+}
+
+/**
+ * Weighted, deterministic, gore-capped, trophy-aware and repeat-averse.
+ *
+ * Returns null when there is nothing in the killer's hands (`'none'`, or a
+ * finisher that never set a trophy at all), when the gore setting says no
+ * finishers, and when the trophy has no flourish it can perform at this
+ * setting. Consumes at most one number from `rng`, and only on a call that is
+ * going to return something, so asking on a frame where no flourish applies
+ * cannot advance the shared stream and desync a lockstep match.
+ */
+export function pickFlourish(
+  trophy: TrophyKind | undefined,
+  rng: Rng,
+  gore: Settings['gore'] = 'on',
+): FatalityFlourish | null {
+  if (trophy === undefined || trophy === 'none') return null;
+
+  // 'off' means no finishers at all, and a follow-through to a finisher that
+  // never happened is not something the game can be talked into staging.
+  const cap = LEVEL_CAP[gore] ?? LEVEL_CAP.on;
+  if (cap < 0) return null;
+
+  const pool = flourishesFor(trophy);
+  if (pool.length === 0) return null;
+
+  for (let strict = 0; strict < 3; strict++) {
+    let total = 0;
+    for (let i = 0; i < pool.length; i++) {
+      if (flourishEligible(pool[i], cap, strict)) total += pool[i].weight;
+    }
+    if (total <= 0) continue;
+
+    let roll = rng.next() * total;
+    let last: FatalityFlourish | null = null;
+    for (let i = 0; i < pool.length; i++) {
+      const f = pool[i];
+      if (!flourishEligible(f, cap, strict)) continue;
+      last = f;
+      roll -= f.weight;
+      if (roll <= 0) break;
+    }
+    if (!last) continue;
+
+    recentFlourish.push(last.id);
+    if (recentFlourish.length > RECENT_MAX) recentFlourish.shift();
     return last;
   }
   return null;

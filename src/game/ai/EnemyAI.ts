@@ -81,12 +81,24 @@ const REACH_LIGHT = 30;
 const REACH_HEAVY = 40;
 const REACH_GRAB = 22;
 /** Below this the sniper stops shooting and starts walking backwards. */
-const RANGED_MIN = 78;
-const RANGED_MAX = 300;
+/**
+ * How close a shooter lets you get before backing off.
+ *
+ * At 78 a gunman broke and ran the moment you were anywhere near, so closing
+ * the distance was a jog across the whole map and the fight stopped happening.
+ * Now they only give ground when you are genuinely on top of them.
+ */
+const RANGED_MIN = 44;
+/** Past this they close in. Kept on-screen so they cannot snipe from off-shot. */
+const RANGED_MAX = 190;
 /** Depth error we are willing to swing through. */
 const Z_ALIGNED = Z_HIT_TOLERANCE * 0.8;
 /** Inside this x gap the enemy must finish lining up before it may close. */
 const CLOSE_X = 76;
+/** Frames of backing away a shooter may spend before standing its ground. */
+const RETREAT_BUDGET = 90;
+/** ...and how fast that allowance comes back once it stops running. */
+const RETREAT_REFILL = 0.6;
 const PRESS_FRAMES = 3;
 const BLOCK_HOLD = 15;
 /** Frames a threat has to be in startup for us to still react to it. */
@@ -120,6 +132,12 @@ export class EnemyAI implements InputSource {
   private plan: Plan = 'approach';
   /** Distance the current plan wants to hold. */
   private standoff = 34;
+  /**
+   * Frames of backing away a shooter has left before it must hold its ground.
+   * Refills while it is not running, so it can reposition but never kite you
+   * across the whole map.
+   */
+  private retreatBudget = RETREAT_BUDGET;
   /** Which side of the target we are trying to occupy. */
   private side: 1 | -1 = 1;
   /** Depth offset from the target, so a pack does not stack in one line. */
@@ -167,6 +185,11 @@ export class EnemyAI implements InputSource {
   sample(frame: number): BtnMask {
     this.frame = frame;
     const self = this.self;
+
+    // Standing still earns back the right to give ground later.
+    if (this.plan !== 'retreat' && this.retreatBudget < RETREAT_BUDGET) {
+      this.retreatBudget = Math.min(RETREAT_BUDGET, this.retreatBudget + RETREAT_REFILL);
+    }
 
     if (!self.alive || HELPLESS.has(self.state)) {
       this.timer = 0;
@@ -329,9 +352,18 @@ export class EnemyAI implements InputSource {
       }
       case 'sniper': {
         this.standoff = Math.max(spacing, RANGED_MIN + 24);
-        if (adx < RANGED_MIN) this.plan = 'retreat';
-        else if (adx > RANGED_MAX) this.plan = 'approach';
-        else this.plan = mayEngage ? 'ranged' : 'circle';
+        // A shooter that always backs off can kite forever, and chasing one
+        // across the map is not a fight — it is a commute. Retreating is on a
+        // budget: once spent, they stand their ground and shoot until it
+        // refills, so the player always gets to close the distance eventually.
+        if (adx < RANGED_MIN && this.retreatBudget > 0) {
+          this.plan = 'retreat';
+          this.retreatBudget -= this.p.reactionFrames;
+        } else if (adx > RANGED_MAX) {
+          this.plan = 'approach';
+        } else {
+          this.plan = mayEngage ? 'ranged' : 'circle';
+        }
         break;
       }
       case 'turtle': {

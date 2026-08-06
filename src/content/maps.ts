@@ -9,8 +9,9 @@
  *   5 — the first boss arena
  *
  * Maps 6–70 are generated at module load from a seeded RNG walking the theme
- * list, escalating wave size and enemy mix with depth and hanging a boss on
- * every fifth map. Every map name is hand-written, because the names are the
+ * list, escalating wave size and enemy mix with depth, hanging a boss on every
+ * fifth map and a vehicle section on roughly one map in six or seven — see
+ * VEHICLE_RUNS. Every map name is hand-written, because the names are the
  * point. `MAPS` is a plain array of 70 fully-populated MapDefs — no holes, no
  * lazy initialisation, no undefined.
  */
@@ -395,19 +396,31 @@ const THEME_WEAPONS: Record<MapTheme, WeaponKind[]> = {
   mars_dome: ['cybertruck_door', 'pistol', 'ironbar'],
 };
 
-const THEME_VEHICLE: Record<MapTheme, VehicleSection['kind']> = {
-  mine: 'moto',
-  forest: 'moto',
-  suburb: 'cybertruck',
-  tunnel: 'hyperloop_pod',
-  factory: 'moto',
-  gigafactory: 'cybertruck',
-  server_farm: 'hyperloop_pod',
-  social_feed: 'moto',
-  boardroom: 'cybertruck',
-  launchpad: 'rocket',
-  orbit: 'rocket',
-  mars_dome: 'cybertruck',
+/**
+ * Where the campaign puts you on something with an engine.
+ *
+ * Roughly one map in six or seven — often enough that the player learns to hope
+ * for it, rare enough that it stays a treat rather than a traversal mechanic.
+ * Never on a boss map: the boss is that map's event, and nobody should arrive at
+ * one still holding a throttle.
+ *
+ * The kind is chosen per map rather than per theme, because the map is a joke
+ * with a name and the vehicle is its punchline — a pod belongs in the tunnel
+ * that was sold as a hyperloop, a rocket belongs in the debris field they called
+ * a success. Map 4 is absent from this table on purpose: its bike is
+ * hand-authored above, and it is the one the player meets first.
+ */
+const VEHICLE_RUNS: Record<number, VehicleSection['kind']> = {
+  8: 'hyperloop_pod', // Loop Station Beta — the tube it kept promising
+  14: 'cybertruck', // straight through the all-hands nobody attended
+  21: 'hyperloop_pod', // Dirt, And Debt, And Dirt: the boring machine's own line
+  28: 'moto', // Vivarium B — a factory floor with nothing on it but staff
+  36: 'cybertruck', // the rally field, ankle deep, motorcade-style
+  43: 'moto', // Actuator Wing, taken at speed
+  49: 'hyperloop_pod', // Cooling Loop Gamma: a pod in a pipe by another name
+  54: 'rocket', // the debris field they called a success
+  61: 'cybertruck', // Regolith Row, the only road on Mars
+  69: 'rocket', // the private elevator, going up
 };
 
 const THEME_DEPTH: Record<MapTheme, number> = {
@@ -518,6 +531,38 @@ function makeProps(index: number, theme: MapTheme, width: number, depth: number,
     props.push(prop);
   }
   return props;
+}
+
+/** Two decimals, so the shipped data reads like something a person wrote. */
+function hundredths(v: number): number {
+  return Math.round(v * 100) / 100;
+}
+
+/**
+ * Where inside the map the ride sits.
+ *
+ * It opens a clear stretch after the first wave, so the player has met the level
+ * on foot and knows what they are about to go past at speed, and it closes well
+ * before the last one, so the map finishes the way every other map finishes:
+ * standing up, with your hands. Boss maps are excluded by the caller rather than
+ * squeezed in here, because a section short enough to clear a boss arena is not
+ * worth mounting.
+ *
+ * Deterministic: the jitter comes from the map's own seeded rng, drawn after
+ * everything else the map needs, so hanging a vehicle on a map cannot shift its
+ * palette, waves or props.
+ */
+function vehicleSpan(kind: VehicleSection['kind'], waves: WaveDef[], rng: Rng): VehicleSection {
+  const first = waves.length > 0 ? waves[0].at : 0.16;
+  const last = waves.length > 0 ? waves[waves.length - 1].at : 0.9;
+
+  const from = clamp(first + rng.range(0.12, 0.2), 0.26, 0.46);
+  // The latest it may end, and never so late that dismounting lands on the
+  // closing wave. The max() keeps the stretch non-empty whatever the waves do.
+  const latest = Math.max(from + 0.22, Math.min(0.82, last - 0.08));
+  const to = Math.min(from + rng.range(0.28, 0.4), latest);
+
+  return { kind, from: hundredths(from), to: hundredths(to) };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -793,11 +838,12 @@ function generated(index: number): MapDef {
   };
 
   if (boss) def.boss = boss.id;
-  // A vehicle stretch on two interleaved cadences, so they never settle into a
-  // rhythm the player can count. Never on a boss map — the boss is the event.
-  if (!hasBoss && (index % 9 === 4 || index % 11 === 8)) {
-    def.vehicle = { kind: THEME_VEHICLE[theme], from: 0.34, to: 0.7 };
-  }
+
+  // The vehicle stretch, on the campaign cadence in VEHICLE_RUNS. Guarded on the
+  // boss again rather than trusting the table, so moving a boss can only cost a
+  // map its ride, never drop one into a boss arena.
+  const ride = VEHICLE_RUNS[index];
+  if (ride && !hasBoss) def.vehicle = vehicleSpan(ride, def.waves, rng);
 
   return def;
 }

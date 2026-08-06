@@ -37,8 +37,15 @@ export const AIR_FRICTION = 0.96;
 export const Z_FRICTION = 0.7;
 /** Fighters push each other apart at this rate when overlapping. */
 export const SEPARATION_FORCE = 0.55;
-/** How close in z two fighters must be to interact at all. */
-export const Z_HIT_TOLERANCE = 14;
+/**
+ * How close in z two fighters must be to touch each other at all.
+ *
+ * This is a brawler, not a precision game. At 14 you had to line up almost
+ * exactly to connect, and whiffing because you were one pixel off the enemy's
+ * lane is the single most frustrating thing a belt-scroller can do. Widened
+ * deliberately: swinging in roughly the right place should land.
+ */
+export const Z_HIT_TOLERANCE = 26;
 
 export const WALK_SPEED = 1.75;
 export const RUN_SPEED = 3.6;
@@ -65,8 +72,16 @@ export const MAX_METER_BARS = 3;
 export const STUN_THRESHOLD = 28;
 export const STUN_DECAY_PER_FRAME = 0.06;
 export const STUN_DURATION = 110;
-/** Frames of invulnerability after getting up from a knockdown. */
-export const WAKEUP_INVULN = 18;
+/**
+ * Frames of invulnerability after getting up from a knockdown.
+ *
+ * 18 frames was not enough to clear the getup animation, so an enemy standing
+ * over you — especially a gunman, who does not even have to close in — could
+ * knock you straight back down before you had control. Being juggled between
+ * knockdowns with no input is not difficulty, it is a broken loop. Now long
+ * enough to walk out of the situation you woke up in.
+ */
+export const WAKEUP_INVULN = 52;
 /** Frames a fighter lies on the floor before getting up. */
 export const KNOCKDOWN_FRAMES = 48;
 /** Fraction of blocked damage that still lands as chip. */

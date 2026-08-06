@@ -22,6 +22,7 @@ import type {
   FighterView,
   HitProperties,
   HitReaction,
+  HitWindow,
   InputFrame,
   MoveDef,
   RigDamage,
@@ -77,6 +78,8 @@ import {
   Z_SCALE,
 } from '@/core/constants';
 import { CLIPS, sampleClip } from '@/render/rig/Anim';
+import { drawBossRig, hasBossRig } from '@/render/rig/BossRigs';
+import type { BossRigKind } from '@/render/rig/BossRigs';
 import { drawCharacter } from '@/render/rig/CharacterRig';
 import { getMove } from '@/game/combat/Moves';
 import { WEAPONS } from '@/content/weapons';
@@ -108,6 +111,15 @@ export interface FighterInit {
   voice: VoiceProfile;
   archetype: string;
   isBoss?: boolean;
+  /**
+   * Bespoke body for a boss that is not a person — a dog, a car, a rocket.
+   *
+   * BossDef.rigOverride existed for seventy maps and was consulted for nothing
+   * but the choice of skeleton, so the Shiba Inu was a spiky orange dwarf
+   * skeleton at 1.7 scale. Set this and the fighter is drawn by BossRigs
+   * instead of by drawCharacter.
+   */
+  bossRig?: BossRigKind;
 }
 
 /** Buffered action slots. These map to move ids through `moves`. */
@@ -185,6 +197,43 @@ const MIN_LAUNCH_VELOCITY = 7.6;
 /** Each subsequent air hit in a juggle carries this much less knockback. */
 const JUGGLE_DECAY = 0.42;
 const MIN_JUGGLE_SCALE = 0.22;
+
+// ── Interaction & riding ─────────────────────────────────────────────────────
+// A Fighter cannot see the floor it is standing on: what is within reach is the
+// Level's business. So the interact button is LATCHED here and answered there,
+// which keeps "am I able to reach for something" (a body question) apart from
+// "is there anything to reach for" (a world question).
+
+/**
+ * Frames a `Btn.Interact` press waits for the Level to answer it.
+ *
+ * Edge-triggered on purpose. Holding the key must never pinball between two
+ * weapons lying next to each other on consecutive frames — one press, one
+ * exchange, and the buffer only exists so a press a few frames before you get
+ * in range still lands.
+ */
+const INTERACT_BUFFER_FRAMES = 8;
+
+/** Top speed on a vehicle: twice a run, and it is meant to feel like it. */
+const RIDE_TOP_SPEED = 7.4;
+const RIDE_ACCEL = 0.42;
+/** Hard on the anchors — braking and turning are the same act to a tyre. */
+const RIDE_BRAKE = 0.66;
+/** Coasting is deliberately lazy. A vehicle carries momentum; legs do not. */
+const RIDE_COAST = 0.055;
+const RIDE_Z_SPEED = 1.9;
+/** Above this a turn or a brake tears rubber off, audibly. */
+const RIDE_SCREECH_SPEED = 3.6;
+const RIDE_SCREECH_FRAMES = 14;
+/** Frames between engine barks. Roughly the length of the cue itself. */
+const RIDE_ENGINE_INTERVAL = 56;
+/** Throttle blip: what an attack from the saddle is, physically. */
+const RIDE_LUNGE = 3.4;
+const RIDE_SWING_FRAMES = 13;
+/** Frames the front wheel stays up. Purely so the player can show off. */
+const RIDE_WHEELIE_FRAMES = 30;
+/** Speed the wheelie itself adds, because of course it does. */
+const RIDE_WHEELIE_BOOST = 1.6;
 /** Dizzy meter added per hit, by reaction. */
 const STUN_BUILD: Record<HitReaction, number> = {
   light: 1,
@@ -376,6 +425,8 @@ export class Fighter implements FighterView {
    * it too: a fridge should shower sparks when it is torn open, not blood.
    */
   readonly mechanical: boolean;
+  /** Non-humanoid boss body, when this fighter has one. */
+  readonly bossRig: BossRigKind | null;
 
   private readonly prevPos: Vec3;
   private age = 0;
@@ -434,6 +485,31 @@ export class Fighter implements FighterView {
   private weaponSpeed = 1;
   private pickupFrames = 0;
 
+  /** Frames left on an unanswered interact press. See INTERACT_BUFFER_FRAMES. */
+  private interactFrames = 0;
+  /**
+   * The vehicle's own horizontal speed.
+   *
+   * Held separately from `vel.x` because ground friction eats `vel.x` every
+   * frame — that is correct for a pair of legs and wrong for a machine with
+   * momentum, so the ride writes its speed into `vel.x` fresh each frame and
+   * keeps the real value here.
+   */
+  private rideVel = 0;
+  /** Speed multiplier for the thing being ridden. A pod is not a moto. */
+  private rideBoost = 1;
+  private rideWheelie = 0;
+  private rideSwing = 0;
+  /**
+   * The live hitbox of a swing from the saddle. A FRESH object per swing: the
+   * combat registry keys "already hit" on window identity, and reusing one
+   * object would let a rider connect with each enemy exactly once per ride.
+   */
+  private rideWindow: HitWindow | null = null;
+  /** Frames of tyre smoke owed. Presentation reads it; nothing else does. */
+  private rideScreech = 0;
+  private rideEngine = 0;
+
   private grabHolder: Fighter | null = null;
   private grabTimer = 0;
 
@@ -482,6 +558,7 @@ export class Fighter implements FighterView {
     this.powerStat = clamp(init.power || 1, 0.1, 5);
     this.jumpStat = clamp(init.jump ?? 1, 0.4, 2.5);
     this.mechanical = isMechanicalArchetype(init.archetype);
+    this.bossRig = init.bossRig ?? null;
     this.damage = {
       wear: 0,
       breath: 0,
@@ -584,7 +661,7 @@ export class Fighter implements FighterView {
         this.updateStunned();
         break;
       case 'riding':
-        this.updateRiding();
+        this.updateRiding(ctx);
         break;
       case 'entering':
         this.updateEntering();
@@ -710,6 +787,9 @@ export class Fighter implements FighterView {
       if (this.comboTimer === 0) this.comboCount = 0;
     }
     if (this.pickupFrames > 0) this.pickupFrames--;
+    if (this.interactFrames > 0) this.interactFrames--;
+    if (this.rideScreech > 0) this.rideScreech--;
+    if (this.rideWheelie > 0) this.rideWheelie--;
     if (this.tapAge < 999) this.tapAge++;
     if (this.dizzyMeter > 0) {
       this.dizzyMeter = Math.max(0, this.dizzyMeter - STUN_DECAY_PER_FRAME);
@@ -760,6 +840,10 @@ export class Fighter implements FighterView {
       }
     }
 
+    // Latched, never held: one press is one exchange. The Level clears it the
+    // moment it acts on it; otherwise it simply expires.
+    if (input.pressed & Btn.Interact) this.interactFrames = INTERACT_BUFFER_FRAMES;
+
     for (const [mask, act] of ACTION_PRIORITY) {
       if (input.pressed & mask) {
         this.bufAction = act;
@@ -767,6 +851,59 @@ export class Fighter implements FighterView {
         break;
       }
     }
+  }
+
+  // ── interaction ────────────────────────────────────────────────────────────
+
+  /** True while an interact press is still waiting for the Level to answer. */
+  get interactPending(): boolean {
+    return this.interactFrames > 0;
+  }
+
+  /** The Level has acted on the press (or refused it for good). Drop it. */
+  consumeInteract(): void {
+    this.interactFrames = 0;
+  }
+
+  /**
+   * Are both hands free and both feet on the floor?
+   *
+   * Nobody swaps a bat mid-uppercut, mid-flinch, off the floor or in the air.
+   * Riding is deliberately absent: getting off is handled by the Level, which
+   * is the only thing that knows what is being ridden.
+   */
+  get canInteract(): boolean {
+    if (!this.alive || !this.grounded) return false;
+    switch (this.state) {
+      case 'idle':
+      case 'walk':
+      case 'run':
+      case 'land':
+      case 'block':
+        return this.hitstunTimer <= 0;
+      default:
+        return false;
+    }
+  }
+
+  /** True while this fighter is on a vehicle. */
+  get riding(): boolean {
+    return this.state === 'riding';
+  }
+
+  /** Signed speed of the thing being ridden. Zero when on foot. */
+  get rideSpeed(): number {
+    return this.state === 'riding' ? this.rideVel : 0;
+  }
+
+  /** Frames of tyre smoke still owed, for whoever is drawing the vehicle. */
+  get rideSkid(): number {
+    return this.rideScreech;
+  }
+
+  /** 0..1: how far the front wheel is off the floor. */
+  get rideWheelieAmount(): number {
+    return this.rideWheelie > 0 ? clamp(this.rideWheelie / RIDE_WHEELIE_FRAMES, 0, 1) : 0;
   }
 
   // ── physics ────────────────────────────────────────────────────────────────
@@ -906,6 +1043,9 @@ export class Fighter implements FighterView {
   private separate(ctx: SimContext): void {
     if (!this.grounded || !this.alive) return;
     if (this.state === 'knockdown' || this.state === 'getup' || this.state === 'grabbed') return;
+    // A vehicle shoves people; people do not shove a vehicle. Enemies still run
+    // their own separation against the rider, so the crowd parts around it.
+    if (this.state === 'riding') return;
 
     for (const other of ctx.fighters) {
       if (other.id === this.id) continue;
@@ -1136,14 +1276,169 @@ export class Fighter implements FighterView {
     }
   }
 
-  private updateRiding(): void {
+  /**
+   * On a vehicle.
+   *
+   * The whole state is a throttle, a brake and a wheelie. Speed lives in
+   * `rideVel` and is written into `vel.x` every frame, so ground friction —
+   * which is a fact about boots, not about tyres — never gets to eat it.
+   *
+   * Deterministic throughout: the only non-sim things here are the engine note
+   * and the smoke, both of which go through ctx and are dropped on rollback.
+   */
+  private updateRiding(ctx: SimContext): void {
     this.stateFrame++;
-    const spd = RUN_SPEED * this.moveSpeed;
-    if (this.inX !== 0) {
-      this.facing = this.inX > 0 ? 1 : -1;
-      this.vel.x = this.inX * spd;
+
+    // Held off the floor by the vehicle, not by the ground. `physics` clears
+    // this again at the end of the step; re-asserting it here each frame is
+    // what keeps gravity out of the saddle.
+    this.grounded = true;
+    this.pos.y = 0;
+    this.vel.y = 0;
+
+    const top = RIDE_TOP_SPEED * this.rideBoost + (this.rideWheelie > 0 ? RIDE_WHEELIE_BOOST : 0);
+    const braking = (this.heldMask & Btn.Block) !== 0;
+    const turning = this.inX !== 0 && this.rideVel !== 0 && this.inX > 0 !== this.rideVel > 0;
+
+    if (braking) {
+      this.rideVel = approach(this.rideVel, this.inX * top * 0.5, RIDE_BRAKE);
+    } else if (turning) {
+      this.rideVel = approach(this.rideVel, this.inX * top, RIDE_BRAKE);
+    } else if (this.inX !== 0) {
+      this.rideVel = approach(this.rideVel, this.inX * top, RIDE_ACCEL);
+    } else {
+      this.rideVel = approach(this.rideVel, 0, RIDE_COAST);
     }
-    if (this.inZ !== 0) this.vel.z = this.inZ * spd * Z_SPEED_SCALE;
+    if (Math.abs(this.rideVel) < 0.02) this.rideVel = 0;
+    this.vel.x = this.rideVel;
+
+    if ((braking || turning) && Math.abs(this.rideVel) > RIDE_SCREECH_SPEED) this.screech(ctx);
+
+    if (this.inZ !== 0) this.vel.z = this.inZ * RIDE_Z_SPEED * this.rideBoost;
+
+    // A vehicle points where it is going, not where the stick is: shoving left
+    // at forty miles an hour is a skid, not a pirouette.
+    if (Math.abs(this.rideVel) > 0.5) this.facing = this.rideVel > 0 ? 1 : -1;
+    else if (this.inX !== 0) this.facing = this.inX > 0 ? 1 : -1;
+
+    this.rideEngineNote(ctx, top);
+    this.tickRideSwing(ctx);
+    this.rideAction(ctx);
+  }
+
+  /** Re-barks the engine every so often, pitched by how hard it is working. */
+  private rideEngineNote(ctx: SimContext, top: number): void {
+    if (this.rideEngine > 0) {
+      this.rideEngine--;
+      return;
+    }
+    this.rideEngine = RIDE_ENGINE_INTERVAL;
+    const load = clamp(Math.abs(this.rideVel) / Math.max(1, top), 0, 1);
+    ctx.audio.play('engine', { pitch: 0.72 + load * 0.75, gain: 0.2 + load * 0.34 });
+    if (load < 0.25) return;
+    ctx.fx.particles({
+      count: 4,
+      x: this.pos.x - this.facing * 16,
+      y: 7,
+      z: this.pos.z,
+      angle: this.facing > 0 ? Math.PI : 0,
+      spread: 0.5,
+      speed: [0.5, 1.8],
+      life: [12, 26],
+      size: [1.4, 3.2],
+      colors: ['#8f8aa0', '#5c5566', '#c9c4d6'],
+      gravity: -0.02,
+      drag: 0.92,
+      shape: 'smoke',
+      fade: 'ease',
+    });
+  }
+
+  /** Rubber, complaining. Rate-limited so a long slide is one sound, not sixty. */
+  private screech(ctx: SimContext): void {
+    if (this.rideScreech > 0) return;
+    this.rideScreech = RIDE_SCREECH_FRAMES;
+    ctx.audio.play('tyres', { pitch: 0.94, gain: 0.7 });
+    ctx.fx.particles({
+      count: 8,
+      x: this.pos.x - this.facing * 10,
+      y: 2,
+      z: this.pos.z,
+      angle: this.rideVel > 0 ? Math.PI : 0,
+      spread: 0.9,
+      speed: [0.8, 2.8],
+      life: [14, 30],
+      size: [1.6, 3.6],
+      colors: ['#d8d0c2', '#a29a8c', '#6f6a62'],
+      gravity: -0.01,
+      drag: 0.9,
+      shape: 'smoke',
+      fade: 'ease',
+    });
+  }
+
+  /**
+   * What the attack buttons mean in the saddle.
+   *
+   * Light/heavy/special are all the same gesture at this speed: crack the
+   * throttle and put a boot out. Jump is a wheelie, because a vehicle section
+   * that cannot be shown off on is just a corridor with a longer stride.
+   */
+  private rideAction(ctx: SimContext): void {
+    const act = this.bufAction;
+    if (!act || this.bufFrames <= 0) return;
+    this.clearBuffer();
+
+    if (act === 'jump') {
+      this.rideWheelie = RIDE_WHEELIE_FRAMES;
+      ctx.audio.play('engine', { pitch: 1.45, gain: 0.4 });
+      ctx.audio.voice(this.voice, 'taunt');
+      return;
+    }
+    if (this.rideSwing > 0) return;
+
+    this.rideSwing = RIDE_SWING_FRAMES;
+    this.rideWindow = this.makeRideWindow();
+    this.rideVel += this.facing * RIDE_LUNGE;
+    const wd = this.weaponDef;
+    ctx.audio.play(wd ? wd.sfx.swing : 'whiff', { gain: 0.8 });
+    ctx.audio.voice(this.voice, 'attack');
+  }
+
+  private tickRideSwing(ctx: SimContext): void {
+    if (this.rideSwing <= 0 || !this.rideWindow) return;
+    ctx.spawnHit(this.id, this.rideWindow);
+    if (--this.rideSwing > 0) return;
+    this.rideSwing = 0;
+    this.rideWindow = null;
+  }
+
+  /**
+   * A boot from the saddle. Modest damage on purpose — the vehicle itself is
+   * the weapon, and this is only the answer to somebody standing right there.
+   */
+  private makeRideWindow(): HitWindow {
+    return {
+      start: 0,
+      end: RIDE_SWING_FRAMES,
+      box: { ox: 21, oy: 20, oz: 0, hw: 15, hh: 17, hd: 12 },
+      props: {
+        damage: 9,
+        hitstun: 20,
+        blockstun: 12,
+        hitstop: 5,
+        knockback: { x: 6.4, y: 3.2 },
+        pushback: 0,
+        reaction: 'heavy',
+        level: 'mid',
+        chip: DEFAULT_CHIP,
+        meterGain: 0.05,
+        meterGainVictim: 0.03,
+        shake: 4,
+        sfx: 'kick',
+      },
+      anchor: 'footR',
+    };
   }
 
   private updateEntering(): void {
@@ -1474,6 +1769,21 @@ export class Fighter implements FighterView {
     scale: number,
     ctx: SimContext,
   ): void {
+    /*
+     * A jab does not stop a moving vehicle.
+     *
+     * Everything heavier than a flinch still takes the rider out of the saddle
+     * — being shot off a bike is exactly the risk that makes riding one worth
+     * anything — but a mook getting a hand to you at speed should cost you
+     * momentum and nothing else. Without this a vehicle section is one poke
+     * long, which is not a treat, it is a tax.
+     */
+    if (this.state === 'riding' && reaction === 'light') {
+      this.hitstunTimer = 0;
+      this.rideVel *= 0.78;
+      return;
+    }
+
     const heavyDrop =
       reaction === 'heavy' ||
       reaction === 'launch' ||
@@ -1785,12 +2095,21 @@ export class Fighter implements FighterView {
 
   // ── weapons ────────────────────────────────────────────────────────────────
 
-  giveWeapon(kind: WeaponKind): void {
+  /**
+   * Take a weapon.
+   *
+   * `durability` and `ammo` exist so a weapon that has already been swung a
+   * dozen times stays swung: drop a spent chain to take the bat at your feet
+   * and the chain on the floor is still spent when you come back for it.
+   * Omitted, they come off the definition — a fresh one out of a crate.
+   */
+  giveWeapon(kind: WeaponKind, durability?: number, ammo?: number): void {
     const def = WEAPONS[kind];
     if (!def) return;
     this.weapon = kind;
-    this.weaponDurability = def.durability;
-    this.weaponAmmo = def.ammo ?? 0;
+    this.weaponDurability =
+      durability !== undefined && Number.isFinite(durability) ? durability : def.durability;
+    this.weaponAmmo = ammo !== undefined && Number.isFinite(ammo) ? ammo : (def.ammo ?? 0);
     this.weaponSpeed = def.speedScale > 0 ? def.speedScale : 1;
     this.moves.light = def.moves.light;
     this.moves.heavy = def.moves.heavy;
@@ -1804,12 +2123,15 @@ export class Fighter implements FighterView {
     const durability = this.weaponDurability;
     const ammo = this.weaponAmmo;
     this.clearWeapon();
+    // The Level plays the clatter as it puts the thing on the floor, panned to
+    // where it actually landed. Playing one here as well was two drops for one
+    // weapon — barely noticeable when only a knockdown could cause it, and very
+    // noticeable now that swapping weapons is a button.
     ctx.spawn('weapon', this.pos.x + this.facing * 10, Math.max(6, this.pos.y + 10), this.pos.z, {
       kind,
       durability,
       ammo,
     });
-    ctx.audio.play('drop');
   }
 
   private clearWeapon(): void {
@@ -1918,13 +2240,46 @@ export class Fighter implements FighterView {
     this.setState('victory', true);
   }
 
-  setRiding(on: boolean): void {
+  /**
+   * Get on, or get off.
+   *
+   * `speedScale` is the vehicle's own character — a hyperloop pod is not a
+   * moto — and is ignored on dismount. Getting off is written so it is safe to
+   * call at ANY time and from any state: the Level calls it unconditionally
+   * when a rider dies, is blown out of the saddle or simply stops being in the
+   * riding state, and every one of those has to leave a clean body behind.
+   */
+  setRiding(on: boolean, speedScale = 1): void {
     if (on) {
+      if (!this.alive) return;
       this.currentMove = null;
+      this.clearBuffer();
+      this.rideBoost = clamp(speedScale, 0.4, 2.4);
+      // Whatever you were carrying in comes with you.
+      this.rideVel = clamp(this.vel.x, -RIDE_TOP_SPEED, RIDE_TOP_SPEED);
+      this.rideWheelie = 0;
+      this.rideSwing = 0;
+      this.rideWindow = null;
+      // The mount already barks; the loop starts one interval later.
+      this.rideEngine = RIDE_ENGINE_INTERVAL;
+      this.pos.y = 0;
+      this.vel.y = 0;
+      this.grounded = true;
       this.setState('riding', true);
-    } else if (this.state === 'riding') {
+      return;
+    }
+
+    // Step off at speed and you stumble on for a moment; step off a wreck and
+    // you do not. Either way nothing ride-shaped survives the dismount.
+    if (this.state === 'riding') {
+      this.vel.x = this.rideVel * 0.35;
       this.setState('idle', true);
     }
+    this.rideVel = 0;
+    this.rideBoost = 1;
+    this.rideWheelie = 0;
+    this.rideSwing = 0;
+    this.rideWindow = null;
   }
 
   heal(v: number): void {
@@ -2060,16 +2415,21 @@ export class Fighter implements FighterView {
     o.scale = clamp(1 - (Z_DEPTH - z) * Z_PERSPECTIVE, 0.75, 1);
     o.damage = this.damage;
 
-    drawCharacter(
-      ctx,
-      this.style,
-      pose,
-      this.skeleton,
-      x,
-      GROUND_Y + z * Z_SCALE - y,
-      this.facing,
-      o,
-    );
+    const sy = GROUND_Y + z * Z_SCALE - y;
+    if (this.bossRig && hasBossRig(this.bossRig)) {
+      drawBossRig(ctx, this.bossRig, this.style, x, sy, this.facing, {
+        state: this.state,
+        frame: this.stateFrame,
+        flash: o.flash,
+        tint: o.tint,
+        alpha: o.alpha,
+        scale: o.scale,
+        damage: this.damage,
+      });
+      return;
+    }
+
+    drawCharacter(ctx, this.style, pose, this.skeleton, x, sy, this.facing, o);
   }
 
   // ── netcode ────────────────────────────────────────────────────────────────
@@ -2089,6 +2449,9 @@ export class Fighter implements FighterView {
     h = hashNumber(h, this.meter);
     h = hashNumber(h, this.comboCount);
     h = hashNumber(h, this.weapon === null ? -1 : this.weaponDurability);
+    // A vehicle carries its speed outside vel.x, so without this two peers
+    // could disagree about how fast a bike is going and never find out.
+    h = hashNumber(h, this.rideVel);
     return h >>> 0;
   }
 }

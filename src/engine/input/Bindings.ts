@@ -19,9 +19,15 @@ import { movementLabelForCodes } from '@/engine/input/Layout';
 /**
  * Default keyboard layouts, keyed by local player slot.
  *
- * Slot 0 lives on the left half of the board (WASD + FGH + space), slot 1 on
+ * Slot 0 lives on the left half of the board (WASD + ERFGH + space), slot 1 on
  * the right (arrows + numpad), so two people can share one keyboard without
  * elbowing each other.
+ *
+ * Interact sits one key up and right of the movement diamond on slot 0 (`KeyE`,
+ * the key an AZERTY board calls E too and a Dvorak board calls '.') and beside
+ * Grab on the numpad for slot 1: both are reachable without the hand leaving
+ * the keys it is already on, which matters for something pressed mid-fight to
+ * swap a weapon or jump on a bike.
  */
 export const DEFAULT_BINDINGS: Record<number, Record<string, number>> = {
   0: {
@@ -35,6 +41,7 @@ export const DEFAULT_BINDINGS: Record<number, Record<string, number>> = {
     KeyH: Btn.Special,
     ShiftLeft: Btn.Block,
     KeyR: Btn.Grab,
+    KeyE: Btn.Interact,
     KeyT: Btn.Super,
     Escape: Btn.Pause,
   },
@@ -49,6 +56,7 @@ export const DEFAULT_BINDINGS: Record<number, Record<string, number>> = {
     Numpad3: Btn.Special,
     NumpadDecimal: Btn.Block,
     Numpad5: Btn.Grab,
+    Numpad4: Btn.Interact,
     NumpadAdd: Btn.Super,
     Escape: Btn.Pause,
   },
@@ -77,6 +85,9 @@ export const ACTIONS: ActionDef[] = [
   { bit: Btn.Special, id: 'special', name: 'Special' },
   { bit: Btn.Block, id: 'block', name: 'Block' },
   { bit: Btn.Grab, id: 'grab', name: 'Grab' },
+  // Named for what it does rather than for the bit, because a player reading a
+  // controls screen wants to know which key picks the bat up off the floor.
+  { bit: Btn.Interact, id: 'interact', name: 'Pick up / Use' },
   { bit: Btn.Super, id: 'super', name: 'Super' },
   { bit: Btn.Pause, id: 'pause', name: 'Pause' },
 ];

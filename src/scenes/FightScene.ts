@@ -83,6 +83,7 @@ import { Level } from '@/game/Level';
 import { drawBackdrop } from '@/game/Backdrop';
 import { CombatResolver, setFatalityHook } from '@/game/combat/Combat';
 import { registerMove } from '@/game/combat/Moves';
+import { BossIntro } from '@/game/BossIntro';
 import { FatalityDirector } from '@/game/Fatality';
 
 import { DWARFS, getDwarf } from '@/content/dwarfs';
@@ -778,6 +779,8 @@ export class FightScene implements Scene {
   private clearTimer = 0;
   private continueTimer = 0;
   private bossIntro = 0;
+  /** The directed boss introduction. Replaces the old timed text plate. */
+  private intro!: BossIntro;
   private bossSeen = false;
   private finished = false;
 
@@ -817,6 +820,16 @@ export class FightScene implements Scene {
    * the placeholders from the constructor would zoom a camera nobody is looking
    * through.
    */
+  private makeBossIntro(): BossIntro {
+    return new BossIntro({
+      fx: this.fx,
+      audio: this.host.audio,
+      cam: this.cam,
+      rng: this.rng,
+      reducedMotion: this.settings.reducedMotion === true,
+    });
+  }
+
   private makeDirector(): FatalityDirector {
     return new FatalityDirector({
       fx: this.fx,
@@ -825,6 +838,10 @@ export class FightScene implements Scene {
       rng: this.rng,
       gore: this.settings.gore,
       reducedMotion: this.settings.reducedMotion === true,
+      // Everyone still standing, so the follow-through has something to swing
+      // the trophy through. Read lazily: the Level rebuilds its roster as waves
+      // arrive and die, and a list captured once would sweep ghosts.
+      crowd: () => (this.level ? this.level.fighters : []),
     });
   }
 
@@ -929,6 +946,15 @@ export class FightScene implements Scene {
   }
 
   onKey(e: KeyboardEvent): void {
+    if (this.intro.active && !e.repeat) {
+      // Any key advances the boss introduction; Escape still reaches the pause
+      // menu below, so nobody is trapped in it.
+      if (e.code !== 'Escape') {
+        e.preventDefault();
+        this.intro.press();
+        return;
+      }
+    }
     if (e.code === 'Escape' && !this.paused && !this.finished) {
       e.preventDefault();
       this.openPause();
@@ -972,6 +998,14 @@ export class FightScene implements Scene {
     // being drawn by the director.
     if (this.fatality.active) {
       this.stepFatality();
+      return;
+    }
+
+    // The boss introduction owns the frame the same way a finisher does: the
+    // fight is frozen behind it, so nothing starts hitting you while you are
+    // still reading who you are about to fight.
+    if (this.intro.active) {
+      this.intro.update();
       return;
     }
 
@@ -1376,6 +1410,7 @@ export class FightScene implements Scene {
     this.introTimer = INTRO_FRAMES;
     this.clearTimer = 0;
     this.bossIntro = 0;
+    this.intro = this.makeBossIntro();
     this.bossSeen = false;
   }
 
@@ -1440,9 +1475,15 @@ export class FightScene implements Scene {
   }
 
   private trackBoss(): void {
-    if (this.level?.bossActive && !this.bossSeen) {
+    const boss = this.level?.takeBossStart();
+    if (boss && !this.bossSeen) {
       this.bossSeen = true;
-      this.bossIntro = BOSS_INTRO_FRAMES;
+      const at = this.level?.bossPos;
+      // A directed introduction that holds on its text until the player says
+      // they have read it, rather than a timed plate over a live fight.
+      if (!this.intro.start(boss, at?.x ?? this.cam.x + VIEW_W * 0.5, at?.z ?? Z_DEPTH * 0.5)) {
+        this.bossIntro = BOSS_INTRO_FRAMES;
+      }
     }
     if (this.bossIntro > 0) this.bossIntro--;
   }
@@ -1673,6 +1714,7 @@ export class FightScene implements Scene {
       // fighters stood — the Level has struck them from its own draw list — and
       // the blood it throws lands in front of it.
       this.fatality.render(ctx, this.cam);
+      this.intro.render(ctx, this.cam);
       if (this.host.renderWorldFx) {
         this.host.renderWorldFx(ctx);
       } else {
@@ -1694,6 +1736,7 @@ export class FightScene implements Scene {
       // around the shot, and a health bar poking through the black is exactly
       // the sort of thing that says "this is a game" at the wrong moment.
       this.fatality.renderOverlay(ctx);
+      this.intro.renderOverlay(ctx);
       this.drawIntro(ctx);
       this.drawBossIntro(ctx);
       this.drawClear(ctx);

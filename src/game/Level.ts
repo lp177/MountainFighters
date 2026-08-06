@@ -68,6 +68,9 @@ import {
   PROJECTILE_PIERCE,
   PROJECTILE_RANGE_FRAC,
   VEHICLE_BLAST_DAMAGE,
+  VEHICLE_FIRE_AT,
+  VEHICLE_FIRE_TICK,
+  VEHICLE_SMOKE_AT,
   VEHICLE_BLAST_RADIUS,
   VEHICLE_HP,
   VIEW_W,
@@ -311,6 +314,24 @@ const CABINS: Partial<Record<VehicleSection['kind'], readonly number[]>> = {
   hyperloop_pod: POD_CANOPY,
 };
 
+/**
+ * Where damage is allowed to land on each machine, and where it burns from.
+ *
+ * x0/y0..x1/y1 is the bodywork box in rig units — dents and tears are scattered
+ * inside it, so they land on panels rather than in mid-air beside a scooter or
+ * halfway up a truck's windscreen. fx/fy is the engine bay the flames come off.
+ */
+const WEAR_PANELS: Record<
+  VehicleSection['kind'],
+  { x0: number; y0: number; x1: number; y1: number; fx: number; fy: number }
+> = {
+  moto: { x0: -19, y0: -27, x1: 13, y1: -13, fx: 7, fy: -24 },
+  scooter: { x0: -16, y0: -10, x1: 12, y1: -3.5, fx: 11, fy: -14 },
+  cybertruck: { x0: -28, y0: -46, x1: 31, y1: -14, fx: 24, fy: -28 },
+  hyperloop_pod: { x0: -26, y0: -24, x1: 30, y1: -8, fx: 26, fy: -14 },
+  rocket: { x0: -17, y0: -25, x1: 24, y1: -10, fx: 20, fy: -14 },
+};
+
 /** Contact shadow half-width. A scooter does not cast a truck's shadow. */
 const VEHICLE_FOOTPRINT: Record<VehicleSection['kind'], number> = {
   moto: 19,
@@ -449,6 +470,8 @@ interface Vehicle {
   maxHp: number;
   /** Frames of shake left from the last impact, for the damage read. */
   jolt: number;
+  /** Frames burning. Fire eats a body every VEHICLE_FIRE_TICK. */
+  burn: number;
   x: number;
   z: number;
   /**
@@ -1633,6 +1656,7 @@ export class Level {
         hp: VEHICLE_HP,
         maxHp: VEHICLE_HP,
         jolt: 0,
+        burn: 0,
       });
     }
 
@@ -1664,6 +1688,7 @@ export class Level {
         hp: VEHICLE_HP,
         maxHp: VEHICLE_HP,
         jolt: 0,
+        burn: 0,
       });
     }
   }
@@ -1788,7 +1813,12 @@ export class Level {
       }
     }
 
-    for (const v of this.vehicles) {
+    // Snapshot: a vehicle that blows up this frame — rammed to death, or eaten
+    // by its own fire — splices itself out of the live list, which would skip
+    // whoever was parked behind it if we walked the array directly.
+    for (const v of Array.from(this.vehicles)) {
+      if (!this.vehicles.includes(v)) continue;
+
       // Last frame's resting place, for the renderer to interpolate from.
       v.prevX = v.x;
       v.prevZ = v.z;
@@ -1816,6 +1846,25 @@ export class Level {
 
       if (v.jolt > 0) v.jolt--;
       v.spin = (v.spin + v.vx * 0.09) % (Math.PI * 2);
+
+      // Fire finishes what the bodies started. Once it takes hold the machine
+      // is on a clock whether or not you hit anyone else with it: three
+      // seconds a body, and the last one detonates it under whoever is still
+      // riding. Ditching it before then is the whole decision.
+      if (v.hp <= VEHICLE_FIRE_AT) {
+        v.burn++;
+        if (v.burn % VEHICLE_FIRE_TICK === 0) {
+          v.hp--;
+          v.jolt = Math.max(v.jolt, 8);
+          this.audio.play('hit_metal', { pan: this.pan(v.x), gain: 0.3, pitch: 0.6 });
+          if (v.hp <= 0) {
+            this.wreck(v, ctx);
+            continue;
+          }
+        }
+      } else {
+        v.burn = 0;
+      }
     }
   }
 
@@ -2572,9 +2621,12 @@ export class Level {
         break;
     }
 
-    // Once, on the chassis pass. Drawing it in both used to double every
-    // scorch mark and emit two plumes of smoke per frame.
-    if (!front) this.drawVehicleWear(ctx, v);
+    // Damage is split across the two passes on purpose: the panel work belongs
+    // on the chassis, behind the rider, while fire licks over the top of him.
+    // Each half runs once, which is what stopped the old version doubling every
+    // mark and emitting two plumes of smoke a frame.
+    if (front) this.drawVehicleFire(ctx, v);
+    else this.drawVehicleWear(ctx, v);
     ctx.restore();
   }
 
@@ -2660,50 +2712,254 @@ export class Level {
   }
 
   /**
-   * Dents, scorch, smoke and fire, in that order, as the bodies add up.
+   * What the bodies do to the bodywork.
    *
-   * Drawn inside the vehicle's own transform so it lists with the bodywork.
+   * The old version was five near-black ellipses on an already-black chassis,
+   * which is to say it was nothing: the player reported seeing no damage at all
+   * and he was right. Damage now has to read at 640x360 on a moving machine, so
+   * every mark is drawn as a LIGHT edge against the dark body — a dent is its
+   * highlight, a tear is the bare frame behind the panel — and the last stages
+   * move, because motion reads at gameplay speed when contrast alone does not.
+   *
+   * Four stages, arriving in this order as it is ridden into things:
+   *
+   *   grime      the road, low on the flanks
+   *   dents      pushed-in panels with a bright lip
+   *   tears      split bodywork over pale bare frame, and cracks running off it
+   *   flap       a panel hanging by one corner, swinging as it rolls
+   *
+   * Fire is the fifth stage and lives in drawVehicleFire, over the rider.
+   *
+   * Drawn inside the vehicle's transform, so all of it lists with the bodywork.
    */
   private drawVehicleWear(ctx: C2D, v: Vehicle): void {
     const wear = 1 - clamp(v.hp / Math.max(1, v.maxHp), 0, 1);
-    if (wear < 0.15) return;
+    if (wear < 0.12) return;
 
-    // Scorching, from the front backwards.
+    const p = WEAR_PANELS[v.kind] ?? WEAR_PANELS.moto;
+    const pw = p.x1 - p.x0;
+    const ph = p.y1 - p.y0;
+    // Fixed per machine, so the damage sits on the panel it happened to rather
+    // than crawling around the bodywork frame to frame.
+    const seed = v.kind.length * 97 + Math.round(v.maxHp) * 13 + 11;
+    const rnd = (i: number): number => (((Math.sin(seed + i * 12.9898) * 43758.5453) % 1) + 1) % 1;
+
     ctx.save();
-    ctx.globalAlpha = clamp(wear * 0.85, 0, 0.7);
-    // Fixed per vehicle, so the scorch sits still instead of crawling.
-    const seed = Math.abs(Math.round(v.maxHp * 13 + v.kind.length * 7));
-    for (let i = 0; i < 5; i++) {
-      const h = ((Math.sin(seed + i * 12.9898) * 43758.5453) % 1 + 1) % 1;
-      if (h > wear) continue;
-      const px = -14 + i * 9 + h * 5;
-      ellipse(ctx, px, -12 - h * 9, 3 + h * 3, 2 + h * 2, h * 2, '#181420', 'none', 0);
-    }
-    ctx.globalAlpha = 1;
-    ctx.restore();
 
-    // Smoke once it is past halfway, fire on the last few bodies.
-    if (wear > 0.5 && (this.tick & 3) === 0) {
+    // ── grime ────────────────────────────────────────────────────────────────
+    // Road filth collects low and towards the back. Warm brown against cold
+    // bodywork, so it reads as dirt rather than as shadow.
+    ctx.globalAlpha = clamp(0.2 + wear * 0.55, 0, 0.62);
+    for (let i = 0; i < 9; i++) {
+      const t = i / 8;
+      ellipse(
+        ctx,
+        p.x0 + pw * t * 0.95,
+        p.y1 - ph * (0.02 + 0.18 * rnd(i)),
+        pw * 0.16,
+        ph * (0.2 + rnd(i + 20) * 0.14),
+        0,
+        i & 1 ? '#6b5636' : '#43382c',
+        'none',
+        0,
+      );
+    }
+    // Spatter thrown up the flank, which is what says "ridden hard" rather
+    // than "parked in a puddle".
+    for (let i = 0; i < 10; i++) {
+      ellipse(
+        ctx,
+        p.x0 + pw * rnd(i + 60),
+        p.y0 + ph * (0.35 + rnd(i + 70) * 0.6),
+        0.9 + rnd(i + 80) * 1.6,
+        0.7 + rnd(i + 90) * 1.2,
+        0,
+        '#5a4a34',
+        'none',
+        0,
+      );
+    }
+
+    // ── dents ────────────────────────────────────────────────────────────────
+    // A dent is a dark bowl with a bright lip along its top edge. The lip is
+    // the whole trick: it is the only part that survives being 12 pixels tall.
+    ctx.globalAlpha = 1;
+    const dents = 1 + Math.floor(wear * 6);
+    for (let i = 0; i < dents; i++) {
+      const dx = p.x0 + pw * (0.08 + rnd(i * 3) * 0.84);
+      const dy = p.y0 + ph * (0.18 + rnd(i * 3 + 1) * 0.66);
+      const r = 3 + rnd(i * 3 + 2) * 3.4;
+      const tilt = rnd(i) * 2;
+      // Dark bowl, bright lip along the top, dark crease under it. Three tones
+      // is the minimum that still reads as "pushed in" and not "smudge".
+      ellipse(ctx, dx, dy, r, r * 0.72, tilt, '#15121b', 'none', 0);
+      ctx.save();
+      ctx.lineWidth = 1.2;
+      ctx.strokeStyle = '#e2dfec';
+      ctx.beginPath();
+      ctx.ellipse(dx, dy, r, r * 0.72, tilt, Math.PI * 1.03, Math.PI * 1.97);
+      ctx.stroke();
+      ctx.globalAlpha = 0.7;
+      ctx.strokeStyle = '#0d0b12';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.ellipse(dx, dy + 0.9, r * 0.85, r * 0.6, tilt, Math.PI * 0.08, Math.PI * 0.92);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // ── tears and cracks ─────────────────────────────────────────────────────
+    if (wear > 0.45) {
+      const tears = 1 + Math.floor((wear - 0.45) * 4);
+      for (let i = 0; i < tears; i++) {
+        const tx = p.x0 + pw * (0.15 + rnd(i * 5 + 40) * 0.7);
+        const ty = p.y0 + ph * (0.2 + rnd(i * 5 + 41) * 0.55);
+        const sz = 3 + rnd(i * 5 + 42) * 3.5;
+        // The hole: pale frame and ribbing where the panel used to be.
+        poly(
+          ctx,
+          [tx - sz, ty, tx - sz * 0.3, ty - sz * 0.9, tx + sz * 0.8, ty - sz * 0.5, tx + sz, ty + sz * 0.6, tx - sz * 0.2, ty + sz * 0.8],
+          '#2a2733',
+          '#b9b4c8',
+          1.3,
+        );
+        capsule(ctx, tx - sz * 0.6, ty + sz * 0.5, tx + sz * 0.2, ty - sz * 0.6, 0.7, '#8f8aa0', 'none', 0);
+        // Cracks running out of it, drawn light so they do not vanish.
+        ctx.strokeStyle = 'rgba(214,210,226,0.75)';
+        ctx.lineWidth = 0.9;
+        ctx.beginPath();
+        for (let k = 0; k < 2; k++) {
+          const a = rnd(i * 5 + 43 + k) * Math.PI * 2;
+          let cx = tx;
+          let cy = ty;
+          ctx.moveTo(cx, cy);
+          for (let j = 1; j <= 3; j++) {
+            cx += Math.cos(a + rnd(i + j * 7 + k) * 1.4 - 0.7) * (2 + j);
+            cy += Math.sin(a + rnd(i + j * 7 + k) * 1.4 - 0.7) * (1.6 + j * 0.6);
+            ctx.lineTo(cx, cy);
+          }
+        }
+        ctx.stroke();
+      }
+    }
+
+    // ── the hanging panel ────────────────────────────────────────────────────
+    // Held on by one corner and swinging. Movement is what makes a nearly-dead
+    // machine read as nearly-dead from across the screen.
+    if (wear > 0.5) {
+      const swing = Math.sin(this.tick * 0.19 + seed) * (0.22 + wear * 0.3) + wear * 0.35;
+      const ax = p.x0 + pw * 0.16;
+      const ay = p.y0 + ph * 0.55;
+      ctx.save();
+      ctx.translate(ax, ay);
+      ctx.rotate(swing);
+      poly(ctx, [0, 0, pw * 0.24, -1.5, pw * 0.26, ph * 0.42, -1, ph * 0.4], '#2f2b3a', '#8f8aa0', 1.2);
+      ctx.restore();
+      // The bolt it is still hanging from.
+      ellipse(ctx, ax, ay, 1.3, 1.3, 0, '#d6d2e2', 'none', 0);
+    }
+
+    ctx.restore();
+  }
+
+  /**
+   * The machine on fire, over the rider rather than behind him.
+   *
+   * From VEHICLE_FIRE_AT bodies down it burns, and burning is not decoration:
+   * updateVehicles takes a body off it every VEHICLE_FIRE_TICK frames until it
+   * detonates, so this is a lit fuse the player is sitting on. It is drawn last
+   * and additive for exactly that reason — it should be the thing you look at.
+   *
+   * Smoke starts earlier, at VEHICLE_SMOKE_AT, as the warning before the fire.
+   */
+  private drawVehicleFire(ctx: C2D, v: Vehicle): void {
+    const p = WEAR_PANELS[v.kind] ?? WEAR_PANELS.moto;
+    const smoking = v.hp <= VEHICLE_SMOKE_AT;
+    const burning = v.hp <= VEHICLE_FIRE_AT;
+    if (!smoking) return;
+
+    if (burning) {
+      // The bodywork under the fire is cooked black first, so the flames have
+      // something to sit on rather than floating in front of the paint.
+      ctx.save();
+      ctx.globalAlpha = 0.7;
+      ellipse(ctx, p.fx, p.fy + 1, 9, 5, 0, '#120f16', 'none', 0);
+      ctx.restore();
+
+      // Four tongues off the engine bay, each on its own beat so the fire
+      // flickers instead of pulsing as one lump. The orange body is drawn
+      // NORMALLY — additive orange over a pale panel like the truck's turns
+      // white and stops reading as fire — and only the core is additive.
+      ctx.save();
+      for (let i = 0; i < 4; i++) {
+        const t = this.tick * 0.29 + i * 1.7;
+        const lick = 0.68 + Math.sin(t) * 0.32;
+        const sway = Math.sin(t * 0.63) * 3;
+        const bx = p.fx + (i - 1.5) * 3.6;
+        const by = p.fy;
+        const hgt = (13 + i * 2.6) * lick;
+        const wid = 3.4 - i * 0.25;
+
+        ctx.globalAlpha = 0.92;
+        ctx.fillStyle = '#e0521f';
+        ctx.beginPath();
+        ctx.moveTo(bx - wid, by);
+        ctx.quadraticCurveTo(bx - wid * 1.5, by - hgt * 0.5, bx + sway * 0.9, by - hgt);
+        ctx.quadraticCurveTo(bx + wid * 1.5, by - hgt * 0.45, bx + wid, by);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.globalAlpha = 0.85;
+        ctx.fillStyle = '#ff9a3c';
+        ctx.beginPath();
+        ctx.moveTo(bx - wid * 0.62, by);
+        ctx.quadraticCurveTo(bx - wid, by - hgt * 0.45, bx + sway * 0.6, by - hgt * 0.72);
+        ctx.quadraticCurveTo(bx + wid, by - hgt * 0.4, bx + wid * 0.62, by);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.globalAlpha = 0.55 + lick * 0.3;
+        ctx.fillStyle = '#ffe14a';
+        ctx.beginPath();
+        ctx.moveTo(bx - wid * 0.3, by);
+        ctx.quadraticCurveTo(bx - wid * 0.4, by - hgt * 0.3, bx + sway * 0.3, by - hgt * 0.42);
+        ctx.quadraticCurveTo(bx + wid * 0.4, by - hgt * 0.28, bx + wid * 0.3, by);
+        ctx.closePath();
+        ctx.fill();
+        ctx.globalCompositeOperation = 'source-over';
+      }
+      // The glow it throws on the bodywork around it.
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = 0.18 + Math.sin(this.tick * 0.4) * 0.06;
+      ellipse(ctx, p.fx, p.fy - 6, 18, 14, 0, '#ff8a3d', 'none', 0);
+      ctx.restore();
+    }
+
+    // Particles ride the fx layer, so they keep rising after they leave the
+    // machine instead of being stuck to its transform.
+    const rear = -v.facing * (v.kind === 'cybertruck' ? 14 : 6);
+    if ((this.tick & (burning ? 1 : 3)) === 0) {
       this.fx.particles({
         count: 1,
-        x: v.x - v.facing * 6,
-        y: 22,
+        x: v.x + rear,
+        y: 30,
         z: v.z,
         angle: -Math.PI / 2,
-        spread: 0.5,
-        speed: [0.3, 0.9],
+        spread: 0.45,
+        speed: [0.5, 1.2],
         life: [26, 54],
-        size: [2.5, 5],
-        colors: wear > 0.8 ? ['#ff8a3d', '#4a4152'] : ['#4a4152', '#6a6478'],
+        size: [1.6, 3.4],
+        colors: burning ? ['#241f28', '#3a3340'] : ['#4a4152', '#6a6478'],
         gravity: -0.03,
         drag: 0.96,
         shape: 'smoke',
       });
     }
-    if (wear > 0.8 && (this.tick & 1) === 0) {
+    if (burning && (this.tick & 1) === 0) {
       this.fx.particles({
         count: 1,
-        x: v.x - v.facing * 4,
+        x: v.x + v.facing * 4,
         y: 20,
         z: v.z,
         angle: -Math.PI / 2,

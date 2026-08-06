@@ -146,6 +146,19 @@ export const PROJECTILE_PIERCE = 3;
  * enough that it ends in a wreck rather than at the boss door.
  */
 export const VEHICLE_HP = 20;
+/**
+ * Bodies left when the machine catches fire.
+ *
+ * Fire is not just a warning light: from here it eats the vehicle on its own,
+ * so a burning ride is a countdown you are riding rather than a state you can
+ * sit in.
+ */
+export const VEHICLE_FIRE_AT = 5;
+/** Frames between fire eating one more body. 180 = three seconds. */
+export const VEHICLE_FIRE_TICK = 180;
+/** Bodies left when it starts smoking — the warning before the fire. */
+export const VEHICLE_SMOKE_AT = 12;
+
 /** Damage the wreck deals to the driver and to everyone stood around it. */
 export const VEHICLE_BLAST_DAMAGE = 9;
 /** Reach of that blast, in world units. */

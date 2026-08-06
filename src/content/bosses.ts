@@ -818,7 +818,7 @@ export const BOSSES: BossDef[] = [
   {
     id: 'musk',
     name: 'ELON MUSK',
-    quote: '"I only wanted to know why they all love her AND hate her. It is the last thing I do not own."',
+    quote: '"They love her for nothing. They hate me for everything. I am correcting the imbalance."',
     atMap: 70,
     health: 2800,
     style: {

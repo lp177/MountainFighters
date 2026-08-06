@@ -893,6 +893,9 @@ export class CutsceneScene implements Scene {
 
   /** Where each SUV comes to rest, and when it gets there. */
   private static readonly CAR_X = [104, 236, 368];
+  /** Where the SUVs sit in the headlights shot. The beams derive from these. */
+  private static readonly CAR_BASE = 302;
+  private static readonly CAR_S = 0.9;
   private static readonly CAR_STOP = 104;
   private static readonly DOORS = 118;
 
@@ -902,6 +905,11 @@ export class CutsceneScene implements Scene {
   }
 
   private shotHeadlights(ctx: C2D, f: number, _n: number): void {
+    const CAR_S = CutsceneScene.CAR_S;
+    const CAR_BASE = CutsceneScene.CAR_BASE;
+    const CAR_W = 96 * CAR_S;
+    const CAR_BODY_Y = CAR_BASE - 26 * CAR_S;
+
     this.bleed(ctx, this.gNight ?? '#0a1020');
 
     this.band(ctx, 11, 22, -70, 720, 238, 46, 84, 0.34, '#0a1418');
@@ -916,8 +924,13 @@ export class CutsceneScene implements Scene {
       if (x < -200) continue;
       const arrive = clamp((f - i * 9) / (CutsceneScene.CAR_STOP - 8), 0, 1);
       const sweep = (1 - easeOut(arrive)) * 120 - 6;
-      const bx = x + 40;
-      const by = 288;
+      // The beam has to leave the lamp, not somewhere near it. These are the
+      // same expressions suv() uses to place the headlamp, off the same base
+      // and scale, so the two cannot drift apart again — hardcoding (x+40, 288)
+      // put the cone about two pixels right and three pixels below the bulb,
+      // which reads as light leaking out of the bodywork.
+      const bx = x + CAR_W * 0.44;
+      const by = CAR_BODY_Y + 7 * CAR_S;
       this.alpha(ctx, 0.13);
       quad(ctx, bx, by - 4, bx + 320, by - 96 - sweep, bx + 320, by + 40 - sweep, bx, by + 5, WARM_HOT, NO, 0);
       this.alpha(ctx, 0.09);
@@ -933,7 +946,7 @@ export class CutsceneScene implements Scene {
     // The cottage, unaware, still warm, at the end of the track.
     this.cottage(ctx, 528, 258, 0.66, 1, f);
 
-    for (let i = 0; i < 3; i++) this.suv(ctx, this.carX(i, f), 302, 0.9, f);
+    for (let i = 0; i < 3; i++) this.suv(ctx, this.carX(i, f), CAR_BASE, CAR_S, f);
 
     // Four of them get out and start walking. They are in no hurry either.
     const gy = 306;

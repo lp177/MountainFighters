@@ -3522,7 +3522,7 @@ VISUALS.escort_out = {
 
 // ── BOSSES ───────────────────────────────────────────────────────────────────
 
-/** CRUNCH, PRINCIPAL ENGINEER — closes the ticket. */
+/** CRUNCH — closes the ticket. */
 VISUALS.wontfix = {
   banner: 0.62,
   draw(s) {

@@ -238,7 +238,7 @@ const BOSS_COPY: Record<string, BossCover> = {
     tease:
       'One office at the far end still has its light on, and whatever is in there has not been home since Tuesday.',
     reveal:
-      'CRUNCH, PRINCIPAL ENGINEER — ninety-one hours awake, four days into a release, and out of people to blame.',
+      'CRUNCH — ninety-one hours awake, four days into a release, and out of people to blame.',
   },
   shiba: {
     tease:
@@ -285,7 +285,7 @@ const BOSS_COPY: Record<string, BossCover> = {
     tease:
       'One cradle at the end is empty, and something two metres tall is standing perfectly still where the light does not reach.',
     reveal:
-      'OPTIMUS, UNIT 001 — built to fold laundry, and thinking about the applause it got that night.',
+      'OPTIMUS — built to fold laundry, and thinking about the applause it got that night.',
   },
   grok: {
     tease:

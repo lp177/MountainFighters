@@ -42,7 +42,7 @@ export const BOSSES: BossDef[] = [
   // ── 5 ──────────────────────────────────────────────────────────────────────
   {
     id: 'dev',
-    name: "CRUNCH, MUSK'S PRINCIPAL ENGINEER",
+    name: 'CRUNCH',
     quote:
       '"I have been awake for four days and I am shipping this whether it works or not."',
     atMap: 5,
@@ -161,7 +161,7 @@ export const BOSSES: BossDef[] = [
   // ── 15 ─────────────────────────────────────────────────────────────────────
   {
     id: 'blue_check',
-    name: 'THE BLUE TICK, VERIFIED BY ELON MUSK',
+    name: 'THE BLUE TICK',
     quote: '"Eight dollars a month buys you the right to be wrong loudly."',
     atMap: 15,
     health: 520,
@@ -278,7 +278,7 @@ export const BOSSES: BossDef[] = [
   // ── 25 ─────────────────────────────────────────────────────────────────────
   {
     id: 'boring',
-    name: "THE BORING COMPANY'S TUNNEL BORER",
+    name: 'BORING COMPANY',
     quote: '"Traffic solved. One car at a time. In a tube. Forever."',
     atMap: 25,
     health: 800,
@@ -515,7 +515,7 @@ export const BOSSES: BossDef[] = [
   // ── 45 ─────────────────────────────────────────────────────────────────────
   {
     id: 'optimus',
-    name: 'OPTIMUS UNIT 001, A TESLA ROBOT',
+    name: 'OPTIMUS',
     quote: '"I was demonstrated dancing. There was a man inside me. There is no man inside me now."',
     atMap: 45,
     health: 1360,
@@ -632,7 +632,7 @@ export const BOSSES: BossDef[] = [
   // ── 55 ─────────────────────────────────────────────────────────────────────
   {
     id: 'starship',
-    name: 'STARSHIP, A SPACEX ROCKET',
+    name: 'STARSHIP',
     quote: '"Rapid unscheduled disassembly is a SUCCESS if you were expecting it, and I am always expecting it."',
     atMap: 55,
     health: 1720,
@@ -691,7 +691,7 @@ export const BOSSES: BossDef[] = [
   // ── 60 ─────────────────────────────────────────────────────────────────────
   {
     id: 'mars_gov',
-    name: 'THE GOVERNOR OF MARS, APPOINTED BY ELON MUSK',
+    name: 'THE GOVERNOR OF MARS',
     quote: '"Earth law does not apply here. I wrote that in the terms and you clicked accept."',
     atMap: 60,
     health: 1920,

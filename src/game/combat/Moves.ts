@@ -3286,7 +3286,7 @@ function windup(frames: readonly number[], colors: string[], oy = 30, count = 8)
   });
 }
 
-// ── 5 · CRUNCH, PRINCIPAL ENGINEER ──────────────────────────────────────────
+// ── 5 · CRUNCH ──────────────────────────────────────────
 // He does not fight, he ships. Every move is a change nobody reviewed: fast,
 // confident, and followed a moment later by the thing it broke.
 
@@ -4535,7 +4535,7 @@ def({
   ),
 });
 
-// ── 45 · OPTIMUS, UNIT 001 ──────────────────────────────────────────────────
+// ── 45 · OPTIMUS ──────────────────────────────────────────────────
 // It was built to do household tasks precisely. It still does them precisely.
 // The tasks changed.
 

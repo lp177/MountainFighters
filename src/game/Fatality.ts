@@ -1328,6 +1328,11 @@ export class FatalityDirector {
   private def: FatalityDef | null = null;
   private vis: Visual | null = null;
   private killer: Fighter | null = null;
+
+  /** Who performed it, so the scene can hand them back their feet. */
+  get performer(): Fighter | null {
+    return this.killer;
+  }
   private victim: Fighter | null = null;
   private frame = 0;
 

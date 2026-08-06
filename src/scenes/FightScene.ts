@@ -1201,6 +1201,17 @@ export class FightScene implements Scene {
     // also the answer to "was there a show at all", which keeps this safe to
     // call from enter(), exit() and every map transition.
     const had = this.fatality.active || this.fatalityLimit > 0;
+    // Hand the performer their feet back BEFORE cancelling, while the director
+    // still knows who it was. The killing move was frozen mid-swing for the
+    // whole show; resuming into its leftover recovery left the player rooted
+    // for the best part of a second while the room moved on around them.
+    // Guarded on `had`, not on `active`: a director that finished NATURALLY has
+    // already cleared its own active flag by the time we get here, and that is
+    // the common path — guarding on active would have fixed only the timeout.
+    if (had) {
+      const performer = this.fatality.performer;
+      if (performer) performer.releaseFromFinisher();
+    }
     if (this.fatality.active) this.fatality.cancel();
     this.fatalityFrames = 0;
     this.fatalityLimit = 0;

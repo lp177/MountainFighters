@@ -2268,6 +2268,28 @@ export class Fighter implements FighterView {
    * when a rider dies, is blown out of the saddle or simply stops being in the
    * riding state, and every one of those has to leave a clean body behind.
    */
+  /**
+   * Put a fighter back on their feet, immediately actionable.
+   *
+   * Called on the killer when a finisher ends. The move that triggered it was
+   * frozen mid-swing for the whole performance, so without this they resume
+   * into its remaining recovery frames and stand there for the best part of a
+   * second while everyone else is already free — which reads exactly like being
+   * the only person in the room stuck in slow motion. Having just torn
+   * somebody's spine out, they have earned the right to be standing.
+   */
+  releaseFromFinisher(): void {
+    if (!this.alive) return;
+    this.currentMove = null;
+    this.moveConnected = false;
+    this.whiffed = false;
+    this.hitstunTimer = 0;
+    this.stateFrame = 0;
+    this.vel.x = 0;
+    this.vel.z = 0;
+    if (this.grounded) this.setState('idle', true);
+  }
+
   setRiding(on: boolean, speedScale = 1): void {
     if (on) {
       if (!this.alive) return;

@@ -410,7 +410,7 @@ export class SelectScene implements Scene {
    */
   private buildCursors(): void {
     const bindings = this.game.save.settings.bindings;
-    this.game.attachGamepads(2);
+    const pads = this.game.attachGamepads(2);
 
     this.cursors = [];
 
@@ -426,19 +426,26 @@ export class SelectScene implements Scene {
           : new KeyboardSource(0, bindings[0] ?? DEFAULT_BINDINGS[0]),
       );
       this.cursors.push(this.makeCursor(netSlot, 0));
+      this.shareKeyboard();
       return;
     }
 
+    // Hand out only as many keyboard halves as there are seats left over once
+    // the pads have taken theirs. Game boots with both halves live so either can
+    // join in at the menus; from here on, one person gets the whole board and
+    // only a second person sharing it takes half of it away again.
+    this.game.attachKeyboards(clamp(this.seats - pads, 1, 2));
+
     // Pads before keyboard halves: two people with two controllers should not
     // end up elbowing each other over one keyboard.
-    const pads: number[] = [];
+    const padSlots: number[] = [];
     const keys: number[] = [];
     for (let s = 0; s < MAX_LOCAL_PLAYERS; s++) {
       const src = this.game.input.source(s);
       if (!src) continue;
-      (src.kind === 'gamepad' ? pads : keys).push(s);
+      (src.kind === 'gamepad' ? padSlots : keys).push(s);
     }
-    const available = [...pads, ...keys];
+    const available = [...padSlots, ...keys];
     if (available.length === 0) {
       this.game.attachKeyboards(1);
       available.push(0);
@@ -446,6 +453,25 @@ export class SelectScene implements Scene {
 
     const seats = Math.min(this.seats, available.length);
     for (let i = 0; i < seats; i++) this.cursors.push(this.makeCursor(available[i], i));
+    this.shareKeyboard();
+  }
+
+  /**
+   * Say how many of these players are actually sharing one keyboard.
+   *
+   * Game boots with both keyboard halves attached so either of them can join in
+   * at the menus, which is not the same question as how many people are typing
+   * on this board — and the second question is the one that decides whether
+   * player one keeps the arrows as a second movement diamond or hands them to
+   * player two. One person, online or off, gets the whole keyboard; two people
+   * on one board get half each.
+   */
+  private shareKeyboard(): void {
+    let sharing = 0;
+    for (const c of this.cursors) {
+      if (this.game.input.source(c.slot)?.kind === 'keyboard') sharing++;
+    }
+    this.game.setLocalKeyboardCount(sharing);
   }
 
   /** One player, so every attached device is fair game to choose with. */

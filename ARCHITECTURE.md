@@ -146,17 +146,41 @@ This is what makes the movement diamond correct on every keyboard on earth
 without a per-layout default table, and adding one would break exactly the
 people it claims to help.
 
+Every action may hold TWO keys. There is nowhere to store a pair — the saved
+shape is `Record<slot, Record<code, bit>>` and must stay that way — so the pair
+is the ORDER: the first code carrying a bit is the primary, the second is the
+spare. `normalizeBindings` is what makes that order defined rather than
+accidental, every mutation ends in `setBinding`, and Save.ts normalises on the
+way in, so the pair survives a save/load round trip intact.
+
 ```ts
-/** Default bindings by slot. Slot 0 = the WASD diamond + FGH/space, slot 1 = arrows + numpad. */
+/**
+ * Default bindings by slot. Slot 0 = the WASD diamond (arrows as its SECOND
+ * movement diamond) + FGH/space, slot 1 = arrows + numpad.
+ */
 export const DEFAULT_BINDINGS: Record<number, Record<string, number>>;
 export interface ActionDef { bit: number; id: string; name: string }
 /** Every rebindable action, in the order a rebinding screen lists them. */
 export const ACTIONS: ActionDef[];
+/** How many keys one action may answer to. */
+export const KEY_SLOTS: number;
+/** Which of an action's two keys a call means: 0 = primary, 1 = secondary. */
+export type KeySlot = 0 | 1;
+/** Rebuild a map in a defined key order, keeping every entry. */
+export function normalizeBindings(bindings: Record<string, number>): Record<string, number>;
 /** A fresh copy, so "Reset to defaults" cannot redefine the defaults. */
 export function defaultBindingsFor(slot: number): Record<string, number>;
 /** The action already on this key, for a rebinder that refuses to steal silently. */
 export function conflictFor(bindings: Record<string, number>, code: string): number | null;
+/** Every key on an action, primary first. Dense: [], ['KeyW'] or ['KeyW','ArrowUp']. */
+export function codesForBit(bindings: Record<string, number>, bit: number): string[];
+/** The PRIMARY key, which is the one every prompt in the game prints. */
 export function codeForBit(bindings: Record<string, number>, bit: number): string | null;
+/** Set or clear one of an action's two keys. Returns a NEW map; evicts the code from
+ *  whatever else in this slot was using it. */
+export function setBinding(
+  bindings: Record<string, number>, bit: number, slotIndex: KeySlot, code: string | null,
+): Record<string, number>;
 export function actionForBit(bit: number): ActionDef | null;
 /** 'Keyboard (ZQSD)' — built from what is bound now and from what the keys say. */
 export function labelForBindings(bindings: Record<string, number>, slot: number): string;
@@ -579,7 +603,7 @@ and the active net session.
 
 | Action | Player 1 | Player 2 | Gamepad |
 | --- | --- | --- | --- |
-| Move | `WASD` | Arrows | Left stick / d-pad |
+| Move | `WASD` (arrows as a second diamond) | Arrows | Left stick / d-pad |
 | Light | `F` | `Numpad 1` | A / ✕ |
 | Heavy | `G` | `Numpad 2` | B / ○ |
 | Jump | `Space` | `Numpad 0` | X / □ |
@@ -588,6 +612,12 @@ and the active net session.
 | Grab | `R` | `Numpad 5` | LB / L1 |
 | Super | `T` | `Numpad +` | RT / R2 |
 | Pause | `Esc` | `Esc` | Start |
+
+Every keyboard action takes a primary key and an optional second one; only Move
+ships with a second by default. Alone at the keyboard — offline or online, on
+whatever slot a lobby handed you — you get the whole board, both halves. As soon
+as two people share one keyboard, every key player two claims comes off player
+one's map (`Game.keyboardMapFor`), so the arrows go back to being player two's.
 
 ## Netplay
 

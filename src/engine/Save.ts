@@ -12,7 +12,7 @@
 import { SAVE_KEY, SAVE_VERSION, TOTAL_MAPS } from '@/core/constants';
 import type { SaveData, Settings } from '@/core/types';
 import { clamp } from '@/core/math';
-import { DEFAULT_BINDINGS } from '@/engine/input/Bindings';
+import { DEFAULT_BINDINGS, normalizeBindings } from '@/engine/input/Bindings';
 
 type Difficulty = Settings['difficulty'];
 
@@ -57,6 +57,21 @@ function prefersReducedMotion(): boolean {
   }
 }
 
+/**
+ * Copy one slot's key map, dropping anything that is not a number.
+ *
+ * The order of the keys is not cosmetic and is not the copy's to choose: an
+ * action's FIRST code is its primary and its second is the spare, which is what
+ * every prompt in the game prints and what the rebinding editor shows in which
+ * box. JSON preserves the insertion order of non-numeric string keys in both
+ * directions, so the order written last session is the order read this one — and
+ * `normalizeBindings` puts a file written by an older build, or by a text
+ * editor, into the same defined order rather than trusting it.
+ *
+ * This does NOT change the persisted shape, which stays
+ * `Record<slot, Record<code, bit>>`. Nothing outside this file, and no existing
+ * save, has to know.
+ */
 function cloneSlot(src: Record<string, number> | undefined): Record<string, number> {
   const out: Record<string, number> = {};
   if (!src) return out;
@@ -64,7 +79,7 @@ function cloneSlot(src: Record<string, number> | undefined): Record<string, numb
     const bit = src[code];
     if (typeof bit === 'number' && Number.isFinite(bit)) out[code] = bit | 0;
   }
-  return out;
+  return normalizeBindings(out);
 }
 
 function defaultBindings(): Record<number, Record<string, number>> {

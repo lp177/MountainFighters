@@ -157,6 +157,19 @@ const ENEMY_VOICES: Record<EnemyKind, VoiceProfile> = {
   lobbyist: { pitch: 126, timbre: 'wheeze', wobble: 0.12 },
 };
 
+/**
+ * Kinds whose attacks are the weapon, so they can never turn up without it.
+ *
+ * A gunman with no pistol still fires; an intern with no laptop still swings
+ * one. Everyone else keeps the roll, because a chain is a bonus rather than a
+ * prerequisite.
+ */
+const ARMED_ALWAYS: ReadonlySet<EnemyKind> = new Set<EnemyKind>([
+  'gunman',
+  'taser_guard',
+  'intern',
+]);
+
 const SQUAT_ENEMIES: ReadonlySet<EnemyKind> = new Set<EnemyKind>([
   'security_bot',
   'vacuum_bot',
@@ -994,6 +1007,18 @@ export class Level {
   }
 
   /**
+   * Whether this kind MUST arrive holding its weapon.
+   *
+   * The odds above are right for a guard whose chain is a bonus, and wrong for
+   * anyone whose attack IS the object: a gunman who spawned unarmed still fired
+   * `e_shoot`, so bullets came out of an empty hand. If the moveset needs the
+   * prop, the prop is not optional.
+   */
+  private mustBeArmed(kind: EnemyKind): boolean {
+    return ARMED_ALWAYS.has(kind);
+  }
+
+  /**
    * A per-instance copy of the kind's look.
    *
    * Every enemy of a kind previously shared ONE RigStyle object, so a wave was
@@ -1062,9 +1087,10 @@ export class Level {
     };
 
     const f = new Fighter(init);
-    // Not every guard is issued a weapon. Arming all of them made the opening
-    // of map 1 three chain-swingers abreast, which is not a tutorial.
-    if (def.weapon && this.rng.chance(this.armedChance())) {
+    // Not every guard is issued a weapon — arming all of them made the opening
+    // of map 1 three chain-swingers abreast, which is not a tutorial. But
+    // anyone who SHOOTS is always armed, or the shot comes from nowhere.
+    if (def.weapon && (this.mustBeArmed(kind) || this.rng.chance(this.armedChance()))) {
       const pool = WEAPON_POOL[kind];
       f.giveWeapon(pool && pool.length > 0 ? this.rng.pick(pool) : def.weapon);
     }

@@ -897,10 +897,10 @@ body {
 
 .kbe__row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
-  padding: 4px 6px 4px 12px;
+  padding: 4px 6px 6px 12px;
   background: var(--surface-0);
   border: 1px solid var(--outline);
   border-left: 3px solid var(--outline-strong);
@@ -917,12 +917,47 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* Two key boxes per action: the one the game names in its prompts, and a spare.
+   They sit side by side on a desktop and drop onto their own line under the
+   action name on a phone, which is the only way both survive a 360px pause
+   menu with a tap target still worth the name. */
+.kbe__keys {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.kbe__slot {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+/* Which of the two this is. Tiny, quiet, and always there — an empty box that
+   is still labelled "2nd" reads as a box to fill rather than as a fault. */
+.kbe__slotlabel {
+  padding-left: 3px;
+  font-family: var(--font-display);
+  font-size: var(--fs-xs);
+  line-height: 1.1;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--on-surface-faint);
+}
+
+.kbe__slotctl {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
 /* The key button quotes the engraving, so it is monospaced and never shouted in
    caps — "Num ." is not "NUM .". */
 .kbe__key {
-  min-width: 11ch;
+  min-width: 8ch;
   min-height: 34px;
-  padding: 0 10px;
+  padding: 0 8px;
 }
 
 .kbe__key .btn__label {
@@ -950,12 +985,14 @@ body {
   color: var(--danger);
 }
 
-/* Unbound is a state worth seeing from across the room, not a quiet dash. */
+/* An action nobody can reach at all is worth seeing from across the room. An
+   empty SECOND key is not that, and is left alone. */
 .kbe__row.is-unbound {
   border-left-color: var(--warn);
 }
 
-.kbe__row.is-unbound .kbe__key .btn__label {
+/* An empty box: a dash, dimmed, and still perfectly clickable. */
+.kbe__key.is-empty .btn__label {
   color: var(--on-surface-faint);
 }
 
@@ -1025,8 +1062,12 @@ body {
   color: var(--warn);
 }
 
-@media (max-width: 480px) {
+@media (max-width: 560px) {
+  /* Two key boxes and an action name will not share one line at this width, so
+     the boxes take a line of their own and spread across it. */
   .kbe__row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
     padding-left: 8px;
   }
 
@@ -1034,8 +1075,17 @@ body {
     font-size: var(--fs-xs);
   }
 
-  .kbe__key {
-    min-width: 9ch;
+  .kbe__keys {
+    gap: 8px;
+  }
+
+  .kbe__slot {
+    flex: 1 1 0;
+  }
+
+  .kbe__slotctl .kbe__key {
+    flex: 1 1 auto;
+    min-width: 7ch;
     padding: 0 6px;
   }
 

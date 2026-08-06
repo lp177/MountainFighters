@@ -5,6 +5,21 @@
  * in-game pause menu. Two copies of a rebinding UI is two copies of every bug
  * in a rebinding UI, so there is exactly one.
  *
+ * TWO KEYS PER ACTION
+ * -------------------
+ * Every row has two boxes. The first is the action's primary — the one the HUD
+ * prompt and the controls screen name it after — and the second is a spare,
+ * which most actions ship without and which is a perfectly ordinary thing to
+ * leave empty. Both are independently rebindable, independently clearable and
+ * independently focusable; an empty one reads as a dash and still takes a key.
+ *
+ * The pair is not stored as a pair. A binding map is `code -> bit` and always
+ * has been, so the ORDER of the codes is the pair, which is why every mutation
+ * here goes through `setBinding` rather than editing the map by hand. One
+ * consequence surfaces in the UI: a `Record` cannot hold "no primary, but a
+ * secondary", so putting a key in the second box of an action with an empty
+ * first box lands it in the first, and the status line says so.
+ *
  * WHY NO LABEL IS HARD-CODED
  * --------------------------
  * Bindings are stored by `KeyboardEvent.code`, which names a PHYSICAL key
@@ -35,13 +50,14 @@
  * stopped answering its own controls, so it gets belt and braces.
  */
 
-import type { ActionDef } from '@/engine/input/Bindings';
+import type { ActionDef, KeySlot } from '@/engine/input/Bindings';
 import {
   ACTIONS,
   actionForBit,
-  codeForBit,
+  codesForBit,
   conflictFor,
   defaultBindingsFor,
+  setBinding,
 } from '@/engine/input/Bindings';
 import { keyLabel, layoutName, onLayoutChange } from '@/engine/input/Layout';
 import { setCaptureMode } from '@/engine/input/KeyboardSource';
@@ -69,8 +85,21 @@ type BindingsBySlot = Record<number, BindingMap>;
 
 type Tone = 'plain' | 'ok' | 'warn';
 
+/** The two key slots every action gets, in the order they are drawn. */
+const SLOT_ORDER: readonly KeySlot[] = [0, 1];
+
+/** The badge above each key button. Short, because the row has to fit a phone. */
+const SLOT_BADGE: Record<KeySlot, string> = { 0: '1st', 1: '2nd' };
+
+/** The same thing said properly, for screen readers and the status line. */
+const SLOT_NAME: Record<KeySlot, string> = { 0: 'primary key', 1: 'second key' };
+
 function playerName(slot: number): string {
   return `Player ${slot + 1}`;
+}
+
+function keyList(codes: readonly string[]): string {
+  return codes.map(keyLabel).join(' and ');
 }
 
 function cloneBindings(src: BindingsBySlot): BindingsBySlot {
@@ -129,13 +158,22 @@ function createHost(): HTMLElement {
 // Editor
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** One of a row's two key buttons, with its own ✕. */
+interface KeyUi {
+  row: RowUi;
+  index: KeySlot;
+  group: HTMLElement;
+  btn: HTMLButtonElement;
+  text: HTMLElement;
+  clearBtn: HTMLButtonElement;
+}
+
 interface RowUi {
   action: ActionDef;
   slot: number;
   root: HTMLLIElement;
-  keyBtn: HTMLButtonElement;
-  keyText: HTMLElement;
-  clearBtn: HTMLButtonElement;
+  /** Primary then secondary, always both present even when only one is bound. */
+  keys: KeyUi[];
 }
 
 interface SlotUi {
@@ -146,7 +184,7 @@ interface SlotUi {
 }
 
 interface CaptureSession {
-  row: RowUi;
+  key: KeyUi;
   ctl: AbortController;
 }
 
@@ -205,8 +243,9 @@ class Editor {
     hint.className = 'kbe__hint';
     hint.id = `${this.ids}-hint`;
     hint.textContent =
-      'Pick a key, then press the one you want. Esc backs out. ✕ unbinds it completely, ' +
-      'which is your funeral.';
+      'Every action takes two keys. The first is the one the game names in its prompts; the ' +
+      'second is a spare, and leaving it empty is perfectly normal. Pick a box, then press the ' +
+      'key you want. Esc backs out. ✕ empties that box, which is your funeral.';
 
     host.append(head, hint);
     for (const ui of this.slotUis) host.appendChild(ui.panel);
@@ -289,35 +328,72 @@ class Editor {
     name.className = 'kbe__action';
     name.textContent = action.name;
 
-    const keyBtn = button('', () => this.toggleCapture(slot, action.bit), {
+    const row: RowUi = { action, slot, root, keys: [] };
+
+    // Both boxes are built whether or not anything is in them. An empty second
+    // key is a box you can put a key in, not a control that has gone missing, so
+    // it keeps its size, its badge and its place in the tab order.
+    const keys = document.createElement('div');
+    keys.className = 'kbe__keys';
+    for (const index of SLOT_ORDER) {
+      const key = this.buildKey(row, index);
+      row.keys.push(key);
+      keys.appendChild(key.group);
+    }
+
+    root.append(name, keys);
+    return row;
+  }
+
+  private buildKey(row: RowUi, index: KeySlot): KeyUi {
+    const { slot, action } = row;
+
+    const group = document.createElement('div');
+    group.className = `kbe__slot kbe__slot--${index === 0 ? 'primary' : 'secondary'}`;
+
+    const badge = document.createElement('span');
+    badge.className = 'kbe__slotlabel';
+    // The button's own aria-label already says which of the two this is, and
+    // hearing "1st" read out before every key name is noise, not information.
+    badge.setAttribute('aria-hidden', 'true');
+    badge.textContent = SLOT_BADGE[index];
+
+    const btn = button('', () => this.toggleCapture(slot, action.bit, index), {
       variant: 'outlined',
       className: 'kbe__key',
+      title:
+        index === 0
+          ? `The key ${action.name} is named after`
+          : `A spare key for ${action.name}. Optional.`,
     });
-    keyBtn.setAttribute('aria-describedby', `${this.ids}-hint`);
-    keyBtn.setAttribute('aria-pressed', 'false');
+    btn.setAttribute('aria-describedby', `${this.ids}-hint`);
+    btn.setAttribute('aria-pressed', 'false');
 
     // "Awaiting a key" must not be signalled by colour alone: this caret is a
     // second, shape-based cue alongside the changed label and the dashed border.
     const cue = document.createElement('span');
     cue.className = 'kbe__cue';
     cue.setAttribute('aria-hidden', 'true');
-    keyBtn.appendChild(cue);
+    btn.appendChild(cue);
 
-    const clearBtn = button('✕', () => this.clearBinding(slot, action.bit), {
+    const clearBtn = button('✕', () => this.clearBinding(slot, action.bit, index), {
       variant: 'text',
       className: 'kbe__clear',
-      ariaLabel: `Clear the key for ${action.name}, ${playerName(slot)}`,
-      title: `Unbind ${action.name}`,
+      ariaLabel: `Clear the ${SLOT_NAME[index]} for ${action.name}, ${playerName(slot)}`,
+      title: `Unbind the ${SLOT_NAME[index]}`,
     });
 
-    root.append(name, keyBtn, clearBtn);
+    const ctl = document.createElement('div');
+    ctl.className = 'kbe__slotctl';
+    ctl.append(btn, clearBtn);
+    group.append(badge, ctl);
 
     return {
-      action,
-      slot,
-      root,
-      keyBtn,
-      keyText: keyBtn.querySelector<HTMLElement>('.btn__label') ?? keyBtn,
+      row,
+      index,
+      group,
+      btn,
+      text: btn.querySelector<HTMLElement>('.btn__label') ?? btn,
       clearBtn,
     };
   }
@@ -372,25 +448,28 @@ class Editor {
 
   // ── Capture ───────────────────────────────────────────────────────────────
 
-  private toggleCapture(slot: number, bit: number): void {
-    const row = this.rowIndex.get(rowKey(slot, bit));
-    if (!row) return;
-    if (this.capture?.row === row) {
+  private toggleCapture(slot: number, bit: number, index: KeySlot): void {
+    const key = this.rowIndex.get(rowKey(slot, bit))?.keys[index];
+    if (!key) return;
+    if (this.capture?.key === key) {
       this.cancelCapture();
-      this.say(`Left ${row.action.name} where it was.`);
+      this.say(`Left the ${SLOT_NAME[index]} for ${key.row.action.name} where it was.`);
       return;
     }
-    this.beginCapture(row);
+    this.beginCapture(key);
   }
 
-  private beginCapture(row: RowUi): void {
+  private beginCapture(key: KeyUi): void {
     this.cancelCapture();
 
     const ctl = new AbortController();
-    this.capture = { row, ctl };
+    this.capture = { key, ctl };
     setCapture(true);
     this.paint();
-    this.say(`Press a key for ${row.action.name}. Esc backs out.`, 'ok');
+    this.say(
+      `Press a key for ${key.row.action.name} — its ${SLOT_NAME[key.index]}. Esc backs out.`,
+      'ok',
+    );
 
     // Capture phase on window: this runs before the game's own listeners AND
     // before the focused button's default activation, so the key being bound
@@ -432,7 +511,7 @@ class Editor {
     if (!session) return;
     // Clicking the armed button again is a deliberate cancel, handled by its
     // own click listener; clicking anywhere else just calls the whole thing off.
-    if (e.target instanceof Node && session.row.keyBtn.contains(e.target)) return;
+    if (e.target instanceof Node && session.key.btn.contains(e.target)) return;
     this.cancelCapture();
   };
 
@@ -447,28 +526,29 @@ class Editor {
     if (e.repeat || !e.code) return;
 
     if (e.code === 'Escape') {
-      const { action, keyBtn } = session.row;
+      const { row, index, btn } = session.key;
       this.cancelCapture();
-      this.say(`Cancelled. ${action.name} is unchanged.`);
-      keyBtn.focus();
+      this.say(`Cancelled. The ${SLOT_NAME[index]} for ${row.action.name} is unchanged.`);
+      btn.focus();
       return;
     }
 
-    this.commit(session.row, e.code);
+    this.commit(session.key, e.code);
   };
 
   // ── Mutations ─────────────────────────────────────────────────────────────
 
-  private commit(row: RowUi, code: string): void {
+  private commit(key: KeyUi, code: string): void {
+    const { row, index } = key;
     const { slot, action } = row;
+    const map = this.bindings[slot] ?? {};
 
     // Read the clashes off the CURRENT state, before it is rewritten underneath
     // us — the losing action is about to stop being findable.
-    const stolenBit = conflictFor(this.bindings[slot] ?? {}, code);
+    const stolenBit = conflictFor(map, code);
     const stolen = stolenBit !== null && stolenBit !== action.bit ? actionForBit(stolenBit) : null;
     const shared: string[] = [];
-    for (const key of Object.keys(this.bindings)) {
-      const other = Number(key);
+    for (const other of Object.keys(this.bindings).map(Number)) {
       if (other === slot) continue;
       const bit = conflictFor(this.bindings[other] ?? {}, code);
       if (bit === null) continue;
@@ -476,24 +556,30 @@ class Editor {
     }
 
     const next = cloneBindings(this.bindings);
-    const map = { ...(next[slot] ?? {}) };
-    // One key per action, one action per key: drop whatever this action used to
-    // answer to, then evict whoever was sitting on the new key.
-    for (const bound of Object.keys(map)) {
-      if (map[bound] === action.bit) delete map[bound];
-    }
-    map[code] = action.bit;
-    next[slot] = map;
+    // setBinding does the evicting: one action per key within a slot, and the
+    // pair kept in a defined order so the primary stays the primary.
+    next[slot] = setBinding(map, action.bit, index, code);
 
     this.cancelCapture();
     this.apply(next);
-    row.keyBtn.focus();
+    key.btn.focus();
 
+    const after = codesForBit(next[slot] ?? {}, action.bit);
+    const landed: KeySlot = after.indexOf(code) === 1 ? 1 : 0;
     const printed = keyLabel(code);
-    let text = `${action.name} is now ${printed}.`;
+
+    let text = `${action.name}: ${SLOT_NAME[landed]} is now ${printed}.`;
     let tone: Tone = 'ok';
+    // Asked for the spare box on an action that had nothing in the first one.
+    // A key map cannot hold the gap, so the key took the first box instead;
+    // saying so is better than letting them wonder which box they clicked.
+    if (landed === 0 && index === 1) text += ' The first box was empty, so it went in there.';
     if (stolen) {
-      text += ` ${stolen.name} had that key and is now unbound.`;
+      const left = codesForBit(next[slot] ?? {}, stolen.bit);
+      text +=
+        left.length > 0
+          ? ` ${stolen.name} had that key and now answers to ${keyList(left)} alone.`
+          : ` ${stolen.name} had that key and is now unbound.`;
       tone = 'warn';
     }
     if (shared.length > 0) {
@@ -503,27 +589,34 @@ class Editor {
     this.say(text, tone);
   }
 
-  private clearBinding(slot: number, bit: number): void {
-    const row = this.rowIndex.get(rowKey(slot, bit));
-    if (!row) return;
-    if (!codeForBit(this.bindings[slot] ?? {}, bit)) {
-      this.say(`${row.action.name} was already unbound.`);
+  private clearBinding(slot: number, bit: number, index: KeySlot): void {
+    const key = this.rowIndex.get(rowKey(slot, bit))?.keys[index];
+    if (!key) return;
+    const action = key.row.action;
+    const map = this.bindings[slot] ?? {};
+
+    if (!codesForBit(map, bit)[index]) {
+      this.say(`${action.name} has no ${SLOT_NAME[index]} to clear.`);
       return;
     }
 
     const next = cloneBindings(this.bindings);
-    const map = { ...(next[slot] ?? {}) };
-    for (const code of Object.keys(map)) {
-      if (map[code] === bit) delete map[code];
-    }
-    next[slot] = map;
+    next[slot] = setBinding(map, bit, index, null);
 
     this.cancelCapture();
     this.apply(next);
     // The ✕ disables itself once there is nothing left to clear, and focus must
     // not fall off the row when it does.
-    row.keyBtn.focus();
-    this.say(`${row.action.name} is unbound. Hope you were not planning to use it.`, 'warn');
+    key.btn.focus();
+
+    const left = codesForBit(next[slot] ?? {}, bit);
+    if (left.length === 0) {
+      this.say(`${action.name} is unbound. Hope you were not planning to use it.`, 'warn');
+      return;
+    }
+    // Clearing the first box promotes the spare into it, because the map has no
+    // way to spell "no primary, but a secondary".
+    this.say(`${action.name} now answers to ${keyList(left)} alone.`);
   }
 
   private resetSlot(slot: number): void {
@@ -569,26 +662,41 @@ class Editor {
   }
 
   private paintRow(row: RowUi): void {
-    const capturing = this.capture?.row === row;
-    const code = codeForBit(this.bindings[row.slot] ?? {}, row.action.bit);
-    const printed = code ? keyLabel(code) : null;
-
-    row.keyText.textContent = capturing ? 'press a key' : (printed ?? '—');
-    row.keyBtn.classList.toggle('is-capturing', capturing);
-    row.keyBtn.setAttribute('aria-pressed', capturing ? 'true' : 'false');
-    // The visible label is a bare key name, which on its own tells a screen
-    // reader nothing about which action it belongs to.
-    row.keyBtn.setAttribute(
-      'aria-label',
-      capturing
-        ? `${row.action.name}: waiting for a key. Press Escape to cancel.`
-        : `${row.action.name}: ${printed ?? 'unbound'}. Activate to rebind.`,
-    );
+    const codes = codesForBit(this.bindings[row.slot] ?? {}, row.action.bit);
+    const capturing = this.capture?.key.row === row;
 
     row.root.classList.toggle('is-capturing', capturing);
-    row.root.classList.toggle('is-unbound', !code && !capturing);
+    // The ROW is only in trouble when the action has no key at all. An empty
+    // second box is the resting state of almost everything on this list and must
+    // not be dressed up as a fault.
+    row.root.classList.toggle('is-unbound', codes.length === 0 && !capturing);
+
+    for (const key of row.keys) this.paintKey(key, codes[key.index] ?? null);
+  }
+
+  private paintKey(key: KeyUi, code: string | null): void {
+    const capturing = this.capture?.key === key;
+    const printed = code ? keyLabel(code) : null;
+    const which = SLOT_NAME[key.index];
+    const action = key.row.action.name;
+
+    key.text.textContent = capturing ? 'press a key' : (printed ?? '—');
+    key.btn.classList.toggle('is-capturing', capturing);
+    // Empty is a dash and a dimmer colour, but still a live button: this is how
+    // an unused second key gets assigned in the first place.
+    key.btn.classList.toggle('is-empty', !code && !capturing);
+    key.btn.setAttribute('aria-pressed', capturing ? 'true' : 'false');
+    // The visible label is a bare key name, or a dash, which on its own tells a
+    // screen reader nothing about which action or which box it belongs to.
+    key.btn.setAttribute(
+      'aria-label',
+      capturing
+        ? `${action}, ${which}: waiting for a key. Press Escape to cancel.`
+        : `${action}, ${which}: ${printed ?? 'not set'}. Activate to ${code ? 'change' : 'set'} it.`,
+    );
+
     // Nothing to clear, or a capture in flight that ✕ would only confuse.
-    row.clearBtn.disabled = !code || capturing;
+    key.clearBtn.disabled = !code || capturing;
   }
 }
 

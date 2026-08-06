@@ -26,6 +26,7 @@ import {
   TOTAL_MAPS,
 } from '@/core/constants';
 import { clamp } from '@/core/math';
+import { Btn } from '@/core/types';
 import type { NetConfig, Rng, SaveData, Scene, SceneName, Settings } from '@/core/types';
 import { GameLoop } from '@/engine/Loop';
 import { makeRng, randomSeed } from '@/engine/Rng';
@@ -696,28 +697,107 @@ export class Game {
   }
 
   /**
+   * How many local slots are currently driven by a keyboard — that is, how many
+   * people are sharing THIS machine's board. Not the number of players in the
+   * match: an online fight has one local keyboard and three remote ones.
+   */
+  private localKeyboardCount = 0;
+
+  /**
+   * Tell the input layer how many local players are sharing this keyboard, and
+   * push the resulting maps into the sources that are already attached.
+   *
+   * `attachKeyboards` sets this too, but it also tears sources down and builds
+   * them again. Character select knows the answer without wanting any of that —
+   * it has already worked out who is sitting where — so it says so here instead.
+   */
+  setLocalKeyboardCount(count: number): void {
+    const n = clamp(Math.floor(count), 0, MAX_LOCAL_PLAYERS);
+    this.localKeyboardCount = n;
+    // Unconditional rather than only-on-change: a caller that has just built a
+    // source by hand needs it corrected even when the count did not move.
+    for (const slot of this.input.slots) {
+      const src = this.input.source(slot);
+      if (src instanceof KeyboardSource) src.setBindings(this.keyboardMapFor(slot, n));
+    }
+  }
+
+  /**
    * The key map a local slot should listen to.
    *
    * Playing alone, there is nobody to share the board with, so the lone player
-   * gets BOTH halves of it: the WASD diamond and the arrows, F/G/H and the
-   * numpad, whichever hand happens to be nearest. Slot 0 wins any key the two
-   * sets disagree on. As soon as a second local player exists the sets split
-   * back apart, because player two needs their half back.
+   * gets ALL of it: the WASD diamond and the arrows, F/G/H and the numpad,
+   * whichever hand happens to be nearest — and it applies to whichever slot
+   * number they were given, because a guest handed slot 3 by a lobby is still
+   * alone at their own desk. Their own slot wins any key the sets disagree on,
+   * and its codes come first so its primaries stay primary.
+   *
+   * TWO OR MORE PEOPLE ON ONE KEYBOARD IS THE OTHER CASE. Slot 0 now carries the
+   * arrows as its SECONDARY movement and slot 1 carries them as its PRIMARY, so
+   * left alone one press of Left would walk both dwarfs. Player two's keys are
+   * player two's: every code another local keyboard slot claims comes off slot
+   * 0's map, and slot 0 keeps everything nobody else wanted.
+   *
+   * THE TEST IS `localCount`, AND IT MUST STAY `localCount`. It counts the slots
+   * this machine drives from this keyboard — not the players in the match, not
+   * `run.slots`, not the net roster. Online, every player is sat at their own
+   * board with their own full map (and select forces `localPlayers: 1`), so
+   * splitting on player count would take half the keyboard off four people who
+   * have never been within a mile of each other. This is exactly the kind of
+   * condition somebody "simplifies" later into a bug.
    */
-  /** How many local slots are currently driven by a keyboard. */
-  private localKeyboardCount = 0;
-
   private keyboardMapFor(slot: number, localCount: number): Record<string, number> {
-    const own = this.save.settings.bindings[slot] ?? defaultBindingsFor(slot);
-    if (localCount > 1 || slot !== 0) return own;
-
-    const merged: Record<string, number> = {};
-    for (let s = MAX_LOCAL_PLAYERS - 1; s >= 1; s--) {
-      const other = this.save.settings.bindings[s] ?? defaultBindingsFor(s);
-      for (const code of Object.keys(other)) merged[code] = other[code];
+    const own = this.savedMapFor(slot);
+    if (localCount > 1) {
+      return slot === 0 ? this.withoutOtherPlayersKeys(own, localCount) : own;
     }
-    for (const code of Object.keys(own)) merged[code] = own[code];
+
+    const merged: Record<string, number> = { ...own };
+    for (let s = 0; s < MAX_LOCAL_PLAYERS; s++) {
+      if (s === slot) continue;
+      const other = this.savedMapFor(s);
+      // First writer wins, so this slot still takes any key the sets disagree on
+      // and its codes stay ahead of the borrowed ones in the map's order — which
+      // is what keeps WASD the primary diamond and the arrows the spare.
+      for (const code of Object.keys(other)) {
+        if (!(code in merged)) merged[code] = other[code];
+      }
+    }
     return merged;
+  }
+
+  /**
+   * The map a slot is configured with. Slots 2 and 3 have no keyboard half of
+   * their own — they are the pad seats — so when a lobby hands the local player
+   * one of them, they get their OWN slot 0 keys rather than the shipped
+   * defaults. Somebody who moved Jump last week still expects it there tonight.
+   */
+  private savedMapFor(slot: number): Record<string, number> {
+    const saved = this.save.settings.bindings;
+    return saved[slot] ?? (slot > 1 ? saved[0] : undefined) ?? defaultBindingsFor(slot);
+  }
+
+  /** Slot 0's map with every key another local player is using taken out. */
+  private withoutOtherPlayersKeys(
+    own: Record<string, number>,
+    localCount: number,
+  ): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const code of Object.keys(own)) {
+      let taken = false;
+      for (let s = 1; s < localCount; s++) {
+        const bit = this.savedMapFor(s)[code];
+        if (typeof bit !== 'number') continue;
+        // Pause is the one action that is not a fighter's: whoever hits Escape
+        // pauses the game for the room. Both halves have always shared it, and
+        // taking it off slot 0 would leave player one with no way out of a fight.
+        if (bit === Btn.Pause && own[code] === Btn.Pause) continue;
+        taken = true;
+        break;
+      }
+      if (!taken) out[code] = own[code];
+    }
+    return out;
   }
 
   /**

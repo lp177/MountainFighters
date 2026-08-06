@@ -704,7 +704,18 @@ export class Fx implements FxBus {
     }
 
     if (this.smoLife > 0) {
-      this.smoLife--;
+      /*
+       * Count down in REAL time, not in slowed sim steps.
+       *
+       * update() is driven by the simulation, and the simulation's rate is the
+       * very thing this effect is throttling. Decrementing one per call meant a
+       * slowmo lasted `frames / scale` of wall clock instead of `frames`: at
+       * 0.1 a 26-frame flourish hit stayed slow for over four seconds, long
+       * after the finisher was over, and the fight felt like it had stuck to
+       * the floor while everything else carried on.
+       */
+      const ts = this.loop.timeScale;
+      this.smoLife = Math.max(0, this.smoLife - (ts > 0.02 ? 1 / ts : 1));
       const t = 1 - this.smoLife / this.smoMax;
       let s: number;
       if (t < SLOWMO_IN) s = lerp(1, this.smoScale, easeOut(t / SLOWMO_IN));

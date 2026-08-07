@@ -952,6 +952,8 @@ export type NetMessage =
    * the lobby — without it the host walked to the select screen alone and the
    * guest sat in the lobby watching a roster that said everything was fine.
    */
+  /** The host has changed which map the run starts on. Display only. */
+  | { t: 'map'; mapIndex: number }
   | { t: 'stage'; mapIndex: number }
   | { t: 'start'; mapIndex: number; seed: number; startFrame: number }
   /** Input for a range of frames; batched to cut packet count. */

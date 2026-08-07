@@ -1306,3 +1306,55 @@ html.reduced-motion .sw-toast {
     transition: none;
   }
 }
+
+/* ── Select ────────────────────────────────────────────────────────────────
+ *
+ * Shares .input's box so a dropdown sits in a form beside a text field without
+ * looking like a different design. The caret is drawn rather than shipped: no
+ * raster anywhere in this project, chrome included.
+ */
+select.input {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 34px;
+  cursor: pointer;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--on-surface-dim) 50%),
+    linear-gradient(135deg, var(--on-surface-dim) 50%, transparent 50%);
+  background-position:
+    calc(100% - 19px) calc(50% + 1px),
+    calc(100% - 13px) calc(50% + 1px);
+  background-size: 6px 6px, 6px 6px;
+  background-repeat: no-repeat;
+}
+
+select.input:hover,
+select.input:focus-visible {
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--on-surface) 50%),
+    linear-gradient(135deg, var(--on-surface) 50%, transparent 50%);
+}
+
+/* The popup itself is the platform's, so at least make it legible in the dark. */
+select.input option {
+  background: var(--surface-2);
+  color: var(--on-surface);
+}
+
+/* ── Lobby: keep the panel off the banner ──────────────────────────────────
+ *
+ * The lobby paints the room code and its status line straight onto the canvas,
+ * across the top 27% of the 640x360 stage (the last line sits at y=96). The DOM
+ * overlay is centred over the whole viewport, so on a short window the panel
+ * rode straight over "LISTENING FOR A FRIEND" and cut it in half.
+ *
+ * The stage is letterboxed, so its on-screen height is `min(100vh, 100vw*9/16)`
+ * — not the viewport's. Reserving 30% of THAT keeps the clearance correct at
+ * every window shape instead of at one. Bottom-aligned and height-capped rather
+ * than margined, so the panel still scrolls inside whatever is left.
+ */
+.ui-view--lobby {
+  --stage-h: min(100vh, calc(100vw * 9 / 16));
+  align-self: end;
+  max-height: calc(100% - var(--stage-h) * 0.3);
+}

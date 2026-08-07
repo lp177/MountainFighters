@@ -20,9 +20,10 @@ import type { NetSession } from '@/net/NetSession';
 import type { SelectParams } from '@/scenes/SelectScene';
 import type { HomeParams } from '@/scenes/HomeScene';
 
-import { MAX_LOCAL_PLAYERS, VIEW_H, VIEW_W } from '@/core/constants';
+import { MAX_LOCAL_PLAYERS, TOTAL_MAPS, VIEW_H, VIEW_W } from '@/core/constants';
 import { TAU, clamp, lerp } from '@/core/math';
 import { getDwarf } from '@/content/dwarfs';
+import { getMap } from '@/content/maps';
 import { clearRoomFromUrl, normalizeRoomId, roomIdFromUrl } from '@/net/Room';
 import { inviteLink } from '@/net/Room';
 import { MenuInput } from '@/ui/MenuInput';
@@ -125,6 +126,7 @@ export class LobbyScene implements Scene {
 
   /** The room we were invited to, if we arrived on a link. Held until connected. */
   private invite: string | null = null;
+  private mapLine: HTMLElement | null = null;
   private linkInput: HTMLInputElement | null = null;
   private copyHint: HTMLElement | null = null;
   private rosterEl: HTMLElement | null = null;
@@ -325,6 +327,11 @@ export class LobbyScene implements Scene {
 
   private readonly onNet = (m: NetMessage): void => {
     if (this.dead) return;
+    if (m.t === 'map') {
+      this.mapIndex = clamp(Math.round(m.mapIndex), 1, TOTAL_MAPS);
+      this.paintMapLine();
+      return;
+    }
     if (m.t === 'stage') {
       // The host has started. Follow them, whatever this screen was showing.
       this.mapIndex = Math.max(1, Math.floor(m.mapIndex));
@@ -337,6 +344,9 @@ export class LobbyScene implements Scene {
 
   private readonly onRoster = (_players: NetPlayer[]): void => {
     if (this.dead) return;
+    // Somebody new is here and has no idea where we are starting. Say so again
+    // rather than making them wait for the host to touch the control.
+    if (!this.isGuest) this.session?.send({ t: 'map', mapIndex: this.mapIndex });
     this.refresh();
   };
 
@@ -350,7 +360,10 @@ export class LobbyScene implements Scene {
 
   private rebuild(): void {
     const view = document.createElement('div');
-    view.className = 'stack';
+    // The lobby is the one screen with something important painted on the canvas
+    // BEHIND the panel — the room code and "listening for a friend" — so its view
+    // is kept clear of the top of the stage. See .ui-view--lobby.
+    view.className = 'stack ui-view--lobby';
 
     switch (this.phase) {
       case 'opening':
@@ -377,6 +390,7 @@ export class LobbyScene implements Scene {
         break;
       default:
         view.appendChild(this.buildInvite());
+        view.appendChild(this.buildMapPick());
         view.appendChild(this.buildRoster());
         view.appendChild(this.buildActions());
         break;
@@ -494,6 +508,82 @@ export class LobbyScene implements Scene {
     this.copyHint = hint;
 
     return panel('Your room is open', blurb, row, hint);
+  }
+
+  /** Furthest map reached, 1..70. Everything at or below it may be started from. */
+  private get progress(): number {
+    return clamp(Math.round(this.game.save.progress || 1), 1, TOTAL_MAPS);
+  }
+
+  /**
+   * Where the run begins.
+   *
+   * The host picks, from the maps this save has actually reached — starting a
+   * co-op run at map 1 every time is a long walk back to wherever the two of
+   * you got to. Guests see the choice but do not make it; it travels to them
+   * live on `t:'map'` and again with the Start on `t:'stage'`, so a guest who
+   * joined late still gets the right answer.
+   */
+  private buildMapPick(): HTMLElement {
+    const label = document.createElement('label');
+    label.className = 'field';
+
+    const cap = document.createElement('span');
+    cap.className = 'field__label';
+    cap.textContent = 'Starting map';
+
+    if (this.isGuest) {
+      const shown = document.createElement('p');
+      shown.className = 'hint';
+      shown.setAttribute('role', 'status');
+      shown.setAttribute('aria-live', 'polite');
+      this.mapLine = shown;
+      this.paintMapLine();
+      label.append(cap, shown);
+      return panel('Where you drop in', label);
+    }
+
+    const select = document.createElement('select');
+    select.className = 'input';
+    select.setAttribute('aria-label', 'Map this run starts on');
+    const top = this.progress;
+    for (let i = 1; i <= top; i++) {
+      const opt = document.createElement('option');
+      opt.value = String(i);
+      opt.textContent = `${String(i).padStart(2, '0')} · ${getMap(i).name}`;
+      if (i === this.mapIndex) opt.selected = true;
+      select.appendChild(opt);
+    }
+    select.addEventListener('change', () => {
+      this.mapIndex = clamp(Math.round(Number(select.value) || 1), 1, top);
+      this.game.audio.play('ui_move', { gain: 0.5 });
+      this.session?.send({ t: 'map', mapIndex: this.mapIndex });
+      this.paintMapLine();
+    });
+
+    const hint = document.createElement('p');
+    hint.className = 'hint';
+    hint.setAttribute('role', 'status');
+    hint.setAttribute('aria-live', 'polite');
+    this.mapLine = hint;
+    this.paintMapLine();
+
+    label.append(cap, select, hint);
+    return panel(
+      top > 1 ? 'Where you drop in' : 'Where you drop in',
+      label,
+    );
+  }
+
+  private paintMapLine(): void {
+    const el = this.mapLine;
+    if (!el) return;
+    const def = getMap(this.mapIndex);
+    el.textContent = this.isGuest
+      ? `${String(this.mapIndex).padStart(2, '0')} · ${def.name} — the host decides this.`
+      : this.progress > 1
+        ? `${this.progress} of ${TOTAL_MAPS} maps open. Clear more to start further in.`
+        : 'Clear a few maps and they turn up here.';
   }
 
   private buildRoster(): HTMLElement {

@@ -45,6 +45,7 @@ interface Link {
 const RELAYED: ReadonlySet<NetMessage['t']> = new Set<NetMessage['t']>([
   'pick',
   'ready',
+  'stage',
   'start',
   'in',
   'sync',

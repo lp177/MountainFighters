@@ -780,6 +780,11 @@ export class FightScene implements Scene {
   private seed = 0;
   /** Frames this fight has actually simulated. The netcode's clock. */
   private simFrame = 0;
+
+  /** The frame lockstep counts. Both peers start it at zero. See NetFramed. */
+  get netFrame(): number {
+    return this.simFrame;
+  }
   private score = 0;
   private continues = 0;
   private mapsCleared = 0;
@@ -922,6 +927,13 @@ export class FightScene implements Scene {
     this.localSlots = this.picks.filter((x) => x.local !== false).map((x) => x.slot);
     this.ensureInputSources();
 
+    // The match starts HERE, which is the only place that knows the sim's frame
+    // numbering — and it starts at zero, on both machines. Lockstep used to be
+    // reset when the room opened, from the local render loop's frame, so the
+    // two peers numbered frames from different places and neither ever sent
+    // anything. See Lockstep.reset.
+    this.lockstep?.reset(0);
+
     resetHud();
     setHudPadSlots(new Set(this.picks.filter((p) => p.onPad === true).map((p) => p.slot)));
     this.particles.clear();
@@ -1032,16 +1044,41 @@ export class FightScene implements Scene {
      * InputManager records the frame it last sampled, which is the honest way
      * to tell a driving host from a bare one.
      */
-    const sampled =
-      (this.host.input as unknown as { frame?: number }).frame === this.host.loop.frame;
+    // Compared against the SIM frame, because that is what a driving host now
+    // samples with — see Game.step and NetFramed. Comparing against the loop
+    // frame would make this read "not sampled" every frame in netplay and the
+    // gate would run twice.
+    const sampled = (this.host.input as unknown as { frame?: number }).frame === this.simFrame;
 
     if (!sampled) {
+      /*
+       * Sample and TRANSMIT before asking whether we may advance. The order
+       * matters more than it looks.
+       *
+       * `prepare` is what records this frame's local input and puts it on the
+       * wire, and `canAdvance` refuses to advance until every active slot —
+       * INCLUDING our own — has input for the frame. Gating prepare behind
+       * canAdvance therefore deadlocks the instant the opening input-delay
+       * grace window runs out: neither peer may advance until it has the
+       * other's input, and neither peer sends any, because sending only
+       * happens on the far side of the gate it is waiting at.
+       *
+       * It then got worse rather than staying stuck. After NET_TIMEOUT_FRAMES
+       * each side drops whatever it is waiting on — which included ITSELF —
+       * and carries on alone with the other player frozen at their spawn. That
+       * is exactly what a player sees as "my friend is stuck, and he sees me
+       * stuck". Both peers had `timedOut: true` and had dropped slot 0.
+       *
+       * prepare is first-write-wins, so calling it again on a stalled frame is
+       * harmless.
+       */
+      this.host.input.sampleAll(this.simFrame);
+      ls?.prepare(this.simFrame);
+
       if (ls && !ls.canAdvance(this.simFrame)) {
         this.stalled = ls.stalledFrames;
         return;
       }
-      this.host.input.sampleAll(this.simFrame);
-      ls?.prepare(this.simFrame);
     }
     this.stalled = ls ? ls.stalledFrames : 0;
 

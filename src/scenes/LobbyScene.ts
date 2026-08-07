@@ -325,6 +325,13 @@ export class LobbyScene implements Scene {
 
   private readonly onNet = (m: NetMessage): void => {
     if (this.dead) return;
+    if (m.t === 'stage') {
+      // The host has started. Follow them, whatever this screen was showing.
+      this.mapIndex = Math.max(1, Math.floor(m.mapIndex));
+      this.game.audio.play('ui_select');
+      this.goToSelect();
+      return;
+    }
     if (m.t === 'hello' || m.t === 'roster' || m.t === 'bye') this.refresh();
   };
 
@@ -689,8 +696,21 @@ export class LobbyScene implements Scene {
     void this.openRoom();
   }
 
+  /**
+   * Everyone to the character select — the host's decision, and one the guests
+   * have to be TOLD about.
+   *
+   * The button used to move only whoever pressed it. The host went to pick a
+   * dwarf, every guest stayed in the lobby looking at a roster that still said
+   * everyone was present, and neither screen admitted anything was wrong.
+   */
   private toSelect(): void {
     this.game.audio.play('ui_select');
+    if (!this.isGuest) this.session?.send({ t: 'stage', mapIndex: this.mapIndex });
+    this.goToSelect();
+  }
+
+  private goToSelect(): void {
     const params: SelectParams = { localPlayers: 1, online: true, mapIndex: this.mapIndex };
     this.game.setScene('select', params);
   }

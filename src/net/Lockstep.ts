@@ -108,7 +108,20 @@ export class Lockstep {
     return false;
   }
 
-  /** Call at the start of a match so frame numbering and history line up. */
+  /**
+   * Call at the start of a MATCH — not when the room opens — so both peers
+   * number frames from the same place.
+   *
+   * `startFrame` must be the frame the simulation itself will start counting
+   * from, which is 0: `FightScene.simFrame` resets to 0 on entry and is what
+   * gets passed to `canAdvance`/`prepare`. Passing anything machine-local here
+   * (the render loop's frame, say) is silently catastrophic rather than merely
+   * wrong: `flush` clamps `from` up to `origin`, so with an origin of a few
+   * thousand and a target of `simFrame + delay`, `from > target` and the loop
+   * `continue`s — NO INPUT IS EVER SENT. Meanwhile `lookup` reads every frame
+   * as inside the opening grace window and hands back 0, so both peers run
+   * happily, each watching a perfectly motionless copy of the other.
+   */
   reset(startFrame = 0): void {
     this.origin = startFrame;
     this.lastFlush = startFrame - 999;

@@ -947,6 +947,12 @@ export type NetMessage =
   | { t: 'roster'; players: NetPlayer[] }
   | { t: 'pick'; slot: number; dwarfId: string }
   | { t: 'ready'; slot: number; ready: boolean }
+  /**
+   * Everyone to the character select. Sent by the host when they press Start in
+   * the lobby — without it the host walked to the select screen alone and the
+   * guest sat in the lobby watching a roster that said everything was fine.
+   */
+  | { t: 'stage'; mapIndex: number }
   | { t: 'start'; mapIndex: number; seed: number; startFrame: number }
   /** Input for a range of frames; batched to cut packet count. */
   | { t: 'in'; slot: number; from: number; inputs: number[] }

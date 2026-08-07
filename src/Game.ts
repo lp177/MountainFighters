@@ -76,6 +76,25 @@ interface Checksummed {
 }
 
 /**
+ * A scene that counts its own simulation frames.
+ *
+ * Lockstep must be keyed by a number both peers agree on, and the only such
+ * number is the one the SIMULATION counts — `FightScene.simFrame`, which starts
+ * at zero on every machine. The render loop's frame is not that number: it has
+ * been running since the page opened, so a host who sat in the menu for a
+ * minute and a guest who just arrived are thousands of frames apart and would
+ * file each other's input under keys neither will ever look up.
+ */
+interface NetFramed {
+  readonly netFrame: number;
+}
+
+function netFrameOf(s: Scene): number | null {
+  const n = (s as Partial<NetFramed>).netFrame;
+  return typeof n === 'number' && Number.isFinite(n) ? n : null;
+}
+
+/**
  * Optional hook for a scene that has just had an overlay popped off it. It was
  * never exited, so `enter` must not be called again — that would rebuild a
  * world the player is standing in. This is the polite way back.
@@ -451,15 +470,33 @@ export class Game {
       // lobby has the most to do.
       const gated = ls !== null && ls.active && top.name === 'fight';
 
-      if (gated && ls !== null && !ls.canAdvance(frame)) return;
+      // The frame lockstep speaks in. See NetFramed: it is the sim's count,
+      // which both peers start from zero, never the render loop's.
+      const nf = (gated ? netFrameOf(top) : null) ?? frame;
 
-      this.input.sampleAll(frame);
-      if (gated && ls !== null) ls.prepare(frame);
+      this.input.sampleAll(nf);
+
+      /*
+       * Record and TRANSMIT this frame's input before asking whether we may
+       * advance — never the other way round.
+       *
+       * canAdvance refuses to advance until every active slot has input for the
+       * frame, our own included, and prepare is the only thing that supplies
+       * it. Gating prepare behind canAdvance deadlocks the moment the opening
+       * input-delay grace window ends: each peer waits for the other, and
+       * neither ever sends, because sending lives on the far side of the gate
+       * they are stuck at. After NET_TIMEOUT_FRAMES both then DROP whatever
+       * they were waiting on — which included themselves — and carry on alone
+       * with the other player frozen at their spawn point. That is what a
+       * player sees as "my friend is stuck, and he sees me stuck".
+       */
+      if (gated && ls !== null) ls.prepare(nf);
+      if (gated && ls !== null && !ls.canAdvance(nf)) return;
 
       top.update(FIXED_DT);
 
-      if (gated && ls !== null && ls.shouldChecksum(frame) && hasChecksum(top)) {
-        ls.confirm(frame, top.checksum() | 0);
+      if (gated && ls !== null && ls.shouldChecksum(nf) && hasChecksum(top)) {
+        ls.confirm(nf, top.checksum() | 0);
       }
 
       // Presentation runs on the same clock as the sim, so hitstop freezes the
@@ -924,7 +961,6 @@ export class Game {
   async hostRoom(name = 'Host'): Promise<string> {
     const session = this.ensureNet();
     const id = await session.host(name);
-    this._lockstep?.reset(this.loop.frame);
     return id;
   }
 
@@ -933,7 +969,6 @@ export class Game {
     const session = this.ensureNet();
     await session.join(roomId, name);
     this.pendingJoin = null;
-    this._lockstep?.reset(this.loop.frame);
   }
 
   /**

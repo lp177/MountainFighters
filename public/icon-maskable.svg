@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Mountain Fighters">
+  <title>Mountain Fighters</title>
+  <!-- Maskable: full bleed, mark inside the 80% safe zone so a circular
+       or squircle mask cannot clip the hat or the beard. -->
+  <rect width="512" height="512" fill="#0b0d12"/>
+  <g transform="translate(256 256) scale(0.72) translate(-256 -256)">
+  <!-- hat -->
+  <path d="M256 74 L372 262 L140 262 Z" fill="#ff2e6e"/>
+  <path d="M256 74 L314 168 L198 168 Z" fill="#ff5c8d"/>
+  <circle cx="256" cy="70" r="22" fill="#ffd23f"/>
+  <!-- brow band -->
+  <rect x="128" y="256" width="256" height="34" rx="17" fill="#12151d"/>
+  <!-- face -->
+  <path d="M150 290 h212 a44 44 0 0 1 -44 44 h-124 a44 44 0 0 1 -44 -44 z" fill="#f0c9a4"/>
+  <!-- sunglasses -->
+  <rect x="150" y="292" width="212" height="40" rx="14" fill="#06070a"/>
+  <rect x="166" y="302" width="70" height="20" rx="8" fill="#2c3242"/>
+  <rect x="276" y="302" width="70" height="20" rx="8" fill="#2c3242"/>
+  <!-- beard -->
+  <path d="M176 336 q80 78 160 0 q-24 96 -80 96 q-56 0 -80 -96 z" fill="#eceff6"/>
+  </g>
+</svg>

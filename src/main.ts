@@ -17,6 +17,8 @@ import { Game } from '@/Game';
 import { initKeyboardLayout } from '@/engine/input/Layout';
 import { installKeyboard } from '@/engine/input/KeyboardSource';
 import { roomIdFromUrl } from '@/net/Room';
+import { installServiceWorker } from '@/pwa/sw-client';
+import { showUpdatePrompt } from '@/pwa/UpdatePrompt';
 
 const CRASH_TITLE = 'THE MOUNTAIN COLLAPSED';
 const CRASH_HINT = 'Reload the page. If it keeps happening, blame the billionaire.';
@@ -55,6 +57,13 @@ function boot(): void {
   }
 
   game.start();
+
+  // After start(), never before: registering a worker is not worth a frame of
+  // the first fight, and a failure in it must not be able to stop the game
+  // booting. Everything inside is guarded and PROD-only.
+  installServiceWorker({
+    onUpdateReady: (update) => showUpdatePrompt(() => update.apply()),
+  });
 
   // A handle for the console. Handy when tuning, harmless when not.
   (window as unknown as { mountainFighters?: Game }).mountainFighters = game;

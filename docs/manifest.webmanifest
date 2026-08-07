@@ -1,0 +1,27 @@
+{
+  "name": "Mountain Fighters",
+  "short_name": "Mtn Fighters",
+  "description": "Seven dwarfs go to war with Elon Musk to save Snow White. A satirical browser beat-em-up.",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#06070a",
+  "theme_color": "#0b0d12",
+  "categories": ["games", "entertainment"],
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any",
+      "purpose": "any"
+    },
+    {
+      "src": "./icon-maskable.svg",
+      "type": "image/svg+xml",
+      "sizes": "any",
+      "purpose": "maskable"
+    }
+  ]
+}

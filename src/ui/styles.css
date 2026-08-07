@@ -1215,3 +1215,71 @@ html.reduced-motion .btn__spinner {
   animation-duration: 2.4s !important;
   animation-iteration-count: infinite !important;
 }
+
+/* ── Update toast ──────────────────────────────────────────────────────────
+ *
+ * Lives outside #ui, which scenes empty on every view change, so it survives
+ * the player wandering through the menus while it waits to be acknowledged.
+ * Bottom-left, clear of the pause button and of the letterboxed stage.
+ */
+.sw-toast {
+  position: fixed;
+  left: max(16px, env(safe-area-inset-left));
+  bottom: max(16px, env(safe-area-inset-bottom));
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(22rem, calc(100vw - 32px));
+  padding: 14px 16px;
+  border: 1px solid var(--outline);
+  border-left: 3px solid var(--accent-2);
+  border-radius: 10px;
+  background: var(--surface-3);
+  box-shadow: var(--elev-4);
+  /* Starts below and transparent; .is-in brings it up. */
+  opacity: 0;
+  transform: translateY(12px);
+  transition:
+    opacity 220ms ease,
+    transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.sw-toast.is-in {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.sw-toast__text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.sw-toast__text strong {
+  font-family: var(--font-display);
+  font-size: var(--fs-sm);
+  letter-spacing: 0.06em;
+  color: var(--accent-2);
+}
+
+.sw-toast__text span {
+  font-size: var(--fs-sm);
+  color: var(--on-surface-dim);
+}
+
+.sw-toast__row {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+html.reduced-motion .sw-toast {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sw-toast {
+    transition: none;
+  }
+}

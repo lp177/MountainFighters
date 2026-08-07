@@ -97,6 +97,8 @@ import type { Lockstep } from '@/net/Lockstep';
 
 import type { Ui } from '@/ui/Ui';
 import { drawHud, hudText, resetHud, setHudPadSlots } from '@/ui/Hud';
+import { drawReadyMarks, readyCaption } from '@/ui/ReadyMarks';
+import type { ReadyMark } from '@/ui/ReadyMarks';
 import { PauseScene, nav, quitToMenu } from '@/scenes/PauseScene';
 import { VictoryScene } from '@/scenes/VictoryScene';
 import type { ResultActions } from '@/scenes/VictoryScene';
@@ -781,6 +783,42 @@ export class FightScene implements Scene {
   /** Frames this fight has actually simulated. The netcode's clock. */
   private simFrame = 0;
 
+  /** True while a cinematic of ours is on screen and the peer must be patient. */
+  private cinematicBusy = false;
+
+  /** Slots that have told us they are watching something. */
+  private readonly busyPeers = new Set<number>();
+
+  /** Slots whose boss introduction has finished. Cleared when the fight resumes. */
+  private readonly introDone = new Set<number>();
+
+  private allIntrosDone(net: NetSession): boolean {
+    for (const p of net.players) if (!this.introDone.has(p.slot)) return false;
+    return true;
+  }
+
+  /** Marks for the corner of a cinematic: lit once that player is through. */
+  private introMarks(net: NetSession): ReadyMark[] {
+    return net.players.map((p) => {
+      const d = p.dwarfId ? safeDwarf(p.dwarfId) : null;
+      return {
+        color: d?.style.hatColor ?? '#ff2e6e',
+        ready: this.introDone.has(p.slot) && !this.busyPeers.has(p.slot),
+        label: `P${p.slot + 1}`,
+      };
+    });
+  }
+
+  private setCinematicBusy(on: boolean): void {
+    if (this.cinematicBusy === on) return;
+    this.cinematicBusy = on;
+    const net = this.net;
+    if (net && net.role !== 'offline' && net.connected) {
+      net.send({ t: 'cue', slot: net.slot, busy: on });
+    }
+    this.lockstep?.hold(on || this.busyPeers.size > 0);
+  }
+
   /** The frame lockstep counts. Both peers start it at zero. See NetFramed. */
   get netFrame(): number {
     return this.simFrame;
@@ -1033,8 +1071,38 @@ export class FightScene implements Scene {
     // fight is frozen behind it, so nothing starts hitting you while you are
     // still reading who you are about to fight.
     if (this.intro.active) {
+      /*
+       * A boss introduction is on screen.
+       *
+       * Both peers reach this on the same sim frame — it is triggered from the
+       * simulation, which is identical on both — so both are watching. But it
+       * waits for a keypress, and whoever presses first advances while the
+       * other is still reading. Ten seconds of that and lockstep concludes the
+       * reader has gone and drops them, ending the match in the middle of the
+       * one moment the game is trying to make an occasion of.
+       *
+       * So: tell the other side we are busy, and hold our own timeout while
+       * they tell us the same.
+       */
+      this.setCinematicBusy(true);
       this.intro.update();
       return;
+    }
+
+    // Our own introduction is over. In co-op the fight does not resume until
+    // everyone's is: whoever skipped first waits on the marks in the corner
+    // rather than fighting a boss the other player has not been introduced to.
+    if (this.cinematicBusy) {
+      const net = this.net;
+      if (net && net.role !== 'offline' && net.connected && net.players.length > 1) {
+        this.introDone.add(net.slot);
+        if (this.busyPeers.size > 0 || !this.allIntrosDone(net)) {
+          net.send({ t: 'cue', slot: net.slot, busy: false });
+          return;
+        }
+      }
+      this.setCinematicBusy(false);
+      this.introDone.clear();
     }
 
     /*
@@ -1793,6 +1861,20 @@ export class FightScene implements Scene {
   // ── net plumbing ───────────────────────────────────────────────────────────
 
   private readonly onNet = (m: NetMessage): void => {
+    if (m.t === 'cue') {
+      // Somebody is watching a cinematic, or has just finished one. Either way
+      // they have not gone anywhere, so the drop timeout stays suspended while
+      // anybody is still in there.
+      if (m.busy) {
+        this.busyPeers.add(m.slot);
+        this.introDone.delete(m.slot);
+      } else {
+        this.busyPeers.delete(m.slot);
+        this.introDone.add(m.slot);
+      }
+      this.lockstep?.hold(this.cinematicBusy || this.busyPeers.size > 0);
+      return;
+    }
     if (m.t === 'pause') {
       this.remotePaused = m.paused ? m.by : -1;
     } else if (m.t === 'bye') {
@@ -1866,6 +1948,7 @@ export class FightScene implements Scene {
       this.intro.renderOverlay(ctx);
       this.drawIntro(ctx);
       this.drawBossIntro(ctx);
+      this.drawIntroMarks(ctx);
       this.drawClear(ctx);
       this.drawContinue(ctx);
       this.drawNet(ctx);
@@ -1974,6 +2057,25 @@ export class FightScene implements Scene {
     ctx.globalAlpha = clamp((1 - t) * 2.6, 0, 1);
     hudText(ctx, 'FIGHT!', VIEW_W * 0.5, 168, 30 + 34 * pop, '#ff3b30');
     ctx.restore();
+  }
+
+  /** Who is still being introduced to the boss. See ui/ReadyMarks. */
+  private drawIntroMarks(ctx: C2D): void {
+    const net = this.net;
+    if (!net || net.role === 'offline' || !net.connected || net.players.length < 2) return;
+    if (!this.cinematicBusy) return;
+    drawReadyMarks(ctx, this.introMarks(net), VIEW_W, VIEW_H, this.simFrame);
+    if (!this.intro.active) {
+      const caption = readyCaption(this.introDone.size, net.players.length);
+      if (!caption) return;
+      ctx.save();
+      ctx.globalAlpha = 0.75;
+      ctx.textAlign = 'right';
+      ctx.font = '700 8px ui-sans-serif, system-ui, sans-serif';
+      ctx.fillStyle = '#a2aabb';
+      ctx.fillText(caption, VIEW_W - 14, VIEW_H - 50);
+      ctx.restore();
+    }
   }
 
   private drawBossIntro(ctx: C2D): void {

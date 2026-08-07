@@ -46,6 +46,7 @@ const RELAYED: ReadonlySet<NetMessage['t']> = new Set<NetMessage['t']>([
   'pick',
   'ready',
   'map',
+  'cue',
   'stage',
   'start',
   'in',

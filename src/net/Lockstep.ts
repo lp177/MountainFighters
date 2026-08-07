@@ -49,6 +49,8 @@ export class Lockstep {
   private readonly dropped = new Set<number>();
 
   private origin = 0;
+  /** True while a cinematic excuses the stall. See hold(). */
+  private held = false;
   private lastFlush = -999;
   private lastPrune = 0;
 
@@ -109,6 +111,20 @@ export class Lockstep {
   }
 
   /**
+   * Suspend the drop-them-they-have-gone timeout.
+   *
+   * Set while any peer has a cinematic on screen. They are deliberately not
+   * advancing, and the stall that causes is expected rather than a fault — a
+   * boss introduction waits for a keypress, and ten seconds of somebody reading
+   * it is enough for NET_TIMEOUT_FRAMES to conclude they have left and end the
+   * match in the middle of the moment the game is making an occasion of.
+   */
+  hold(on: boolean): void {
+    this.held = on === true;
+    if (this.held) this._stalled = 0;
+  }
+
+  /**
    * Call at the start of a MATCH — not when the room opens — so both peers
    * number frames from the same place.
    *
@@ -127,6 +143,7 @@ export class Lockstep {
     this.lastFlush = startFrame - 999;
     this.lastPrune = startFrame;
     this._stalled = 0;
+    this.held = false;
     this._desynced = false;
     this._timedOut = false;
     this._waiting.length = 0;
@@ -157,6 +174,11 @@ export class Lockstep {
     this._stalled++;
     // The peer may simply have lost a packet; nudge them with our history.
     if (this._stalled % RESEND_EVERY === 0) this.flush(frame, true);
+
+    // Somebody is reading a cinematic. They are not gone, they are busy, and
+    // dropping them for it would end the match at the exact moment the game is
+    // trying to tell them a story.
+    if (this.held) this._stalled = 0;
 
     if (this._stalled > NET_TIMEOUT_FRAMES) {
       for (const slot of this._waiting) this.dropSlot(slot);

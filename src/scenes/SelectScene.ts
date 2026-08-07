@@ -903,10 +903,18 @@ export class SelectScene implements Scene {
     // started — starting one is a deliberate act and the story is the point.
     // Retrying after a game over goes straight to 'fight' without passing
     // through here, so a death never costs you the exposition again. Skipped
-    // with any key regardless. Not online: nobody waits on a peer reading.
-    if (mapIndex === 1 && !this.online) {
+    // with any key regardless.
+    //
+    // Online it runs too, on both screens. It used to be skipped outright,
+    // because whoever finished first would walk into the fight and start
+    // stalling on somebody still reading — so `waitForPeers` holds the fast one
+    // on the last frame until everybody has seen it, and nobody arrives alone.
+    if (mapIndex === 1) {
       this.game.setScene(
-        new CutsceneScene(this.game, { onDone: () => this.game.setScene('fight', params) }),
+        new CutsceneScene(this.game, {
+          waitForPeers: this.online,
+          onDone: () => this.game.setScene('fight', params),
+        }),
       );
       return;
     }

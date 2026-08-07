@@ -954,6 +954,12 @@ export type NetMessage =
    */
   /** The host has changed which map the run starts on. Display only. */
   | { t: 'map'; mapIndex: number }
+  /**
+   * "A cinematic is on my screen." Cinematics wait for a keypress, so one
+   * player reading holds the other — and ten seconds of that is enough for
+   * lockstep to decide they have gone and drop them. This says otherwise.
+   */
+  | { t: 'cue'; slot: number; busy: boolean }
   | { t: 'stage'; mapIndex: number }
   | { t: 'start'; mapIndex: number; seed: number; startFrame: number }
   /** Input for a range of frames; batched to cut packet count. */

@@ -24,10 +24,11 @@ import { MAX_LOCAL_PLAYERS, TOTAL_MAPS, VIEW_H, VIEW_W } from '@/core/constants'
 import { TAU, clamp, lerp } from '@/core/math';
 import { getDwarf } from '@/content/dwarfs';
 import { getMap } from '@/content/maps';
+import { drawMapCover } from '@/render/MapCover';
 import { clearRoomFromUrl, normalizeRoomId, roomIdFromUrl } from '@/net/Room';
 import { inviteLink } from '@/net/Room';
 import { MenuInput } from '@/ui/MenuInput';
-import { button, panel } from '@/ui/Widgets';
+import { attachRipple, button, panel } from '@/ui/Widgets';
 
 type C2D = CanvasRenderingContext2D;
 
@@ -127,6 +128,8 @@ export class LobbyScene implements Scene {
   /** The room we were invited to, if we arrived on a link. Held until connected. */
   private invite: string | null = null;
   private mapLine: HTMLElement | null = null;
+  private strip: HTMLElement | null = null;
+  private guestCard: HTMLElement | null = null;
   private linkInput: HTMLInputElement | null = null;
   private copyHint: HTMLElement | null = null;
   private rosterEl: HTMLElement | null = null;
@@ -329,6 +332,12 @@ export class LobbyScene implements Scene {
     if (this.dead) return;
     if (m.t === 'map') {
       this.mapIndex = clamp(Math.round(m.mapIndex), 1, TOTAL_MAPS);
+      const old = this.guestCard;
+      if (old?.parentElement) {
+        const fresh = this.makeCoverCard(this.mapIndex, false);
+        old.parentElement.replaceChild(fresh, old);
+        this.guestCard = fresh;
+      }
       this.paintMapLine();
       return;
     }
@@ -525,54 +534,118 @@ export class LobbyScene implements Scene {
    * joined late still gets the right answer.
    */
   private buildMapPick(): HTMLElement {
-    const label = document.createElement('label');
-    label.className = 'field';
-
-    const cap = document.createElement('span');
-    cap.className = 'field__label';
-    cap.textContent = 'Starting map';
-
-    if (this.isGuest) {
-      const shown = document.createElement('p');
-      shown.className = 'hint';
-      shown.setAttribute('role', 'status');
-      shown.setAttribute('aria-live', 'polite');
-      this.mapLine = shown;
-      this.paintMapLine();
-      label.append(cap, shown);
-      return panel('Where you drop in', label);
-    }
-
-    const select = document.createElement('select');
-    select.className = 'input';
-    select.setAttribute('aria-label', 'Map this run starts on');
     const top = this.progress;
-    for (let i = 1; i <= top; i++) {
-      const opt = document.createElement('option');
-      opt.value = String(i);
-      opt.textContent = `${String(i).padStart(2, '0')} · ${getMap(i).name}`;
-      if (i === this.mapIndex) opt.selected = true;
-      select.appendChild(opt);
-    }
-    select.addEventListener('change', () => {
-      this.mapIndex = clamp(Math.round(Number(select.value) || 1), 1, top);
-      this.game.audio.play('ui_move', { gain: 0.5 });
-      this.session?.send({ t: 'map', mapIndex: this.mapIndex });
-      this.paintMapLine();
-    });
 
     const hint = document.createElement('p');
     hint.className = 'hint';
     hint.setAttribute('role', 'status');
     hint.setAttribute('aria-live', 'polite');
     this.mapLine = hint;
-    this.paintMapLine();
 
-    label.append(cap, select, hint);
-    return panel(
-      top > 1 ? 'Where you drop in' : 'Where you drop in',
-      label,
-    );
+    // A guest is shown the one card, because they are being told rather than
+    // asked. Same art, same size — it should read as the same object.
+    if (this.isGuest) {
+      const one = document.createElement('div');
+      one.className = 'mapstrip mapstrip--single';
+      this.guestCard = this.makeCoverCard(this.mapIndex, false);
+      one.appendChild(this.guestCard);
+      this.paintMapLine();
+      return panel('Where you drop in', one, hint);
+    }
+
+    const strip = document.createElement('div');
+    strip.className = 'mapstrip';
+    strip.setAttribute('role', 'radiogroup');
+    strip.setAttribute('aria-label', 'Map this run starts on');
+    this.strip = strip;
+
+    for (let i = 1; i <= top; i++) {
+      strip.appendChild(this.makeCoverCard(i, true));
+    }
+
+    this.paintMapLine();
+    // The chosen card starts in view even when it is the fortieth.
+    requestAnimationFrame(() => this.scrollToChosen());
+    return panel('Where you drop in', strip, hint);
+  }
+
+  /**
+   * One cover, as a real button.
+   *
+   * The art is `render/MapCover.drawMapCover` — the same drawing the gallery
+   * uses, into its own little canvas rather than a screenshot, so a map you have
+   * not played is still not spoiled. Rendered once at mount: these are static
+   * cards, and animating forty of them to show one selection would cost more
+   * than the selection is worth.
+   */
+  private makeCoverCard(index: number, interactive: boolean): HTMLElement {
+    const def = getMap(index);
+    const el = document.createElement(interactive ? 'button' : 'div');
+    el.className = 'mapcard';
+    if (index === this.mapIndex) el.classList.add('is-chosen');
+
+    const cv = document.createElement('canvas');
+    // Backing store at 2x so the vector art is not soft on a HiDPI screen.
+    const w = 120;
+    const h = 68;
+    cv.width = w * 2;
+    cv.height = h * 2;
+    cv.className = 'mapcard__art';
+    const cx = cv.getContext('2d');
+    if (cx) {
+      cx.scale(2, 2);
+      drawMapCover(cx, def, 0, 0, w, h, {
+        unlocked: true,
+        cleared: index < this.progress,
+        focus: index === this.mapIndex ? 1 : 0,
+      });
+    }
+
+    const cap = document.createElement('span');
+    cap.className = 'mapcard__cap';
+    cap.textContent = `${String(index).padStart(2, '0')} · ${def.name}`;
+
+    el.append(cv, cap);
+
+    if (interactive && el instanceof HTMLButtonElement) {
+      el.type = 'button';
+      el.setAttribute('role', 'radio');
+      el.setAttribute('aria-checked', index === this.mapIndex ? 'true' : 'false');
+      el.setAttribute('aria-label', `Map ${index}, ${def.name}`);
+      el.addEventListener('click', () => this.chooseMap(index));
+      attachRipple(el);
+    }
+    return el;
+  }
+
+  /** The host has picked. Repaint the strip and tell everybody. */
+  private chooseMap(index: number): void {
+    const next = clamp(Math.round(index), 1, this.progress);
+    if (next === this.mapIndex) return;
+    this.mapIndex = next;
+    this.game.audio.play('ui_move', { gain: 0.5 });
+    this.session?.send({ t: 'map', mapIndex: next });
+
+    const strip = this.strip;
+    if (strip) {
+      const cards = Array.from(strip.children);
+      for (let i = 0; i < cards.length; i++) {
+        const card = cards[i];
+        const on = i + 1 === next;
+        card.classList.toggle('is-chosen', on);
+        if (card instanceof HTMLElement) card.setAttribute('aria-checked', on ? 'true' : 'false');
+      }
+    }
+    this.paintMapLine();
+    this.scrollToChosen();
+  }
+
+  private scrollToChosen(): void {
+    const strip = this.strip;
+    const card = strip?.children[this.mapIndex - 1];
+    if (card instanceof HTMLElement && typeof card.scrollIntoView === 'function') {
+      card.scrollIntoView({ block: 'nearest', inline: 'center' });
+    }
   }
 
   private paintMapLine(): void {

@@ -24,7 +24,9 @@
  */
 
 import type { NotePage, StoryShot, StoryShotId } from '@/content/story';
-import type { AnimClip, Pose, RigStyle, Scene, SfxCue } from '@/core/types';
+import type { AnimClip, Pose, RigStyle, Scene, SfxCue,
+  NetMessage,
+} from '@/core/types';
 import type { SceneHost } from '@/scenes/FightScene';
 
 import { Btn } from '@/core/types';
@@ -43,6 +45,10 @@ import { capsule, ellipse, poly, roundRect, star, zigzag } from '@/render/Shapes
 import { Camera } from '@/render/Camera';
 import { ParticleSystem } from '@/juice/Particles';
 import { GamepadSource, connectedGamepads } from '@/engine/input/GamepadSource';
+import type { NetSession } from '@/net/NetSession';
+import { drawReadyMarks, readyCaption } from '@/ui/ReadyMarks';
+import type { ReadyMark } from '@/ui/ReadyMarks';
+import { getDwarf } from '@/content/dwarfs';
 
 type C2D = CanvasRenderingContext2D;
 
@@ -55,6 +61,14 @@ export interface CutsceneOpts {
   onDone?: () => void;
   /** Default true. False only for a "watch it again" viewing that must finish. */
   skippable?: boolean;
+  /**
+   * Wait for every other player to finish theirs before calling `onDone`.
+   *
+   * Netplay only. Both peers watch the same film at their own pace — one reads,
+   * one skips — and whoever finishes first must not walk into the fight alone
+   * and start stalling on somebody who is still on page two.
+   */
+  waitForPeers?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -268,6 +282,40 @@ export class CutsceneScene implements Scene {
   private shotIndex = 0;
   private shotFrame = 0;
   private done = false;
+  /** Peers, including us, who have finished the film. See CutsceneOpts.waitForPeers. */
+  private readonly watched = new Set<number>();
+  private waiting = false;
+  private released = false;
+  private listening = false;
+
+  /** Somebody finished theirs. When the last one does, everybody goes. */
+  private readonly onCue = (m: NetMessage): void => {
+    if (m.t !== 'cue' || m.busy) return;
+    this.watched.add(m.slot);
+    const net = this.host.net ?? null;
+    if (net && this.waiting && this.everyoneWatched(net)) {
+      this.released = true;
+      this.finish();
+    }
+  };
+
+  private everyoneWatched(net: NetSession): boolean {
+    for (const p of net.players) if (!this.watched.has(p.slot)) return false;
+    return true;
+  }
+
+  /** One mark per player, in their dwarf's colour once they are through. */
+  private readyMarks(net: NetSession): ReadyMark[] {
+    return net.players.map((p) => {
+      const d = p.dwarfId ? getDwarf(p.dwarfId) : null;
+      return {
+        color: d?.style.hatColor ?? '#ff2e6e',
+        ready: this.watched.has(p.slot),
+        label: `P${p.slot + 1}`,
+      };
+    });
+  }
+
   private skippable = true;
   private reduced = false;
 
@@ -351,6 +399,28 @@ export class CutsceneScene implements Scene {
     this.shotFrame = 0;
     this.done = false;
     this.a = 1;
+
+    /*
+     * Listen for other people's cues from the FIRST frame, not from the moment
+     * we finish our own.
+     *
+     * Subscribing on finish loses every cue sent before it, which is exactly
+     * the ones that matter: the player who skipped in three seconds has already
+     * announced themselves long before the slow reader gets to the last page,
+     * and the slow reader then sat there waiting for a message that had come
+     * and gone. Measured — the guest held on `watched=[1]` for ever while the
+     * host was already in the fight.
+     */
+    this.watched.clear();
+    this.waiting = false;
+    this.released = false;
+    if (this.opts.waitForPeers === true) {
+      const net = this.host.net ?? null;
+      if (net && net.role !== 'offline') {
+        this.listening = true;
+        net.onMessage(this.onCue);
+      }
+    }
     this.punch = 0;
     this.abr = 0;
     this.flashA = 0;
@@ -384,6 +454,10 @@ export class CutsceneScene implements Scene {
   }
 
   exit(): void {
+    if (this.listening) {
+      this.host.net?.offMessage?.(this.onCue);
+      this.listening = false;
+    }
     window.removeEventListener('pointerdown', this.onPointer);
     for (const p of this.pads) p.dispose?.();
     this.pads.length = 0;
@@ -543,9 +617,40 @@ export class CutsceneScene implements Scene {
     this.chrome(ctx);
     this.fade(ctx);
 
+    // Over the fade, because it is the one thing on screen that must stay
+    // legible once the film itself has ended and gone dark.
+    this.drawWaitingRow(ctx);
+
     r.end();
 
     if (this.abr > 0.01 && !this.reduced) r.aberration(clamp(this.abr, 0, 1));
+  }
+
+  /**
+   * The co-op readiness row: who has finished, who is still reading.
+   *
+   * Drawn from the moment the scene opens in a netplay run, not only once the
+   * local player is done — seeing your friend's mark still grey while you are
+   * three pages in is what tells you the wait at the end is normal.
+   */
+  private drawWaitingRow(ctx: C2D): void {
+    if (this.opts.waitForPeers !== true) return;
+    const net = this.host.net ?? null;
+    if (!net || net.role === 'offline' || !net.connected) return;
+    if (net.players.length < 2) return;
+
+    drawReadyMarks(ctx, this.readyMarks(net), VIEW_W, VIEW_H, this.frame);
+
+    if (!this.waiting) return;
+    const caption = readyCaption(this.watched.size, net.players.length);
+    if (!caption) return;
+    ctx.save();
+    ctx.globalAlpha = 0.75;
+    ctx.textAlign = 'right';
+    ctx.font = `700 8px ui-sans-serif, system-ui, sans-serif`;
+    ctx.fillStyle = '#a2aabb';
+    ctx.fillText(caption, VIEW_W - 14, VIEW_H - 50);
+    ctx.restore();
   }
 
   /** Walks the current cut, running the outgoing shot underneath when it dissolves. */
@@ -2534,7 +2639,25 @@ export class CutsceneScene implements Scene {
   /** The one exit. Called exactly once, whether it ran or was walked out on. */
   private finish(): void {
     if (this.done) return;
+
+    // Online: say so, and hold here until everybody else has too.
+    if (this.opts.waitForPeers === true && !this.released) {
+      const net = this.host.net ?? null;
+      if (net && net.role !== 'offline' && net.connected) {
+        if (!this.waiting) {
+          this.waiting = true;
+          this.watched.add(net.slot);
+          net.send({ t: 'cue', slot: net.slot, busy: false });
+        }
+        if (!this.everyoneWatched(net)) return;
+      }
+    }
+
     this.done = true;
+    if (this.listening) {
+      this.host.net?.offMessage?.(this.onCue);
+      this.listening = false;
+    }
     const cb = this.opts.onDone;
     if (cb) {
       cb();

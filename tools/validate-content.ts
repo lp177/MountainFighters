@@ -71,7 +71,7 @@ const WEAPON_KINDS: readonly WeaponKind[] = [
   'cybertruck_door',
   'keyboard',
   'gpu',
-  'lariat',
+  'whip',
   'dagger',
 ];
 
@@ -106,7 +106,7 @@ const AI_BEHAVIOURS: readonly string[] = [
 ];
 
 const WEAPON_SHAPES: readonly string[] = [
-  'stick', 'flail', 'blocky', 'gun', 'shield', 'plate', 'blade', 'lasso',
+  'stick', 'flail', 'blocky', 'gun', 'shield', 'plate', 'blade', 'whip',
 ];
 
 const RIG_OVERRIDES: readonly string[] = [

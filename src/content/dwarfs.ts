@@ -131,7 +131,7 @@ export const DWARFS: DwarfDef[] = [
       visual: 'grump_quake',
       sfx: 'explosion',
     },
-    signatureWeapon: 'ironbar',
+    signatureWeapon: 'dagger',
     voice: { pitch: 90, timbre: 'gruff', wobble: 0.03 },
   },
 
@@ -186,7 +186,7 @@ export const DWARFS: DwarfDef[] = [
       visual: 'happy_disco_inferno',
       sfx: 'laugh',
     },
-    signatureWeapon: 'lariat',
+    signatureWeapon: 'whip',
     voice: { pitch: 176, timbre: 'deep', wobble: 0.11 },
   },
 

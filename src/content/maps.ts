@@ -382,7 +382,7 @@ const THEME_PROPS: Record<MapTheme, PropSpawn['kind'][]> = {
 };
 
 const THEME_WEAPONS: Record<MapTheme, WeaponKind[]> = {
-  // The lariat is deliberately absent from every one of these. It is the one
+  // The whip is deliberately absent from every one of these. It is the one
   // weapon you cannot find: it belongs to the dwarf who brought it, and picking
   // his fighter is the only way to hold it.
   mine: ['pipe', 'ironbar', 'bat', 'dagger'],

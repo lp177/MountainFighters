@@ -328,7 +328,7 @@ export type WeaponKind =
   | 'cybertruck_door'
   | 'keyboard'
   | 'gpu'
-  | 'lariat'
+  | 'whip'
   | 'dagger';
 
 /**
@@ -385,7 +385,7 @@ export interface WeaponSfx {
 
 export interface WeaponArt {
   /** Base silhouette the vector renderer builds from. */
-  shape: 'stick' | 'flail' | 'blocky' | 'gun' | 'shield' | 'plate' | 'blade' | 'lasso';
+  shape: 'stick' | 'flail' | 'blocky' | 'gun' | 'shield' | 'plate' | 'blade' | 'whip';
   length: number;
   thickness: number;
   color: string;

@@ -19,24 +19,26 @@ import type { WeaponDef, WeaponKind } from '@/core/types';
 
 export const WEAPONS: Record<WeaponKind, WeaponDef> = {
   /**
-   * Steel cable off a mine winch, whipped like a lariat.
+   * Steel cable off a mine winch, whipped like a whip.
    *
    * Dwarf kit, not corporate kit: nobody issued this, somebody cut it off a
    * hoist. Longest reach in the game and it catches a whole line of people,
    * paid for in damage and in how slowly it comes back round.
    */
-  lariat: {
-    kind: 'lariat',
+  whip: {
+    kind: 'whip',
     sfx: { reveal: 'chain_whip', swing: 'chain_whip', swingPitch: 0.82, impact: 'hit_metal' },
-    name: 'Winch Cable',
+    name: 'Cable Whip',
     durability: 34,
     damageScale: 1.05,
     speedScale: 0.9,
-    moves: { light: 'lariat_light', heavy: 'lariat_heavy', throw: 'lariat_throw' },
+    moves: { light: 'whip_light', heavy: 'whip_heavy', throw: 'whip_throw' },
     art: {
-      shape: 'lasso',
-      length: 38,
-      thickness: 2.4,
+      shape: 'whip',
+      // Long. It is the reason to carry the thing, and a whip that does not
+      // outreach a length of rebar is just a worse length of rebar.
+      length: 56,
+      thickness: 2.6,
       color: '#9aa3b4',
       accent: '#e6edf7',
       segments: 12,
@@ -122,7 +124,9 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
       color: '#6f6a76',
       accent: '#a49dae',
       segments: 5,
-      spikes: true,
+      // Ribbed steel, not a studded club. The bat has the studs, and two
+      // spiked sticks the same length were indistinguishable in the hand.
+      spikes: false,
     },
   },
 

@@ -1480,7 +1480,7 @@ weaponSet({
  * back along it. Bring one to you, put the rest on the floor.
  */
 weaponSet({
-  kind: 'lariat',
+  kind: 'whip',
   label: 'Winch Cable',
   light: {
     name: 'Crack',
@@ -1525,7 +1525,7 @@ weaponSet({
     release: 9,
     damage: 10,
     speed: 6.4,
-    projectile: 'lariat',
+    projectile: 'whip',
     sfx: 'chain_whip',
   },
 });

@@ -2464,6 +2464,26 @@ function drawGoreOver(r: Rig): void {
 // Weapons
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * How hard the arm is working, 0..1, for anything drawn as a trailing curve.
+ *
+ * Taken from how far the hand has travelled out from the shoulder rather than
+ * from any move data — the rig does not know what move is playing and should
+ * not — so a swing, a walk cycle and a stand all fall out of the same number.
+ * A little wall-clock sway underneath keeps a whip alive while its owner is
+ * standing still, and `reduced` flattens that to nothing.
+ */
+function whipFlow(r: Rig): number {
+  const sh = jp(r, 'armR_upper');
+  const wr = jp(r, 'handR');
+  const span = Math.hypot(wr.x - sh.x, wr.y - sh.y);
+  // The arm is roughly two bone lengths; full stretch reads as a full lash.
+  const reach = Math.max(1e-3, (r.len.get('armR_upper') ?? 8) + (r.len.get('armR_lower') ?? 8));
+  const out = clamp(span / (reach * r.u), 0, 1);
+  const sway = r.d.reduced ? 0 : Math.sin(r.d.t * 2.1 + r.d.seed) * 0.08;
+  return clamp(out * 0.9 + sway, 0, 1);
+}
+
 function drawHeldWeapon(r: Rig, w: WeaponDef): void {
   const ctx = r.ctx;
   const wr = jp(r, 'handR');
@@ -2472,7 +2492,7 @@ function drawHeldWeapon(r: Rig, w: WeaponDef): void {
   ctx.save();
   ctx.translate(grip.x, grip.y);
   ctx.rotate(Math.atan2(tipH.y - wr.y, tipH.x - wr.x) - 0.35);
-  weaponShape(ctx, w, r.u);
+  weaponShape(ctx, w, r.u, whipFlow(r));
   ctx.restore();
 }
 
@@ -2493,7 +2513,7 @@ export function drawWeapon(
 }
 
 /** Draws a weapon from its grip at the origin, pointing along +x. */
-function weaponShape(ctx: C2D, w: WeaponDef, u: number): void {
+function weaponShape(ctx: C2D, w: WeaponDef, u: number, flow = 0): void {
   const art = w.art;
   const L = art.length * u;
   const T = Math.max(0.6, art.thickness * u);
@@ -2527,30 +2547,55 @@ function weaponShape(ctx: C2D, w: WeaponDef, u: number): void {
       poly(ctx, [L * 0.4, -T * 0.24, L * 0.94, -T * 0.03, L * 0.4, T * 0.02], acc, NO);
       break;
     }
-    case 'lasso': {
-      // A cable, not a chain: one continuous line that sags under its own
-      // weight and ends in the open loop it is thrown with. Drawn as a curve
-      // rather than as links so it reads as steel rope at fifty units.
-      const n = Math.max(6, art.segments ?? 12);
-      capsule(ctx, -T * 0.4, 0, L * 0.2, 0, T * 0.7, grip, ink(), ow);
-      ctx.beginPath();
-      ctx.moveTo(L * 0.2, 0);
+    case 'whip': {
+      // All curve, and the curve is the point.
+      //
+      // Drawn as a cubic sampled into overlapping capsules whose radius falls
+      // away to nothing, because a whip that is the same thickness at the tip
+      // as at the grip reads as a bent pipe. `flow` is how hard the arm is
+      // swinging it — see drawHeldWeapon — so it hangs in a lazy S at rest and
+      // lashes out ahead of the hand mid-swing, all from the same three curves.
+      const bend = T * (2.2 + flow * 5.5);
+      const reach = L * (0.72 + Math.abs(flow) * 0.28);
+      // P0 at the grip, two controls that cross the axis, P3 out at the tip.
+      const p1x = reach * 0.34;
+      const p1y = -bend * (0.9 + flow * 0.5);
+      const p2x = reach * 0.72;
+      const p2y = bend * (1.15 - flow * 0.35);
+      const p3x = reach;
+      const p3y = bend * (0.15 + flow * 0.9);
+
+      capsule(ctx, -T * 0.45, 0, L * 0.13, 0, T * 0.72, grip, ink(), ow);
+      // The collar where the cable enters the handle.
+      ellipse(ctx, L * 0.13, 0, T * 0.42, T * 0.6, 0, acc, ink(), ow * 0.7);
+
+      const n = Math.max(10, art.segments ?? 14);
+      let px = L * 0.13;
+      let py = 0;
       for (let i = 1; i <= n; i++) {
         const t = i / n;
-        // Slack in the middle, lifting again as it reaches the loop.
-        ctx.lineTo(L * (0.2 + t * 0.5), Math.sin(t * Math.PI) * T * 1.9);
+        const it = 1 - t;
+        // Cubic Bezier, expanded rather than via a path so each span can carry
+        // its own thickness.
+        const qx =
+          it * it * it * (L * 0.13) + 3 * it * it * t * p1x + 3 * it * t * t * p2x + t * t * t * p3x;
+        const qy = 3 * it * it * t * p1y + 3 * it * t * t * p2y + t * t * t * p3y;
+        // Cubic taper: thick for the first third, hair by the end.
+        const rad = Math.max(0.25, T * 0.42 * (1 - t) * (1 - t * 0.6));
+        capsule(ctx, px, py, qx, qy, rad, body, NO);
+        // A highlight down the upper side, which is what sells it as steel
+        // rather than as a drawn line.
+        if (i % 2 === 0) capsule(ctx, px, py - rad * 0.3, qx, qy - rad * 0.3, rad * 0.34, acc, NO);
+        px = qx;
+        py = qy;
       }
-      ctx.strokeStyle = body;
-      ctx.lineWidth = T * 0.62;
-      ctx.lineCap = 'round';
-      ctx.stroke();
-      ctx.strokeStyle = acc;
-      ctx.lineWidth = T * 0.2;
-      ctx.stroke();
-      // The loop on the end, tilted so it is an ellipse rather than a circle.
-      ellipse(ctx, L * 0.83, T * 0.5, L * 0.16, T * 1.5, 0.42, 'none', body, T * 0.5);
-      ellipse(ctx, L * 0.83, T * 0.5, L * 0.16, T * 1.5, 0.42, 'none', acc, T * 0.16);
-      if (art.spikes) star(ctx, L * 0.7, 0, T * 1.6, 6, acc, ink());
+      // The cracker: a short bright taper the eye can find at the far end.
+      poly(
+        ctx,
+        [px, py - T * 0.28, px + T * 1.9, py + T * 0.1, px, py + T * 0.28],
+        acc,
+        NO,
+      );
       break;
     }
     case 'flail': {

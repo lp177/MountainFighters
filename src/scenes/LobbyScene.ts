@@ -23,6 +23,7 @@ import type { HomeParams } from '@/scenes/HomeScene';
 import { MAX_LOCAL_PLAYERS, VIEW_H, VIEW_W } from '@/core/constants';
 import { TAU, clamp, lerp } from '@/core/math';
 import { getDwarf } from '@/content/dwarfs';
+import { clearRoomFromUrl, normalizeRoomId, roomIdFromUrl } from '@/net/Room';
 import { inviteLink } from '@/net/Room';
 import { MenuInput } from '@/ui/MenuInput';
 import { button, panel } from '@/ui/Widgets';
@@ -37,9 +38,21 @@ export interface LobbyParams {
   from?: string;
   /** Map the fight starts on once everyone has picked. */
   mapIndex?: number;
+  /**
+   * A room to JOIN rather than open. This is what an invite link means.
+   *
+   * It was declared here from the start and read by nothing: `enter()` looked
+   * at `fromPause` and `mapIndex` and then unconditionally opened a room. A
+   * guest who clicked an invite was therefore made a host of their own empty
+   * room, with their own new code, while the person who invited them waited in
+   * the original — both looking at a plausible screen, neither seeing an error.
+   */
+  join?: string;
+  /** The main entry's spelling of the same thing. */
+  roomId?: string;
 }
 
-type Phase = 'opening' | 'open' | 'error';
+type Phase = 'opening' | 'joining' | 'open' | 'error';
 
 const ACCENT = '#ff2e6e';
 const GOLD = '#ffd23f';
@@ -110,6 +123,8 @@ export class LobbyScene implements Scene {
   private error = '';
   private dead = false;
 
+  /** The room we were invited to, if we arrived on a link. Held until connected. */
+  private invite: string | null = null;
   private linkInput: HTMLInputElement | null = null;
   private copyHint: HTMLElement | null = null;
   private rosterEl: HTMLElement | null = null;
@@ -147,6 +162,14 @@ export class LobbyScene implements Scene {
     // that opened the room does not read as a press that closes it again.
     this.menu.attach();
 
+    // An invite beats everything else this screen can do. Taken from the params,
+    // from the pending join Game parked at boot, or straight out of the URL —
+    // whichever survived — because the one thing that must never happen is a
+    // guest silently becoming a host.
+    const invite = this.fromPause
+      ? null
+      : (normalizeRoomId(p.join ?? p.roomId ?? '') ?? this.game.pendingJoin ?? roomIdFromUrl());
+
     const live = this.game.net;
     if (live && live.role === 'host' && live.connected) {
       // Invited from the pause menu with a room already open: reuse it rather
@@ -159,9 +182,56 @@ export class LobbyScene implements Scene {
       return;
     }
 
+    if (invite) {
+      this.invite = invite;
+      this.phase = 'joining';
+      this.rebuild();
+      void this.joinRoom(invite);
+      return;
+    }
+
     this.phase = 'opening';
     this.rebuild();
     void this.openRoom();
+  }
+
+  /**
+   * Take up an invite.
+   *
+   * The fragment stays in the URL for the whole of this: room ids are
+   * idempotent, so replaying one on a refresh is exactly right, and a chat app
+   * that hands the link off to the real browser reloads at least once. Scrubbing
+   * it on arrival is what turned "the host is not ready yet" into "you are now
+   * hosting a different room".
+   */
+  private async joinRoom(roomId: string): Promise<void> {
+    try {
+      await this.game.joinRoom(roomId, 'Guest');
+      const session = this.game.net;
+      if (this.dead || !session) {
+        if (this.dead) this.game.leaveNet();
+        return;
+      }
+      this.session = session;
+      this.roomId = roomId;
+      this.phase = 'open';
+      this.subscribe(session);
+      this.game.audio.play('ui_select');
+      this.rebuild();
+    } catch (e) {
+      // Deliberately NOT leaveNet(): that scrubs the fragment, and the invite is
+      // the only way back to the right room.
+      this.game.closeNet();
+      if (this.dead) return;
+      this.session = null;
+      this.error =
+        e instanceof Error
+          ? e.message
+          : 'Could not reach that room. The host may not have opened it yet.';
+      this.phase = 'error';
+      this.game.audio.play('ui_error');
+      this.rebuild();
+    }
   }
 
   exit(): void {
@@ -277,13 +347,25 @@ export class LobbyScene implements Scene {
 
     switch (this.phase) {
       case 'opening':
+      case 'joining':
         view.appendChild(this.buildOpening());
         break;
       case 'error':
         view.appendChild(this.buildError());
+        // Try again is always the SAME thing again — the same invite for a
+        // guest, a new room only for someone who was opening one. Opening a
+        // fresh room as the answer to a broken invite is how two people end up
+        // sitting in two rooms, each looking at a screen that says it worked.
         view.appendChild(
           button('Try again', () => this.retry(), { variant: 'filled', autofocus: true }),
         );
+        // And if the host really is not coming, saying so is a deliberate act
+        // with its own button, not something that happens by pressing Back.
+        if (this.invite) {
+          view.appendChild(
+            button('Host my own room instead', () => this.hostInstead(), { variant: 'tonal' }),
+          );
+        }
         view.appendChild(button('Back', () => this.leave(), { variant: 'text' }));
         break;
       default:
@@ -304,7 +386,7 @@ export class LobbyScene implements Scene {
     const dot = document.createElement('span');
     dot.className = 'waiting__dot';
     const txt = document.createElement('span');
-    txt.textContent = 'Opening a room…';
+    txt.textContent = this.phase === 'joining' ? 'Joining your friend…' : 'Opening a room…';
     wait.append(dot, txt);
 
     const hint = document.createElement('p');
@@ -325,11 +407,44 @@ export class LobbyScene implements Scene {
     const notice = document.createElement('p');
     notice.className = 'notice notice--error';
     notice.setAttribute('role', 'alert');
-    notice.textContent = this.error || 'Could not open a room.';
+    notice.textContent =
+      this.error || (this.invite ? 'Could not reach that room.' : 'Could not open a room.');
+    if (this.invite) {
+      const keep = document.createElement('p');
+      keep.className = 'hint';
+      keep.textContent =
+        'The invite is still in your address bar, so refreshing tries it again. ' +
+        'If your friend has not opened their room yet, give them a moment.';
+      return panel('That did not work', notice, keep);
+    }
     return panel('That did not work', notice);
   }
 
+  /** True when we took up somebody's invite rather than opening this room. */
+  private get isGuest(): boolean {
+    return this.invite !== null || this.session?.role === 'guest';
+  }
+
   private buildInvite(): HTMLElement {
+    // A guest is not hosting anything, and telling them their room is open —
+    // over a Copy button and a Close room button — reads as "you are alone in a
+    // room of your own", which is the very thing that used to be true here.
+    if (this.isGuest) {
+      const blurb = document.createElement('p');
+      blurb.className = 'hint';
+      blurb.textContent =
+        'Pick a dwarf when the host starts. They decide when everyone goes in.';
+
+      const hint = document.createElement('p');
+      hint.className = 'hint';
+      hint.setAttribute('role', 'status');
+      hint.setAttribute('aria-live', 'polite');
+      hint.textContent = `Room ${this.roomId.replace(/^mtnfight-/, '')}.`;
+      this.copyHint = hint;
+
+      return panel("You are in someone's room", blurb, hint);
+    }
+
     const link = inviteLink(this.roomId);
 
     const blurb = document.createElement('p');
@@ -402,9 +517,11 @@ export class LobbyScene implements Scene {
       return row;
     }
 
-    row.appendChild(button('Close room', () => this.leave(), { variant: 'text' }));
+    row.appendChild(
+      button(this.isGuest ? 'Leave room' : 'Close room', () => this.leave(), { variant: 'text' }),
+    );
 
-    const start = button('Start', () => this.toSelect(), {
+    const start = button(this.isGuest ? 'Waiting for the host' : 'Start', () => this.toSelect(), {
       variant: 'filled',
       icon: '⚔',
       disabled: true,
@@ -541,7 +658,31 @@ export class LobbyScene implements Scene {
     this.game.audio.play(copied ? 'ui_select' : 'ui_error');
   }
 
+  /**
+   * Try the same thing again — never a different thing.
+   *
+   * A guest whose join failed retries THEIR invite. The old version always
+   * opened a fresh room, which is the single worst answer to a broken invite:
+   * it looks like success and puts the two players in different rooms.
+   */
   private retry(): void {
+    this.error = '';
+    if (this.invite) {
+      this.phase = 'joining';
+      this.rebuild();
+      void this.joinRoom(this.invite);
+      return;
+    }
+    this.phase = 'opening';
+    this.rebuild();
+    void this.openRoom();
+  }
+
+  /** Give up on the invite and open a room of our own. Always a deliberate act. */
+  private hostInstead(): void {
+    this.invite = null;
+    this.game.pendingJoin = null;
+    clearRoomFromUrl();
     this.error = '';
     this.phase = 'opening';
     this.rebuild();

@@ -936,6 +936,21 @@ export class Game {
     this._lockstep?.reset(this.loop.frame);
   }
 
+  /**
+   * Hangs up and drops the session, but LEAVES the `#join=` fragment alone.
+   *
+   * For a join that failed. The invite is the only route back to the right
+   * room, and room ids are idempotent, so it must survive a failure and a
+   * refresh — scrubbing it is how a guest ends up hosting their own.
+   */
+  closeNet(): void {
+    this._lockstep?.dispose();
+    this._lockstep = null;
+    this._net?.close();
+    this._net = null;
+    this.run.online = false;
+  }
+
   /** Hangs up, forgets the room, and drops the `#join=` fragment. */
   leaveNet(): void {
     this._lockstep?.dispose();

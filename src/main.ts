@@ -51,10 +51,28 @@ function boot(): void {
   const room = roomIdFromUrl();
   if (room) {
     game.pendingJoin = room;
-    game.changeScene('lobby', { join: room, roomId: room, autoJoin: true });
+    game.changeScene('lobby', { join: room, roomId: room });
   } else {
     game.changeScene('home');
   }
+
+  /*
+   * A second invite sent to a tab that is already open.
+   *
+   * Two URLs differing only after the `#` are the SAME document: the browser
+   * changes the address bar, fires hashchange, and runs no other script. Without
+   * this, a friend who sends a fresh link to somebody already looking at the
+   * game watches nothing happen — and the obvious thing to do next is open a
+   * room of their own.
+   */
+  window.addEventListener('hashchange', () => {
+    const next = roomIdFromUrl();
+    if (!next || next === game.pendingJoin) return;
+    game.pendingJoin = next;
+    game.leaveNet();
+    game.pendingJoin = next;
+    game.changeScene('lobby', { join: next, roomId: next });
+  });
 
   game.start();
 

@@ -382,10 +382,13 @@ const THEME_PROPS: Record<MapTheme, PropSpawn['kind'][]> = {
 };
 
 const THEME_WEAPONS: Record<MapTheme, WeaponKind[]> = {
-  mine: ['pipe', 'ironbar', 'bat'],
-  forest: ['bat', 'chain', 'pipe'],
+  // The lariat is deliberately absent from every one of these. It is the one
+  // weapon you cannot find: it belongs to the dwarf who brought it, and picking
+  // his fighter is the only way to hold it.
+  mine: ['pipe', 'ironbar', 'bat', 'dagger'],
+  forest: ['bat', 'chain', 'dagger'],
   suburb: ['bat', 'chain', 'taser'],
-  tunnel: ['ironbar', 'pipe', 'chain'],
+  tunnel: ['ironbar', 'pipe', 'chain', 'dagger'],
   factory: ['ironbar', 'pipe', 'riotshield'],
   gigafactory: ['cybertruck_door', 'ironbar', 'riotshield'],
   server_farm: ['gpu', 'keyboard', 'pipe'],

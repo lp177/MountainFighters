@@ -46,6 +46,7 @@ import type {
   Settings,
   SimContext,
   SuperPowerDef,
+  CarriedWeapon,
 } from '@/core/types';
 import { Btn, EMPTY_INPUT } from '@/core/types';
 
@@ -95,7 +96,7 @@ import type { NetSession } from '@/net/NetSession';
 import type { Lockstep } from '@/net/Lockstep';
 
 import type { Ui } from '@/ui/Ui';
-import { drawHud, hudText, resetHud } from '@/ui/Hud';
+import { drawHud, hudText, resetHud, setHudPadSlots } from '@/ui/Hud';
 import { PauseScene, nav, quitToMenu } from '@/scenes/PauseScene';
 import { VictoryScene } from '@/scenes/VictoryScene';
 import type { ResultActions } from '@/scenes/VictoryScene';
@@ -122,6 +123,8 @@ export interface SceneHost {
   readonly audio: AudioSystem;
   readonly input: InputManager;
   readonly save: SaveData;
+  /** The playthrough, which is where a carried weapon survives a map change. */
+  readonly run?: { carried: (CarriedWeapon | null)[] };
 
   readonly ui?: Ui;
   readonly net?: NetSession | null;
@@ -158,6 +161,15 @@ export interface FightPlayerPick {
   name?: string;
   /** False for a player driven across the wire by lockstep. */
   local?: boolean;
+  /**
+   * True if this seat chose on a controller.
+   *
+   * Recorded rather than inferred. Pads used to be pinned to slots 2 and 3, so
+   * `slot >= 2` was as good as a flag — but the slot a pad lands on is now
+   * decided by the seat count, and three separate places were still guessing
+   * from the old layout. The board knows; it should say so.
+   */
+  onPad?: boolean;
 }
 
 export interface FightParams {
@@ -520,7 +532,10 @@ function runSuper(
     ctx.fx.flash(look.flash, 12, 0.8);
     ctx.fx.shake({ magnitude: 13, duration: 40 });
     ctx.fx.aberration(0.9, 24);
-    ctx.fx.slowmo(0.24, 64);
+    // A dip, not a wade. This used to be 64 frames — a full second of real
+    // time on its own, landing on top of the windup's own slowmo — so the
+    // super's animation finished and the player kept walking through syrup.
+    ctx.fx.slowmo(0.24, 26);
     ctx.fx.shockwave(x, 24, z, sp.radius < 0 ? 240 : sp.radius, 30);
     ctx.audio.play(sp.sfx);
     ctx.audio.play('super_blast', { gain: 0.9 });
@@ -908,6 +923,7 @@ export class FightScene implements Scene {
     this.ensureInputSources();
 
     resetHud();
+    setHudPadSlots(new Set(this.picks.filter((p) => p.onPad === true).map((p) => p.slot)));
     this.particles.clear();
     this.host.loop.timeScale = 1;
     this.host.loop.hitstop = 0;
@@ -1291,6 +1307,7 @@ export class FightScene implements Scene {
         dwarfId: x.dwarfId,
         name: x.name,
         local: x.local,
+        onPad: x.onPad,
       }));
     }
 
@@ -1326,10 +1343,11 @@ export class FightScene implements Scene {
       if (pick.local === false) continue;
       if (input.source(pick.slot)) continue;
 
-      if (pick.slot <= 1) {
+      if (pick.onPad !== true) {
+        const slot = clamp(pick.slot, 0, 1);
         const bindings =
-          this.settings.bindings?.[pick.slot] ?? DEFAULT_BINDINGS[pick.slot] ?? DEFAULT_BINDINGS[0];
-        input.attach(pick.slot, new KeyboardSource(pick.slot, bindings));
+          this.settings.bindings?.[slot] ?? DEFAULT_BINDINGS[slot] ?? DEFAULT_BINDINGS[0];
+        input.attach(pick.slot, new KeyboardSource(slot, bindings));
         continue;
       }
 
@@ -1337,7 +1355,14 @@ export class FightScene implements Scene {
         pollGamepads();
         pads = connectedGamepads();
       }
-      const padIndex = pads[pick.slot - 2];
+      // The nth pad-driven seat is holding the nth pad, counting the pad seats
+      // in slot order — the same rule the HUD uses to name a player's buttons.
+      let nth = 0;
+      for (const other of this.picks) {
+        if (other === pick) break;
+        if (other.local !== false && other.onPad === true) nth++;
+      }
+      const padIndex = pads[nth];
       if (padIndex !== undefined) input.attach(pick.slot, new GamepadSource(padIndex));
     }
   }
@@ -1377,7 +1402,45 @@ export class FightScene implements Scene {
         archetype: `dwarf_${d.id}`,
       };
 
-      this.players.push(new PlayerFighter(init));
+      const f = new PlayerFighter(init);
+      this.armPlayer(f, pick.slot, d);
+      this.players.push(f);
+    }
+  }
+
+  /**
+   * What a dwarf walks onto the map holding.
+   *
+   * Two rules, in order. Whatever they carried off the last map comes with
+   * them, wear and ammunition included — fighting a whole level to keep a
+   * weapon and then losing it on the load screen is a punishment for winning.
+   * Failing that, they start with the weapon the select screen promised them,
+   * which is the one printed under their portrait as their signature.
+   *
+   * On 'musk' neither applies. That difficulty's whole proposition is that
+   * nothing accumulates: you arrive with your hands and you leave with them.
+   */
+  private armPlayer(f: PlayerFighter, slot: number, d: DwarfDef): void {
+    if (this.settings.difficulty === 'musk') return;
+
+    const kept = this.host.run?.carried[slot] ?? null;
+    if (kept) {
+      f.giveWeapon(kept.kind, kept.durability, kept.ammo);
+      return;
+    }
+    if (d.signatureWeapon) f.giveWeapon(d.signatureWeapon);
+  }
+
+  /**
+   * Remember what everyone is holding, so the next map can hand it back.
+   * Cleared rather than recorded on 'musk'.
+   */
+  private storeCarried(): void {
+    const carried = this.host.run?.carried;
+    if (!carried) return;
+    for (const f of this.players) {
+      carried[f.id] =
+        this.settings.difficulty === 'musk' || !f.alive ? null : f.carried;
     }
   }
 
@@ -1408,6 +1471,7 @@ export class FightScene implements Scene {
     this.combat.reset();
     this.particles.clear();
     resetHud();
+    setHudPadSlots(new Set(this.picks.filter((p) => p.onPad === true).map((p) => p.slot)));
 
     this.level = new Level(def, this.players, {
       fx: this.fx,
@@ -1519,9 +1583,22 @@ export class FightScene implements Scene {
 
   // ── transitions ────────────────────────────────────────────────────────────
 
+  /**
+   * Pause is not a fighter's action. It belongs to whoever is in the room —
+   * which is why both halves of a shared keyboard have always kept Escape — so
+   * this asks every slot with a LIVE local source rather than only the slots
+   * that picked a dwarf. Choose your fighter on the keyboard, pick up the pad
+   * sitting on a slot of its own, and Start still opens the menu.
+   *
+   * The live-source test is what keeps it local: lockstep drives a remote peer's
+   * slot by injecting a mask into it, and no source is ever attached there, so a
+   * peer cannot pause this machine by leaning on their own Start button.
+   */
   private wantsPause(): boolean {
-    for (const slot of this.localSlots) {
-      if (this.host.input.get(slot).pressed & Btn.Pause) return true;
+    const input = this.host.input;
+    for (const slot of input.slots) {
+      if (input.source(slot) === null) continue;
+      if (input.get(slot).pressed & Btn.Pause) return true;
     }
     return false;
   }
@@ -1575,6 +1652,8 @@ export class FightScene implements Scene {
 
   private nextMap(): void {
     this.score += this.level?.score ?? 0;
+    // Before the world is rebuilt: whatever survived the map goes with them.
+    this.storeCarried();
     const next = this.mapIndex + 1;
     if (next > TOTAL_MAPS) {
       this.finish('victory');

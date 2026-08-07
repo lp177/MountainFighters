@@ -276,10 +276,15 @@ function shots(frames: readonly number[], o: ShotOpts) {
     const spread = o.spread ?? 0;
     const vz = (o.vz ?? 0) + (spread > 0 ? ctx.rng.range(-spread, spread) : 0);
     const arc = o.arc ?? 0;
+    // The muzzle is the fighter's to state, not ours to assume: a boss drawn
+    // at 1.7 scale and a squat vacuum bot do not fire from the same height, and
+    // a long barrel reaches further out than a fist. `ox`/`oy` stay as an
+    // explicit override for the handful of moves that fire from somewhere odd.
+    const m = self.muzzle;
     ctx.spawn(
       'projectile',
-      self.pos.x + (o.ox ?? 18) * self.facing,
-      self.pos.y + (o.oy ?? 26),
+      self.pos.x + (o.ox ?? m.x) * self.facing,
+      self.pos.y + (o.oy ?? m.y),
       self.pos.z,
       {
         vx: o.speed * self.facing,
@@ -1464,6 +1469,107 @@ weaponSet({
   },
 });
 
+/*
+ * The winch cable. A dwarf weapon and only a dwarf weapon: nobody at this
+ * company was issued forty units of steel rope off a mine hoist.
+ *
+ * Its whole point is that the two attacks move people in OPPOSITE directions.
+ * Light cracks it like a whip and throws them off you — the answer to being
+ * swarmed. Heavy loops them and hauls them in, which is a negative knockback:
+ * `dir` runs from the attacker toward the victim, so a negative x drags them
+ * back along it. Bring one to you, put the rest on the floor.
+ */
+weaponSet({
+  kind: 'lariat',
+  label: 'Winch Cable',
+  light: {
+    name: 'Crack',
+    duration: 30,
+    startup: 9,
+    active: 5,
+    // Longest reach in the game, and it sweeps the whole lane on the way out.
+    box: box(40, 26, 26, 11),
+    hit: hit({
+      dmg: 7,
+      stun: 18,
+      block: 10,
+      kx: 6.2,
+      ky: 1.4,
+      push: 0.6,
+      shake: 3.4,
+      sfx: 'chain_whip',
+    }),
+  },
+  heavy: {
+    name: 'Haul In',
+    duration: 46,
+    startup: 15,
+    active: 6,
+    box: box(44, 26, 28, 12),
+    hit: hit({
+      dmg: 9,
+      stun: 34,
+      block: 12,
+      // Negative: they come to YOU. Landing this on the far one in a line is
+      // the closest thing this game has to choosing who you fight next.
+      kx: -7.5,
+      ky: 1.2,
+      react: 'stun',
+      shake: 4.0,
+      sfx: 'chain_whip',
+    }),
+  },
+  thrown: {
+    name: 'Cable Toss',
+    duration: 30,
+    release: 9,
+    damage: 10,
+    speed: 6.4,
+    projectile: 'lariat',
+    sfx: 'chain_whip',
+  },
+});
+
+/* Short, fast, and it rewards standing still — the opposite of the cable. */
+weaponSet({
+  kind: 'dagger',
+  label: 'Pit Knife',
+  light: {
+    name: 'Jab',
+    duration: 18,
+    startup: 4,
+    active: 3,
+    box: box(20, 27, 10, 9),
+    hit: hit({ dmg: 6, stun: 13, block: 6, stop: 4, kx: 1.2, sfx: 'hit_flesh' }),
+  },
+  heavy: {
+    name: 'Gut Twist',
+    duration: 34,
+    startup: 10,
+    active: 4,
+    box: box(23, 25, 12, 11),
+    hit: hit({
+      dmg: 16,
+      stun: 28,
+      block: 10,
+      stop: 6,
+      kx: 2.2,
+      shake: 4.2,
+      sfx: 'bone_crack',
+    }),
+    motion: [{ frame: 9, x: 2.2, y: 0 }],
+  },
+  thrown: {
+    name: 'Knife Throw',
+    duration: 22,
+    release: 6,
+    damage: 14,
+    speed: 9.5,
+    projectile: 'dagger',
+    sfx: 'weapon_swing',
+  },
+});
+
 weaponSet({
   kind: 'taser',
   label: 'Compliance Taser',
@@ -1527,8 +1633,6 @@ def({
     kind: 'bullet',
     damage: 12,
     speed: 12.0,
-    ox: 22,
-    oy: 30,
     sfx: 'gunshot',
   }),
   cancels: [{ into: ['pistol_heavy', 'pistol_throw'], from: 6 }],
@@ -1546,8 +1650,6 @@ def({
     kind: 'bullet',
     damage: 9,
     speed: 12.5,
-    ox: 22,
-    oy: 30,
     spread: 2,
     sfx: 'gunshot',
   }),

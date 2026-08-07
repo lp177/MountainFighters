@@ -186,7 +186,7 @@ export const DWARFS: DwarfDef[] = [
       visual: 'happy_disco_inferno',
       sfx: 'laugh',
     },
-    signatureWeapon: 'chain',
+    signatureWeapon: 'lariat',
     voice: { pitch: 176, timbre: 'deep', wobble: 0.11 },
   },
 

@@ -72,6 +72,18 @@ const POP_FRAMES = 9;
 const TEXT_FADE = 0.35;
 /** Fraction of a slowmo's duration spent diving into the target scale. */
 const SLOWMO_IN = 0.18;
+/**
+ * The longest any slow-motion may run, however many things ask for it.
+ *
+ * `frames` here are REAL frames — the countdown is normalised by the time scale
+ * it is itself imposing — so this is two thirds of a second, and it is a
+ * ceiling rather than a suggestion. Slow motion is a punctuation mark: past
+ * about half a second the player has stopped reading it as impact and started
+ * waiting for their controls back. Reported three times as "the super ends and
+ * I am still in treacle", which is what it was: one call asked for 64 frames,
+ * landed on top of two others, and held the fight under water for 1.45s.
+ */
+const SLOWMO_MAX = 40;
 /** Particle budget multiplier when the player asked for reduced motion. */
 const REDUCED_PARTICLES = 0.35;
 
@@ -334,13 +346,18 @@ export class Fx implements FxBus {
     if (frames <= 0) return;
     const s = clamp(scale, 0.05, 1);
     if (s >= 0.999) return;
+    const want = Math.min(frames, SLOWMO_MAX);
     if (this.smoLife <= 0) {
       this.smoScale = s;
-      this.smoLife = frames;
-      this.smoMax = frames;
+      this.smoLife = want;
+      this.smoMax = want;
     } else {
+      // Stacking takes the deeper scale and the longer life, so a super that
+      // lands on a K.O. reads as one heavy moment rather than two thin ones —
+      // but it may never push the total past the ceiling. Without that, every
+      // extra body caught by an AOE bought another beat of slow motion.
       this.smoScale = Math.min(this.smoScale, s);
-      this.smoLife = Math.max(this.smoLife, frames);
+      this.smoLife = Math.min(Math.max(this.smoLife, want), SLOWMO_MAX);
       this.smoMax = Math.max(this.smoMax, this.smoLife);
     }
   }

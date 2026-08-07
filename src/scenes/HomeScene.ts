@@ -28,8 +28,9 @@ import { MAX_LOCAL_PLAYERS, VIEW_H, VIEW_W } from '@/core/constants';
 import { TAU, clamp, lerp } from '@/core/math';
 import { codeForBit, defaultBindingsFor } from '@/engine/input/Bindings';
 import { keyLabel, movementKeysLabel, movementLabelForCodes, onLayoutChange } from '@/engine/input/Layout';
-import { installKeyboard, isCapturing } from '@/engine/input/KeyboardSource';
+import { installKeyboard } from '@/engine/input/KeyboardSource';
 import { gamepadPanel, keyBindingEditor } from '@/ui/KeyBindingEditor';
+import { MenuInput } from '@/ui/MenuInput';
 import { DWARFS } from '@/content/dwarfs';
 import { CLIPS, sampleClip } from '@/render/rig/Anim';
 import { DWARF_SKELETON } from '@/render/rig/Skeleton';
@@ -59,13 +60,6 @@ const DIM = '#a2aabb';
 
 const DISPLAY = '"Arial Black", "Helvetica Neue", Impact, system-ui, sans-serif';
 const SANS = 'ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif';
-
-/** Frames a held direction waits before it starts repeating, and the repeat gap. */
-const NAV_DELAY = 22;
-const NAV_REPEAT = 8;
-
-const CONFIRM_MASK = Btn.Light | Btn.Jump | Btn.Special;
-const BACK_MASK = Btn.Heavy | Btn.Grab | Btn.Block | Btn.Pause;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Deterministic-looking noise for the scenery. Not sim code, but a title screen
@@ -185,8 +179,8 @@ export class HomeScene implements Scene {
    */
   private controlsNote: HTMLElement | null = null;
 
-  private navHeld = 0;
-  private navTimer = 0;
+  /** Keyboard-and-pad navigation for whichever page is mounted. */
+  private readonly menu: MenuInput;
 
   private readonly embers: Ember[] = [];
   private readonly silhouettes: Silhouette[] = [];
@@ -198,6 +192,18 @@ export class HomeScene implements Scene {
 
   constructor(game: Game) {
     this.game = game;
+
+    // The menu reads every pad the browser can see, rather than the ones
+    // InputManager has handed a player slot to. Nothing hands out a slot on
+    // this screen: that happens on `gamepadconnected`, and a controller that
+    // was already awake when the page loaded fired that event while the bundle
+    // was still parsing and never fires it again — which left the title screen
+    // deaf to the one pad in the room while inviting you to press A on it.
+    this.menu = new MenuInput({
+      ui: () => this.game.ui,
+      audio: this.game.audio,
+      onBack: () => this.back(),
+    });
 
     // The film dwarfs never turn up on this screen. They already changed.
     const n = DWARFS.length;
@@ -230,8 +236,7 @@ export class HomeScene implements Scene {
     installKeyboard();
     this.frame = 0;
     this.cancelled = false;
-    this.navHeld = 0;
-    this.navTimer = 0;
+    this.menu.attach();
     this.layoutOff = onLayoutChange(() => this.onLayoutSettled());
 
     const p = (params ?? {}) as HomeParams;
@@ -255,6 +260,7 @@ export class HomeScene implements Scene {
 
   exit(): void {
     this.cancelled = true;
+    this.menu.detach();
     this.layoutOff?.();
     this.layoutOff = null;
     this.detachRoot();
@@ -267,7 +273,7 @@ export class HomeScene implements Scene {
   update(_dt: number): void {
     this.frame++;
     this.updateEmbers();
-    this.padNav();
+    this.menu.poll();
   }
 
   render(alpha: number): void {
@@ -288,10 +294,10 @@ export class HomeScene implements Scene {
   }
 
   onKey(e: KeyboardEvent): void {
-    // The DOM view owns the keyboard while it is mounted; this only catches the
-    // gap between views.
-    if (this.root) return;
-    if (e.key === 'Escape') this.back();
+    // The menu takes what it acts on in the capture phase, so a key routed all
+    // the way here is one it let past — including Escape in the gap between
+    // views, when there is nothing mounted to walk the focus through.
+    this.menu.onKey(e);
   }
 
   // ── Backdrop ───────────────────────────────────────────────────────────────
@@ -959,130 +965,28 @@ export class HomeScene implements Scene {
 
   // ── Keyboard navigation ────────────────────────────────────────────────────
 
-  private focusables(): HTMLElement[] {
-    if (!this.root) return [];
-    return [
-      ...this.root.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
-      ),
-    ];
-  }
-
-  private moveFocus(dir: number): void {
-    const items = this.focusables();
-    if (items.length === 0) return;
-    const active = document.activeElement;
-    const cur = active instanceof HTMLElement ? items.indexOf(active) : -1;
-    const next = cur < 0 ? (dir > 0 ? 0 : items.length - 1) : (cur + dir + items.length) % items.length;
-    items[next].focus({ preventScroll: true });
-    this.game.audio.play('ui_move');
-  }
-
-  private activateFocused(): void {
-    const active = document.activeElement;
-    if (active instanceof HTMLButtonElement) {
-      active.click();
-      return;
-    }
-    // Focus fell out of the view entirely (a click on the canvas will do it):
-    // put it back rather than swallowing the press.
-    const items = this.focusables();
-    if (items.length > 0) items[0].focus({ preventScroll: true });
-  }
-
+  /**
+   * The keys the menu itself does not take.
+   *
+   * `MenuInput` listens in the capture phase and owns Escape, Space and the
+   * up/down walk, stopping each one before it can reach this listener — so any
+   * case added back below for those keys would move the focus twice per press.
+   * Left and Right are not here either: they now belong to whatever is focused,
+   * which is a slider's value or the Controls tab strip, the same as in every
+   * other menu in the game.
+   *
+   * That leaves Backspace, which nothing else claims and which means the same
+   * thing as Escape.
+   */
   private readonly onViewKey = (e: KeyboardEvent): void => {
     if (e.altKey || e.ctrlKey || e.metaKey) return;
+    if (e.key !== 'Backspace') return;
+    // Anything you can type into wants its own Backspace far more than the menu
+    // wants it; a slider is not one of those.
     const target = e.target;
-    const onRange = target instanceof HTMLInputElement && target.type === 'range';
-
-    switch (e.key) {
-      case 'ArrowDown':
-        e.preventDefault();
-        this.moveFocus(1);
-        break;
-      case 'ArrowUp':
-        e.preventDefault();
-        this.moveFocus(-1);
-        break;
-      case 'ArrowRight':
-        if (onRange) return; // the slider wants it more than the menu does
-        e.preventDefault();
-        this.moveFocus(1);
-        break;
-      case 'ArrowLeft':
-        if (onRange) return;
-        e.preventDefault();
-        this.moveFocus(-1);
-        break;
-      case ' ':
-      case 'Spacebar':
-        // KeyboardSource preventDefaults Space, which would otherwise stop a
-        // focused button from firing. Fire it here instead.
-        if (target instanceof HTMLButtonElement) {
-          e.preventDefault();
-          target.click();
-        }
-        break;
-      case 'Escape':
-      case 'Backspace':
-        if (target instanceof HTMLInputElement && target.type !== 'range') return;
-        e.preventDefault();
-        this.back();
-        break;
-      default:
-        break;
-    }
+    if (target instanceof HTMLInputElement && target.type !== 'range') return;
+    e.preventDefault();
+    this.back();
   };
-
-  // ── Gamepad navigation ─────────────────────────────────────────────────────
-
-  /**
-   * Menu navigation from a controller.
-   *
-   * Only gamepad slots are read here: the keyboard is already talking to the
-   * DOM, and sampling it twice would move the focus two places per press.
-   */
-  private padNav(): void {
-    // The binding editor is waiting for a key. A pad press that walked the menu
-    // now would move focus out from under the row being rebound.
-    if (isCapturing()) return;
-    const input = this.game.input;
-    let held = 0;
-    let pressed = 0;
-    for (const slot of input.slots) {
-      if (input.source(slot)?.kind !== 'gamepad') continue;
-      const f = input.get(slot);
-      held |= f.held;
-      pressed |= f.pressed;
-    }
-
-    if (pressed & CONFIRM_MASK) {
-      this.activateFocused();
-      return;
-    }
-    if (pressed & BACK_MASK) {
-      this.back();
-      return;
-    }
-
-    // Held directions repeat, so scrolling a menu with a stick does not need
-    // seven separate flicks.
-    const dir = held & (Btn.Down | Btn.Right) ? 1 : held & (Btn.Up | Btn.Left) ? -1 : 0;
-    if (dir === 0) {
-      this.navHeld = 0;
-      this.navTimer = 0;
-      return;
-    }
-    if (this.navHeld !== dir) {
-      this.navHeld = dir;
-      this.navTimer = NAV_DELAY;
-      this.moveFocus(dir);
-      return;
-    }
-    if (--this.navTimer <= 0) {
-      this.navTimer = NAV_REPEAT;
-      this.moveFocus(dir);
-    }
-  }
 }
 

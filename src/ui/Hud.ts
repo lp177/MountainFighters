@@ -165,6 +165,21 @@ interface HudState {
 
 const states = new Map<number, HudState>();
 
+/**
+ * Slots the fight has told us are on a controller.
+ *
+ * The HUD used to work this out from the slot number, because pads were pinned
+ * to slots two and three and nothing else could be there. The seat count now
+ * decides where a pad lands, so the guess was wrong for the commonest case of
+ * all — one player, one controller, slot zero. The fight knows; it says so.
+ */
+let padSlots: ReadonlySet<number> | null = null;
+
+/** Told by the fight as it builds its players. See `padSlots`. */
+export function setHudPadSlots(slots: ReadonlySet<number> | null): void {
+  padSlots = slots;
+}
+
 function stateFor(id: number, healthFrac: number): HudState {
   let s = states.get(id);
   if (!s) {
@@ -195,6 +210,7 @@ function stateFor(id: number, healthFrac: number): HudState {
 /** Drop the animation state. Call between maps so a new fight starts clean. */
 export function resetHud(): void {
   states.clear();
+  padSlots = null;
   padCacheFrame = -1e9;
   bindingCacheFrame = -1e9;
 }
@@ -935,12 +951,13 @@ function bindingsFor(
 /**
  * A first guess at which controller a slot is holding, before they have moved.
  *
- * Nothing plugged in means a keyboard whatever the slot number says. Otherwise
- * slots three and four are pads by construction — there is no third half of a
- * keyboard for them to sit on — and one and two start as keyboards. Either way
- * `stepDevice` corrects it on the first step the player takes.
+ * If the fight has told us which slots are on pads, that is not a guess at all
+ * and we use it. Failing that: nothing plugged in means a keyboard whatever the
+ * slot number says, and otherwise the high slots are the likelier pads. Either
+ * way `stepDevice` corrects it on the first step the player takes.
  */
 function guessOnPad(slot: number): boolean {
+  if (padSlots) return padSlots.has(slot);
   let pads = 0;
   try {
     pads = connectedGamepads().length;

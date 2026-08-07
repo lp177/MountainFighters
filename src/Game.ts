@@ -27,7 +27,15 @@ import {
 } from '@/core/constants';
 import { clamp } from '@/core/math';
 import { Btn } from '@/core/types';
-import type { NetConfig, Rng, SaveData, Scene, SceneName, Settings } from '@/core/types';
+import type {
+  CarriedWeapon,
+  NetConfig,
+  Rng,
+  SaveData,
+  Scene,
+  SceneName,
+  Settings,
+} from '@/core/types';
 import { GameLoop } from '@/engine/Loop';
 import { makeRng, randomSeed } from '@/engine/Rng';
 import { loadSave, saveSave } from '@/engine/Save';
@@ -92,6 +100,15 @@ export interface RunState {
   continues: number;
   /** True when this run is a netplay match. */
   online: boolean;
+  /**
+   * What each slot walked off the last map holding, and with how much left.
+   *
+   * A weapon you fought a whole map to keep should not evaporate on the load
+   * screen. Cleared on 'musk', where you start bare-handed and lose whatever
+   * you found the moment the map ends — that difficulty's whole proposition is
+   * that nothing accumulates.
+   */
+  carried: (CarriedWeapon | null)[];
 }
 
 const SCENE_CLASSES: Partial<Record<SceneName, SceneCtor>> = {
@@ -193,6 +210,7 @@ export class Game {
       seed: randomSeed(),
       continues: 0,
       online: false,
+      carried: new Array<CarriedWeapon | null>(MAX_LOCAL_PLAYERS).fill(null),
     };
     this.rng = makeRng(this.run.seed);
 
@@ -545,6 +563,7 @@ export class Game {
     run.score = 0;
     run.lives = STARTING_LIVES;
     run.continues = 0;
+    run.carried.fill(null);
     if (opts?.slots && opts.slots.length > 0) {
       run.slots = [...new Set(opts.slots)].sort((a, b) => a - b);
     }
@@ -804,19 +823,65 @@ export class Game {
    * Hands every connected pad a slot, starting at `fromSlot`. Returns how many
    * were bound. A pad always wins the slot it is given: whoever picks up a
    * controller wants to use the controller.
+   *
+   * `fromSlot` is how the caller reserves the low slots for the keyboard halves,
+   * which are the only slots whose key maps make sense — so it is the seat count
+   * that decides it, not a constant. Four pads for four people leave no keyboard
+   * half to reserve and start at slot 0.
    */
   attachGamepads(fromSlot = 0): number {
+    // Clear every pad off the board before dealing them out again. Without
+    // this, a base slot that MOVES between visits — and it does, because the
+    // seat count decides it — leaves the old binding sitting where it was, and
+    // one physical controller ends up driving two players at once.
+    for (const slot of [...this.input.slots]) {
+      if (this.input.source(slot) instanceof GamepadSource) this.detachSlot(slot);
+    }
+
     const pads = connectedGamepads();
     let slot = clamp(Math.floor(fromSlot), 0, MAX_LOCAL_PLAYERS - 1);
     let bound = 0;
     for (const pad of pads) {
       if (slot >= MAX_LOCAL_PLAYERS) break;
       this.detachSlot(slot);
-      this.input.attach(slot, new GamepadSource(pad));
+      this.bindGamepad(slot, pad);
       slot++;
       bound++;
     }
     return bound;
+  }
+
+  /**
+   * Put one named pad on one named slot — how a lobby binds the local player to
+   * the slot the room gave them. Goes through the same bookkeeping as every
+   * other binding, so the pad still knows its way back after a dropout.
+   */
+  bindGamepad(slot: number, padIndex: number): void {
+    this.input.attach(slot, new GamepadSource(padIndex));
+    this.padHomes.set(padIndex, slot);
+  }
+
+  /**
+   * Where each physical pad was last bound, keyed by `Gamepad.index`.
+   *
+   * A controller that goes flat mid-fight and wakes up again is the same person
+   * in the same chair; this is what sends it back to the fighter it left rather
+   * than to whichever slot happens to be free beside them.
+   */
+  private readonly padHomes = new Map<number, number>();
+
+  /**
+   * The slot this physical pad is already driving, or -1. A GamepadSource names
+   * itself after the pad index it reads, which is the only handle on that index
+   * from out here.
+   */
+  private slotForPad(padIndex: number): number {
+    const id = `pad${padIndex}`;
+    for (const slot of this.input.slots) {
+      const src = this.input.source(slot);
+      if (src instanceof GamepadSource && src.id === id) return slot;
+    }
+    return -1;
   }
 
   detachSlot(slot: number): void {
@@ -890,6 +955,7 @@ export class Game {
     document.addEventListener('visibilitychange', this.onVisibility);
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('gamepadconnected', this.onGamepad);
+    window.addEventListener('gamepaddisconnected', this.onGamepadGone);
     window.addEventListener('pagehide', this.onPageHide);
     window.addEventListener('pointerdown', this.onGesture, { passive: true });
     window.addEventListener('keydown', this.onGesture);
@@ -902,6 +968,7 @@ export class Game {
     document.removeEventListener('visibilitychange', this.onVisibility);
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('gamepadconnected', this.onGamepad);
+    window.removeEventListener('gamepaddisconnected', this.onGamepadGone);
     window.removeEventListener('pagehide', this.onPageHide);
     this.removeGestureListeners();
   }
@@ -948,14 +1015,40 @@ export class Game {
   private readonly onGamepad = (e: Event): void => {
     const pad = (e as GamepadEvent).gamepad;
     if (!pad || this.dead) return;
+    // A pad that drops out and comes back — a flat battery, a kicked cable, a
+    // browser re-announcing what it already told us — is still ONE controller in
+    // one pair of hands. If a slot is already reading this pad index then that
+    // slot is this pad, and there is nothing to hand out: taking a second one
+    // would leave one person driving two cursors while the player next to them
+    // drives none.
+    if (this.slotForPad(pad.index) >= 0) return;
+    // Failing that, back to the slot it left, as long as nobody has moved into
+    // it meanwhile.
+    const home = this.padHomes.get(pad.index);
+    if (home !== undefined && this.input.source(home) === null) {
+      this.bindGamepad(home, pad.index);
+      return;
+    }
     // Give a freshly plugged-in pad the first slot nobody is driving, so the
     // second player can join by plugging in rather than by finding a menu.
     for (let slot = 0; slot < MAX_LOCAL_PLAYERS; slot++) {
       if (this.input.source(slot) === null) {
-        this.input.attach(slot, new GamepadSource(pad.index));
+        this.bindGamepad(slot, pad.index);
         return;
       }
     }
+  };
+
+  private readonly onGamepadGone = (e: Event): void => {
+    const pad = (e as GamepadEvent).gamepad;
+    if (!pad || this.dead) return;
+    // Let the slot go rather than leave a source reading hardware that is not
+    // there. A stale binding keeps the slot looking occupied for good, which is
+    // how the same controller ends up being handed a second slot the moment it
+    // is plugged back in. `padHomes` remembers where it was, so coming back is
+    // still the seat it left.
+    const slot = this.slotForPad(pad.index);
+    if (slot >= 0) this.detachSlot(slot);
   };
 
   private readonly onPageHide = (): void => {

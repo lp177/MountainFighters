@@ -437,7 +437,7 @@ export const ENEMIES: Record<EnemyKind, EnemyDef> = {
       cigar: true,
     },
     moves: { light: 'e_briefcase', heavy: 'e_handshake', ranged: 'e_donation' },
-    weapon: 'bat',
+    weapon: 'ironbar',
     points: 300,
     ai: {
       reactionFrames: 20,

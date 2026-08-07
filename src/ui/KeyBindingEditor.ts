@@ -124,6 +124,30 @@ function setCapture(on: boolean): void {
   }
 }
 
+/**
+ * The armed capture's way out, in module scope.
+ *
+ * Capture mode deafens the input layer, so while one is armed nothing else in
+ * the game hears a button — and a player who armed it from a gamepad has no
+ * Escape key and no pointer to click away with. `cancelActiveCapture()` is the
+ * door the menu's Back button opens for them. There is at most one armed
+ * capture on screen at a time, which is what lets this be a single slot: it is
+ * set when a capture begins and cleared when that same capture ends.
+ */
+let activeCancel: (() => void) | null = null;
+
+/**
+ * Call off whatever capture is currently waiting for a key. Returns whether
+ * there was one, so a caller can tell "cancelled" from "nothing to cancel" and
+ * treat the button press as its own instead.
+ */
+export function cancelActiveCapture(): boolean {
+  const cancel = activeCancel;
+  if (!cancel) return false;
+  cancel();
+  return true;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Custom element — this is what makes teardown automatic
 //
@@ -464,6 +488,7 @@ class Editor {
 
     const ctl = new AbortController();
     this.capture = { key, ctl };
+    activeCancel = this.cancelFromOutside;
     setCapture(true);
     this.paint();
     this.say(
@@ -491,10 +516,27 @@ class Editor {
     const session = this.capture;
     if (!session) return;
     this.capture = null;
+    if (activeCancel === this.cancelFromOutside) activeCancel = null;
     session.ctl.abort();
     setCapture(false);
     this.paint();
   }
+
+  /**
+   * The exit for something that is not a keypress — a gamepad's Back button,
+   * reaching in through `cancelActiveCapture()`. It goes through the same
+   * `cancelCapture()` as everything else, so the listener teardown and the
+   * capture flag are still handled in exactly one place, and it leaves the same
+   * message behind as an Escape would.
+   */
+  private readonly cancelFromOutside = (): void => {
+    const session = this.capture;
+    if (!session) return;
+    const { row, index, btn } = session.key;
+    this.cancelCapture();
+    this.say(`Cancelled. The ${SLOT_NAME[index]} for ${row.action.name} is unchanged.`);
+    btn.focus();
+  };
 
   private readonly swallow = (e: Event): void => {
     e.preventDefault();

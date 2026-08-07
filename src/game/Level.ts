@@ -181,14 +181,19 @@ const SQUAT_ENEMIES: ReadonlySet<EnemyKind> = new Set<EnemyKind>([
   'delivery_drone',
 ]);
 
-/** Alternates so a wave is not ten identical chains. */
+/**
+ * Alternates so a wave is not ten identical chains.
+ *
+ * A pool may only offer weapons the archetype can actually USE. Handing a
+ * gunman a bat one time in three did not make him swing it — his move set still
+ * fires — so a third of them stood there firing bullets out of a baseball bat.
+ * Anyone whose kit shoots gets a pool of things that shoot, or no pool at all.
+ */
 const WEAPON_POOL: Partial<Record<EnemyKind, WeaponKind[]>> = {
-  suit_guard: ['chain', 'bat', 'ironbar', 'pipe'],
-  taser_guard: ['taser', 'pipe'],
-  gunman: ['pistol', 'pistol', 'bat'],
+  suit_guard: ['chain', 'ironbar', 'pipe'],
   riot_guard: ['riotshield', 'ironbar'],
   intern: ['keyboard', 'gpu'],
-  lobbyist: ['briefcase' as WeaponKind, 'bat'].filter((w) => w in WEAPONS) as WeaponKind[],
+  lobbyist: ['briefcase' as WeaponKind, 'ironbar'].filter((w) => w in WEAPONS) as WeaponKind[],
 };
 
 const BEARDS: RigStyle['beardStyle'][] = ['none', 'stubble', 'bushy', 'forked'];
@@ -1281,7 +1286,7 @@ export class Level {
         this.outro = OUTRO_FRAMES;
         this.gated = false;
         this.audio.music('victory');
-        this.fx.slowmo(0.25, 70);
+        this.fx.slowmo(0.25, 38);
         this.fx.flash('#ffffff', 12, 0.75);
         this.fx.shake({ magnitude: 10, duration: 40 });
         this.fx.text({
@@ -1327,7 +1332,7 @@ export class Level {
 
     const p = boss.f.pos;
     ctx.requestHitstop(16);
-    this.fx.slowmo(0.32, 44);
+    this.fx.slowmo(0.32, 28);
     this.fx.flash('#ff2d55', 10, 0.6);
     this.fx.shake({ magnitude: 9, duration: 30 });
     this.fx.aberration(0.55, 22);

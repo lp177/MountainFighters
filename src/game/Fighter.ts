@@ -35,7 +35,8 @@ import type {
   Vec3,
   VoiceProfile,
   WeaponDef,
-  WeaponKind,
+  WeaponKind, Vec2,
+  CarriedWeapon,
 } from '@/core/types';
 import { Btn } from '@/core/types';
 import type { Camera } from '@/render/Camera';
@@ -646,6 +647,7 @@ export class Fighter implements FighterView {
       // same places every frame instead of crawling across the cloth.
       seed: hashNumber(0x9e3779b9, init.id) >>> 0,
       blood: 0,
+      oil: false,
       hatless: false,
     };
   }
@@ -786,6 +788,30 @@ export class Fighter implements FighterView {
     if (this.strainTimer > 0) this.strainTimer--;
     d.face = this.faceState(hp);
     d.blood = goreSetting === 'off' ? 0 : clamp(this.bloodAccum, 0, 1);
+    // Same accumulator, different fluid. A vacuum bot that has taken a beating
+    // should show it; it should not show it in red.
+    d.oil = this.mechanical;
+  }
+
+  /**
+   * Where a shot leaves the hand. See `FighterView.muzzle`.
+   *
+   * Everything here is in rig units, which ARE world units, scaled by how big
+   * this particular body is drawn. The grip sits a little forward of centre at
+   * roughly shoulder height; a gun adds its own barrel to that, so a long
+   * weapon fires from further out than a short one. Reused, never handed out —
+   * a caller that keeps it gets a moving target.
+   */
+  private readonly _muzzle: Vec2 = { x: 0, y: 0 };
+
+  get muzzle(): Vec2 {
+    const s = this.style.scale || 1;
+    const art = this.weapon ? WEAPONS[this.weapon]?.art : undefined;
+    // A gun is held out along its length; anything else throws from the fist.
+    const barrel = art && art.shape === 'gun' ? art.length * 0.8 : 0;
+    this._muzzle.x = (11 + barrel) * s;
+    this._muzzle.y = 26 * s;
+    return this._muzzle;
   }
 
   private faceState(hp: number): FaceState {
@@ -2199,6 +2225,16 @@ export class Fighter implements FighterView {
    * and the chain on the floor is still spent when you come back for it.
    * Omitted, they come off the definition — a fresh one out of a crate.
    */
+  /**
+   * Exactly what is in this fighter's hands, ready to be handed back on the
+   * next map. Null once it has broken, been thrown, or was never there.
+   */
+  get carried(): CarriedWeapon | null {
+    return this.weapon === null
+      ? null
+      : { kind: this.weapon, durability: this.weaponDurability, ammo: this.weaponAmmo };
+  }
+
   giveWeapon(kind: WeaponKind, durability?: number, ammo?: number): void {
     const def = WEAPONS[kind];
     if (!def) return;

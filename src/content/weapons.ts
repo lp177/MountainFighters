@@ -18,6 +18,54 @@
 import type { WeaponDef, WeaponKind } from '@/core/types';
 
 export const WEAPONS: Record<WeaponKind, WeaponDef> = {
+  /**
+   * Steel cable off a mine winch, whipped like a lariat.
+   *
+   * Dwarf kit, not corporate kit: nobody issued this, somebody cut it off a
+   * hoist. Longest reach in the game and it catches a whole line of people,
+   * paid for in damage and in how slowly it comes back round.
+   */
+  lariat: {
+    kind: 'lariat',
+    sfx: { reveal: 'chain_whip', swing: 'chain_whip', swingPitch: 0.82, impact: 'hit_metal' },
+    name: 'Winch Cable',
+    durability: 34,
+    damageScale: 1.05,
+    speedScale: 0.9,
+    moves: { light: 'lariat_light', heavy: 'lariat_heavy', throw: 'lariat_throw' },
+    art: {
+      shape: 'lasso',
+      length: 38,
+      thickness: 2.4,
+      color: '#9aa3b4',
+      accent: '#e6edf7',
+      segments: 12,
+      spikes: false,
+    },
+  },
+
+  /**
+   * A knife off somebody's belt. Short, quick, and the only thing here that
+   * rewards standing still and being precise.
+   */
+  dagger: {
+    kind: 'dagger',
+    sfx: { reveal: 'hit_metal', swing: 'whiff', swingPitch: 1.5, impact: 'hit_flesh' },
+    name: 'Pit Knife',
+    durability: 40,
+    damageScale: 1.15,
+    speedScale: 1.22,
+    moves: { light: 'dagger_light', heavy: 'dagger_heavy', throw: 'dagger_throw' },
+    art: {
+      shape: 'blade',
+      length: 14,
+      thickness: 3.6,
+      color: '#c8cedb',
+      accent: '#8a6b3f',
+      spikes: false,
+    },
+  },
+
   chain: {
     kind: 'chain',
     sfx: { reveal: 'chain_whip', swing: 'chain_whip', impact: 'hit_metal' },
@@ -41,7 +89,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
   bat: {
     kind: 'bat',
     sfx: { reveal: 'bat_crack', swing: 'whiff', swingPitch: 0.85, impact: 'bat_crack' },
-    name: 'Aluminium Bat',
+    name: 'Spiked Bat',
     // The crowd-pleaser. Big damage, dents fast.
     durability: 18,
     damageScale: 1.6,
@@ -53,7 +101,8 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
       thickness: 4.4,
       color: '#b6bfca',
       accent: '#e8eff7',
-      spikes: false,
+      segments: 6,
+      spikes: true,
     },
   },
 

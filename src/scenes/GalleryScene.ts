@@ -516,30 +516,50 @@ export class GalleryScene implements Scene {
       return;
     }
 
+    // A stick sets both a horizontal and a vertical bit long before it points
+    // anywhere near a corner: the pad widens each cardinal to about 53° so a
+    // fighter can walk flat along the floor, which is right for a fight and
+    // wrong for a grid. Spend both bits in one frame and a flick 27° off
+    // straight up costs a row AND a column, and at the right-hand edge the
+    // horizontal wrap runs the wall as one long line and carries the cursor
+    // across a row boundary as well. So the wall hands the cursor to one axis
+    // at a time: whichever axis is already moving keeps it until it comes back
+    // to neutral, and a flick that arrives on both at once is read as vertical,
+    // because horizontal is the one that throws the cursor a whole row when it
+    // guesses wrong.
     const hx = held & Btn.Right ? 1 : held & Btn.Left ? -1 : 0;
+    const hy = held & Btn.Down ? 1 : held & Btn.Up ? -1 : 0;
+
+    // Released first, so an axis let go of this frame hands over immediately
+    // rather than holding the cursor for one frame it no longer wants.
     if (hx === 0) {
       this.dirX = 0;
       this.timerX = 0;
-    } else if (this.dirX !== hx) {
-      this.dirX = hx;
-      this.timerX = NAV_DELAY;
-      this.moveH(hx);
-    } else if (--this.timerX <= 0) {
-      this.timerX = NAV_REPEAT;
-      this.moveH(hx);
     }
-
-    const hy = held & Btn.Down ? 1 : held & Btn.Up ? -1 : 0;
     if (hy === 0) {
       this.dirY = 0;
       this.timerY = 0;
-    } else if (this.dirY !== hy) {
-      this.dirY = hy;
-      this.timerY = NAV_DELAY;
-      this.moveV(hy);
-    } else if (--this.timerY <= 0) {
-      this.timerY = NAV_REPEAT;
-      this.moveV(hy);
+    }
+
+    const useV = hy !== 0 && !(hx !== 0 && this.dirX !== 0);
+    if (useV) {
+      if (this.dirY !== hy) {
+        this.dirY = hy;
+        this.timerY = NAV_DELAY;
+        this.moveV(hy);
+      } else if (--this.timerY <= 0) {
+        this.timerY = NAV_REPEAT;
+        this.moveV(hy);
+      }
+    } else if (hx !== 0) {
+      if (this.dirX !== hx) {
+        this.dirX = hx;
+        this.timerX = NAV_DELAY;
+        this.moveH(hx);
+      } else if (--this.timerX <= 0) {
+        this.timerX = NAV_REPEAT;
+        this.moveH(hx);
+      }
     }
   }
 

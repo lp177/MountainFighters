@@ -19,10 +19,10 @@ import { poly, star } from '@/render/Shapes';
 import { DWARFS } from '@/content/dwarfs';
 import { button, panel } from '@/ui/Widgets';
 import type { Ui } from '@/ui/Ui';
+import { MenuInput } from '@/ui/MenuInput';
 
 import type { FightResult, SceneHost } from '@/scenes/FightScene';
 import {
-  MenuInput,
   div,
   narrow,
   nav,

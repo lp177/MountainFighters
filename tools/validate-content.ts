@@ -71,6 +71,8 @@ const WEAPON_KINDS: readonly WeaponKind[] = [
   'cybertruck_door',
   'keyboard',
   'gpu',
+  'lariat',
+  'dagger',
 ];
 
 /** The roster is the premise of the game; it is not allowed to quietly shrink. */
@@ -103,7 +105,9 @@ const AI_BEHAVIOURS: readonly string[] = [
   'support',
 ];
 
-const WEAPON_SHAPES: readonly string[] = ['stick', 'flail', 'blocky', 'gun', 'shield', 'plate'];
+const WEAPON_SHAPES: readonly string[] = [
+  'stick', 'flail', 'blocky', 'gun', 'shield', 'plate', 'blade', 'lasso',
+];
 
 const RIG_OVERRIDES: readonly string[] = [
   'shiba',

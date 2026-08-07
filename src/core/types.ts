@@ -300,6 +300,17 @@ export interface FighterView {
   readonly weapon: WeaponKind | null;
   readonly comboCount: number;
   readonly archetype: string;
+  /**
+   * Where a shot leaves the thing being fired, relative to `pos`, before the
+   * facing flip.
+   *
+   * Shots used to spawn at a flat 18 forward and 26 up for everybody, which is
+   * about right for a dwarf with a pistol and wrong for everything else — a
+   * boss is drawn at 1.7 scale and fired from its knee, a vacuum bot from a
+   * point above its own head. The fighter knows how big it is and what is in
+   * its hand, so it answers rather than being guessed at.
+   */
+  readonly muzzle: Vec2;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -316,7 +327,21 @@ export type WeaponKind =
   | 'riotshield'
   | 'cybertruck_door'
   | 'keyboard'
-  | 'gpu';
+  | 'gpu'
+  | 'lariat'
+  | 'dagger';
+
+/**
+ * A weapon in transit between maps: what it is and how much of it is left.
+ *
+ * Lives here rather than on RunState so the fight scene can read it without
+ * importing Game, which would close a cycle.
+ */
+export interface CarriedWeapon {
+  kind: WeaponKind;
+  durability: number;
+  ammo: number;
+}
 
 export interface WeaponDef {
   kind: WeaponKind;
@@ -360,7 +385,7 @@ export interface WeaponSfx {
 
 export interface WeaponArt {
   /** Base silhouette the vector renderer builds from. */
-  shape: 'stick' | 'flail' | 'blocky' | 'gun' | 'shield' | 'plate';
+  shape: 'stick' | 'flail' | 'blocky' | 'gun' | 'shield' | 'plate' | 'blade' | 'lasso';
   length: number;
   thickness: number;
   color: string;
@@ -1021,6 +1046,14 @@ export interface RigDamage {
   seed: number;
   /** Blood picked up from hits, 0..1. Independent of wear: a clean KO is rare. */
   blood: number;
+  /**
+   * True for anything that leaks oil rather than bleeds.
+   *
+   * The particles and the floor stains have always asked what a thing is full
+   * of; the marks painted ON the body never did, so a vacuum bot took red
+   * wounds. Same number, different palette.
+   */
+  oil: boolean;
   /** True once the hat has been knocked off, stolen or eaten. */
   hatless: boolean;
 }

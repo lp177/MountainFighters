@@ -38,7 +38,7 @@ import { GROUND_Y, MAX_LOCAL_PLAYERS, VIEW_H, VIEW_W, Z_SCALE } from '@/core/con
 import { TAU, clamp, easeInOut, easeOut, easeOutBack } from '@/core/math';
 import { randomSeed } from '@/engine/Rng';
 import { KeyboardSource, installKeyboard } from '@/engine/input/KeyboardSource';
-import { GamepadSource, connectedGamepads, pollGamepads } from '@/engine/input/GamepadSource';
+import { connectedGamepads, pollGamepads } from '@/engine/input/GamepadSource';
 import { DEFAULT_BINDINGS } from '@/engine/input/Bindings';
 import { DWARFS, getDwarf } from '@/content/dwarfs';
 import { WEAPONS } from '@/content/weapons';
@@ -399,9 +399,13 @@ export class SelectScene implements Scene {
   /**
    * One cursor per occupied input slot.
    *
-   * Game keeps slots 0 and 1 on the two keyboard halves and hands pads the free
-   * slots above them, so claiming the pad slots here is the whole of what makes
-   * three- and four-player local play possible.
+   * Slots are dealt out by SEAT COUNT rather than from a fixed base. The
+   * keyboard halves can only live on slots 0 and 1 — they are the slots whose
+   * key maps exist, and whose split is what makes player two's keys player
+   * two's — so the board keeps only as many of them as there are seats the pads
+   * cannot cover, and the pads take everything above. Three people with three
+   * controllers get three controllers; a fourth pad is no longer dropped on the
+   * floor while its owner is handed half a keyboard.
    *
    * Online is different: the host decides which slot we are, and the player who
    * has been given slot 2 still expects to fight on WASD. So the local device is
@@ -410,7 +414,6 @@ export class SelectScene implements Scene {
    */
   private buildCursors(): void {
     const bindings = this.game.save.settings.bindings;
-    const pads = this.game.attachGamepads(2);
 
     this.cursors = [];
 
@@ -419,12 +422,13 @@ export class SelectScene implements Scene {
       for (let s = 0; s < MAX_LOCAL_PLAYERS; s++) this.game.detachSlot(s);
       pollGamepads();
       const pad = connectedGamepads()[0];
-      this.game.input.attach(
-        netSlot,
-        pad !== undefined
-          ? new GamepadSource(pad)
-          : new KeyboardSource(0, bindings[0] ?? DEFAULT_BINDINGS[0]),
-      );
+      // Through Game either way, so the slot this room gave us is the slot the
+      // pad comes back to if it drops out mid-match.
+      if (pad !== undefined) {
+        this.game.bindGamepad(netSlot, pad);
+      } else {
+        this.game.input.attach(netSlot, new KeyboardSource(0, bindings[0] ?? DEFAULT_BINDINGS[0]));
+      }
       this.cursors.push(this.makeCursor(netSlot, 0));
       this.shareKeyboard();
       return;
@@ -434,7 +438,20 @@ export class SelectScene implements Scene {
     // the pads have taken theirs. Game boots with both halves live so either can
     // join in at the menus; from here on, one person gets the whole board and
     // only a second person sharing it takes half of it away again.
-    this.game.attachKeyboards(clamp(this.seats - pads, 1, 2));
+    //
+    // That count is also where the pads start, so every controller in the room
+    // has a slot to land on. The floor of one keeps the board live beside a
+    // player who chose with a pad — put the controller down and the keys still
+    // work — and lifts only when four pads have turned up for four seats, when
+    // there is neither a slot to spare nor anybody left wanting one.
+    pollGamepads();
+    const padCount = connectedGamepads().length;
+    const keyboards =
+      padCount >= MAX_LOCAL_PLAYERS && this.seats >= MAX_LOCAL_PLAYERS
+        ? 0
+        : clamp(this.seats - padCount, 1, 2);
+    this.game.attachGamepads(keyboards);
+    this.game.attachKeyboards(keyboards);
 
     // Pads before keyboard halves: two people with two controllers should not
     // end up elbowing each other over one keyboard.
@@ -480,12 +497,18 @@ export class SelectScene implements Scene {
   }
 
   private makeCursor(slot: number, seat: number): Cursor {
+    // Colour follows the SEAT, not the input slot it happens to read. Player one
+    // is red whether they chose on the keyboard at slot 0 or a pad at slot 2,
+    // which is what the P1 badge printed inside the cursor already claims.
+    // Online there is one seat per machine and the room's slot is the player
+    // number, so there the slot is the thing that tells four peers apart.
+    const shade = this.online ? slot : seat;
     return {
       slot,
       seat,
       index: Math.min(seat, DWARFS.length - 1),
       locked: null,
-      color: CURSOR_COLORS[slot % CURSOR_COLORS.length],
+      color: CURSOR_COLORS[shade % CURSOR_COLORS.length],
       dir: 0,
       timer: 0,
       bump: 0,
@@ -869,6 +892,7 @@ export class SelectScene implements Scene {
         dwarfId: p.dwarfId,
         name: p.name,
         local: p.local,
+        onPad: this.game.input.source(p.slot)?.kind === 'gamepad',
       })),
       mapIndex,
       seed,

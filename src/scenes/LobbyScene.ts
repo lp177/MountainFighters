@@ -24,6 +24,7 @@ import { MAX_LOCAL_PLAYERS, VIEW_H, VIEW_W } from '@/core/constants';
 import { TAU, clamp, lerp } from '@/core/math';
 import { getDwarf } from '@/content/dwarfs';
 import { inviteLink } from '@/net/Room';
+import { MenuInput } from '@/ui/MenuInput';
 import { button, panel } from '@/ui/Widgets';
 
 type C2D = CanvasRenderingContext2D;
@@ -97,6 +98,7 @@ export class LobbyScene implements Scene {
   readonly name = 'lobby';
 
   private readonly game: Game;
+  private readonly menu: MenuInput;
 
   private frame = 0;
   private fromPause = false;
@@ -116,6 +118,15 @@ export class LobbyScene implements Scene {
 
   constructor(game: Game) {
     this.game = game;
+    // Both doors into this room can be opened with a pad — the multiplayer menu
+    // from the title, and the pause menu, which detaches its own MenuInput on
+    // the way here — and until this existed neither had a pad-shaped way back
+    // out. A host who opened a room had to reach for a keyboard to close it.
+    this.menu = new MenuInput({
+      ui: () => this.game.ui,
+      audio: this.game.audio,
+      onBack: () => this.leave(),
+    });
   }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -129,6 +140,12 @@ export class LobbyScene implements Scene {
     this.error = '';
 
     if (!this.fromPause) this.game.audio.music('menu');
+
+    // Attached before anything is mounted, and before the early return below,
+    // so every shape of this screen — opening, open, error, over a live fight —
+    // is escapable. The first poll after an attach only samples, so the button
+    // that opened the room does not read as a press that closes it again.
+    this.menu.attach();
 
     const live = this.game.net;
     if (live && live.role === 'host' && live.connected) {
@@ -149,6 +166,7 @@ export class LobbyScene implements Scene {
 
   exit(): void {
     this.dead = true;
+    this.menu.detach();
     const s = this.session;
     if (s) {
       s.offMessage(this.onNet);
@@ -164,6 +182,7 @@ export class LobbyScene implements Scene {
 
   update(_dt: number): void {
     this.frame++;
+    this.menu.poll();
     if (this.phase === 'open' && this.frame % REFRESH_EVERY === 0) this.refresh();
   }
 
@@ -186,11 +205,18 @@ export class LobbyScene implements Scene {
     r.end();
   }
 
+  /**
+   * Escape used to be answered here. It belongs to MenuInput now, which already
+   * owns it for the pad's B button: two owners of one key is one room closed
+   * twice, and the second close lands on a scene that has already gone.
+   *
+   * The link field keeps the keys that matter to it. MenuInput ignores anything
+   * held with a modifier, so Ctrl+C on the selected link still copies, and the
+   * only keys it takes from the field are the arrows — which on a read-only
+   * input have nothing to move a caret through, and are the pad's way off it.
+   */
   onKey(e: KeyboardEvent): void {
-    if (e.key !== 'Escape') return;
-    if (e.target instanceof HTMLInputElement) return;
-    e.preventDefault();
-    this.leave();
+    this.menu.onKey(e);
   }
 
   // ── Net ────────────────────────────────────────────────────────────────────

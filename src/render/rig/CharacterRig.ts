@@ -343,8 +343,18 @@ function studs(
 /** Deep and a little purple. Pure red reads as plastic at this size. */
 const BLOOD = '#9e1420';
 const BLOOD_DK = '#5c0a12';
+// What a machine leaks. Same marks, same numbers — a robot that has been hit
+// enough to bleed should look it — but hydraulic fluid, not arterial spray.
+const OIL = '#241f28';
+const OIL_DK = '#0f0d13';
+const OIL_WET = '#3b3340';
 /** Fresh, wet, still moving. */
 const BLOOD_WET = '#cf2230';
+
+/** Whichever of the two the body in hand is full of. See `RigDamage.oil`. */
+function leak(d: { oil: boolean }): readonly [string, string, string] {
+  return d.oil ? [OIL, OIL_DK, OIL_WET] : [BLOOD, BLOOD_DK, BLOOD_WET];
+}
 /** A bruise at full ripeness; mixed back toward the skin by how fresh it is. */
 const BRUISE = '#43214f';
 const SWEAT = '#a8cfe8';
@@ -360,6 +370,8 @@ interface Dmg {
   on: boolean;
   wear: number;
   blood: number;
+  /** True where the marks are hydraulic fluid rather than blood. */
+  oil: boolean;
   breath: number;
   seed: number;
   face: FaceState;
@@ -378,7 +390,7 @@ interface Dmg {
 }
 
 const NEUTRAL_DMG: Dmg = {
-  on: false, wear: 0, blood: 0, breath: 0, seed: 0, face: 'calm', hatless: false,
+  on: false, wear: 0, blood: 0, oil: false, breath: 0, seed: 0, face: 'calm', hatless: false,
   reduced: false, heave: 0, slump: 0, t: 0, t1: 0, t2: 0, t3: 0,
 };
 
@@ -432,6 +444,7 @@ function fillDamage(src: RigDamage | undefined, want: boolean | undefined): Dmg 
     DMG.on = false;
     DMG.wear = 0;
     DMG.blood = 0;
+    DMG.oil = false;
     DMG.breath = 0;
     DMG.seed = 0;
     DMG.face = 'calm';
@@ -452,6 +465,7 @@ function fillDamage(src: RigDamage | undefined, want: boolean | undefined): Dmg 
   DMG.on = true;
   DMG.wear = wear;
   DMG.blood = clamp(src.blood, 0, 1);
+  DMG.oil = src.oil === true;
   DMG.breath = breath;
   DMG.seed = seed;
   DMG.face = src.face;
@@ -1860,14 +1874,15 @@ function drawFaceBlood(r: Rig, rx: number, ry: number): void {
   const ctx = r.ctx;
   const u = r.u;
   const seed = d.seed;
-  const bl = col(BLOOD);
+  const [RAW, , WET] = leak(d);
+  const bl = col(RAW);
 
   // Nosebleed. Straight down the front of the beard, because gravity.
   const run = (1.8 + 5.5 * b) * u;
   const nx = rx * 0.74;
   const ny = ry * 0.26;
   capsule(ctx, nx, ny, nx - 0.35 * u + hashs(seed, 630) * 0.5 * u, ny + run, 0.55 * u, bl, NO);
-  ellipse(ctx, nx - 0.35 * u, ny + run, 0.62 * u, 0.72 * u, 0, col(BLOOD_WET), NO);
+  ellipse(ctx, nx - 0.35 * u, ny + run, 0.62 * u, 0.72 * u, 0, col(WET), NO);
   if (b > 0.4) {
     capsule(ctx, rx * 0.58, ry * 0.28, rx * 0.55, ry * 0.28 + run * 0.6, 0.3 * u, bl, NO);
   }
@@ -1876,7 +1891,7 @@ function drawFaceBlood(r: Rig, rx: number, ry: number): void {
   if (b > 0.15) {
     const lx = rx * 0.16;
     const ly = ry * 0.52;
-    capsule(ctx, lx - 0.6 * u, ly - 0.5 * u, lx + 0.5 * u, ly + 0.6 * u, 0.45 * u, col(BLOOD_WET), NO);
+    capsule(ctx, lx - 0.6 * u, ly - 0.5 * u, lx + 0.5 * u, ly + 0.6 * u, 0.45 * u, col(WET), NO);
     capsule(ctx, lx, ly + 0.4 * u, lx - 0.4 * u, ly + run * 0.75, 0.42 * u, bl, NO);
     ellipse(ctx, lx - 0.4 * u, ly + run * 0.75, 0.5 * u, 0.6 * u, 0, bl, NO);
   }
@@ -2398,7 +2413,7 @@ function drawGoreOver(r: Rig): void {
   const sr = hw * (0.34 + 0.8 * b);
   ellipse(
     ctx, soak.x + pp.x * hw * 0.22, soak.y + pp.y * hw * 0.22,
-    sr, sr * 1.2, 0, col(BLOOD_DK), NO,
+    sr, sr * 1.2, 0, col(leak(d)[1]), NO,
   );
   ctx.globalAlpha = prev;
 
@@ -2407,8 +2422,9 @@ function drawGoreOver(r: Rig): void {
   const hip = jp(r, 'legR_upper');
   const kn = jp(r, 'legR_lower');
   const n = Math.min(12, Math.round(b * 9 * (1 + d.wear * 0.35)));
-  const bl = col(BLOOD);
-  const dk = col(BLOOD_DK);
+  const [RAW, DARK] = leak(d);
+  const bl = col(RAW);
+  const dk = col(DARK);
 
   for (let i = 0; i < n; i++) {
     const where = hashf(seed, 730 + i);
@@ -2494,6 +2510,47 @@ function weaponShape(ctx: C2D, w: WeaponDef, u: number): void {
       if (art.spikes) {
         studs(ctx, L * 0.96, -T * 0.45, L * 0.34, -T * 0.45, art.segments ?? 4, T * 0.95, acc);
       }
+      break;
+    }
+    case 'blade': {
+      // Short, and read almost entirely by the taper: a straight spine with one
+      // ground edge, a stub crossguard and a wrapped handle. Anything longer
+      // than this stops being a knife and starts being a sword.
+      capsule(ctx, -T * 0.5, 0, L * 0.3, 0, T * 0.34, col(art.accent), ink(), ow);
+      roundRect(ctx, L * 0.28, -T * 0.46, T * 0.34, T * 0.92, T * 0.14, col('#5d5a66'), ink(), ow * 0.8);
+      poly(
+        ctx,
+        [L * 0.34, -T * 0.36, L, -T * 0.05, L, T * 0.08, L * 0.34, T * 0.34],
+        body, ink(), ow,
+      );
+      // The light along the ground edge, which is what makes it read as sharp.
+      poly(ctx, [L * 0.4, -T * 0.24, L * 0.94, -T * 0.03, L * 0.4, T * 0.02], acc, NO);
+      break;
+    }
+    case 'lasso': {
+      // A cable, not a chain: one continuous line that sags under its own
+      // weight and ends in the open loop it is thrown with. Drawn as a curve
+      // rather than as links so it reads as steel rope at fifty units.
+      const n = Math.max(6, art.segments ?? 12);
+      capsule(ctx, -T * 0.4, 0, L * 0.2, 0, T * 0.7, grip, ink(), ow);
+      ctx.beginPath();
+      ctx.moveTo(L * 0.2, 0);
+      for (let i = 1; i <= n; i++) {
+        const t = i / n;
+        // Slack in the middle, lifting again as it reaches the loop.
+        ctx.lineTo(L * (0.2 + t * 0.5), Math.sin(t * Math.PI) * T * 1.9);
+      }
+      ctx.strokeStyle = body;
+      ctx.lineWidth = T * 0.62;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+      ctx.strokeStyle = acc;
+      ctx.lineWidth = T * 0.2;
+      ctx.stroke();
+      // The loop on the end, tilted so it is an ellipse rather than a circle.
+      ellipse(ctx, L * 0.83, T * 0.5, L * 0.16, T * 1.5, 0.42, 'none', body, T * 0.5);
+      ellipse(ctx, L * 0.83, T * 0.5, L * 0.16, T * 1.5, 0.42, 'none', acc, T * 0.16);
+      if (art.spikes) star(ctx, L * 0.7, 0, T * 1.6, 6, acc, ink());
       break;
     }
     case 'flail': {

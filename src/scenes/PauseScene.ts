@@ -16,17 +16,16 @@
  * for free, and `MenuInput` walks focus for the latter.
  */
 
-import type { AudioBus, NetConfig, NetPlayer, Scene, SceneName, Settings } from '@/core/types';
-import { Btn } from '@/core/types';
+import type { NetConfig, NetPlayer, Scene, SceneName, Settings } from '@/core/types';
 
 import { DEFAULT_INPUT_DELAY, VIEW_H, VIEW_W } from '@/core/constants';
 import { clamp } from '@/core/math';
 import { saveSave } from '@/engine/Save';
-import { GamepadSource, connectedGamepads, pollGamepads } from '@/engine/input/GamepadSource';
-import { KeyboardSource, isCapturing, refreshOwnedKeys } from '@/engine/input/KeyboardSource';
+import { KeyboardSource, refreshOwnedKeys } from '@/engine/input/KeyboardSource';
 import { defaultBindingsFor } from '@/engine/input/Bindings';
 
 import { Ui, setReducedMotion } from '@/ui/Ui';
+import { MenuInput } from '@/ui/MenuInput';
 import { gamepadPanel, keyBindingEditor } from '@/ui/KeyBindingEditor';
 import { button, panel, slider, toggle } from '@/ui/Widgets';
 
@@ -119,202 +118,6 @@ export function overlayFor(host: SceneHost): Ui {
 export function quitToMenu(host: SceneHost): void {
   if (nav.goto(host, 'home')) return;
   if (typeof location !== 'undefined') location.reload();
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Menu input — keyboard fix-ups plus full gamepad control of a DOM view
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** Frames a held direction waits before it starts repeating on a gamepad. */
-const PAD_REPEAT = 11;
-
-export interface MenuInputHooks {
-  /** The mounted view, re-read each time because views get swapped. */
-  ui(): Ui | null;
-  audio: AudioBus;
-  /** B / Escape. */
-  onBack(): void;
-  /** Start / Pause. Defaults to onBack. */
-  onStart?(): void;
-}
-
-/**
- * Makes a DOM menu behave like a console menu.
- *
- * Two jobs. First, the gameplay keyboard handler suppresses Space's default
- * action (it is the jump button), which would otherwise stop Space activating a
- * focused button — so we listen in the capture phase and do it ourselves.
- * Second, it walks focus, nudges sliders and flips switches from a gamepad.
- */
-export class MenuInput {
-  private readonly hooks: MenuInputHooks;
-  private readonly pads = new Map<number, GamepadSource>();
-  private prev = 0;
-  private hold = 0;
-  private attached = false;
-
-  constructor(hooks: MenuInputHooks) {
-    this.hooks = hooks;
-  }
-
-  attach(): void {
-    if (this.attached || typeof window === 'undefined') return;
-    this.attached = true;
-    window.addEventListener('keydown', this.onKey, true);
-  }
-
-  detach(): void {
-    if (this.attached && typeof window !== 'undefined') {
-      window.removeEventListener('keydown', this.onKey, true);
-    }
-    this.attached = false;
-    for (const src of this.pads.values()) src.dispose();
-    this.pads.clear();
-    this.prev = 0;
-    this.hold = 0;
-  }
-
-  /** Call once per frame while the menu is up. */
-  poll(): void {
-    pollGamepads();
-    let mask = 0;
-    for (const index of connectedGamepads()) {
-      let src = this.pads.get(index);
-      if (!src) {
-        src = new GamepadSource(index);
-        this.pads.set(index, src);
-      }
-      mask |= src.sample(0);
-    }
-
-    const dirs = Btn.Up | Btn.Down | Btn.Left | Btn.Right;
-    const pressed = mask & ~this.prev;
-
-    let repeat = 0;
-    if (mask & dirs) {
-      if (this.hold > 0) this.hold--;
-      else {
-        repeat = mask & dirs;
-        this.hold = PAD_REPEAT;
-      }
-    } else {
-      this.hold = 0;
-    }
-    // A fresh press always fires; a direction that is merely held fires on the
-    // repeat tick, which is what stops a menu scrolling past at 60Hz.
-    const move = (pressed & dirs) | (repeat & this.prev & dirs);
-    this.prev = mask;
-
-    // The binding editor is waiting for a key. Everything is still sampled so a
-    // button held across the wait does not read as a fresh press afterwards,
-    // but nothing acts on it: walking focus now would move the menu out from
-    // under the row being rebound.
-    if (isCapturing()) return;
-
-    if (move & Btn.Up) this.moveFocus(-1);
-    else if (move & Btn.Down) this.moveFocus(1);
-    else if (move & Btn.Left) this.adjust(-1);
-    else if (move & Btn.Right) this.adjust(1);
-
-    if (pressed & (Btn.Light | Btn.Jump)) this.activate();
-    else if (pressed & (Btn.Heavy | Btn.Grab)) this.hooks.onBack();
-    else if (pressed & Btn.Pause) (this.hooks.onStart ?? this.hooks.onBack)();
-  }
-
-  /** Also exposed so a Game that routes DOM keys can call it directly. */
-  readonly onKey = (e: KeyboardEvent): void => {
-    if (!this.attached) return;
-    // This handler is registered before the binding editor's own, so it would
-    // otherwise get first refusal on the very keypress the editor is waiting
-    // for: Escape would close the page instead of cancelling the capture, and
-    // Space would re-click the button rather than becoming the new Jump key.
-    if (isCapturing()) return;
-    if (e.altKey || e.ctrlKey || e.metaKey) return;
-
-    if (e.code === 'Escape') {
-      e.preventDefault();
-      e.stopPropagation();
-      this.hooks.onBack();
-      return;
-    }
-
-    const view = this.hooks.ui()?.current ?? null;
-    const active = document.activeElement;
-    const inView = view !== null && active instanceof HTMLElement && view.contains(active);
-
-    if (e.code === 'Space' && inView && active instanceof HTMLButtonElement) {
-      e.preventDefault();
-      e.stopPropagation();
-      active.click();
-      return;
-    }
-
-    if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
-      // Sliders own the arrow keys; everything else walks the menu with them.
-      if (active instanceof HTMLInputElement && active.type === 'range') return;
-      e.preventDefault();
-      e.stopPropagation();
-      this.moveFocus(e.code === 'ArrowUp' ? -1 : 1);
-    }
-  };
-
-  private focusables(): HTMLElement[] {
-    const view = this.hooks.ui()?.current;
-    if (!view) return [];
-    const sel =
-      'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
-    return Array.from(view.querySelectorAll<HTMLElement>(sel)).filter(
-      (el) => el.offsetParent !== null || el.getClientRects().length > 0,
-    );
-  }
-
-  private moveFocus(dir: number): void {
-    const items = this.focusables();
-    if (items.length === 0) return;
-    const active = document.activeElement;
-    let i = active instanceof HTMLElement ? items.indexOf(active) : -1;
-    if (i < 0) i = dir > 0 ? -1 : 0;
-    const next = items[(i + dir + items.length) % items.length];
-    if (!next) return;
-    next.focus();
-    this.hooks.audio.play('ui_move', { gain: 0.5 });
-  }
-
-  private activate(): void {
-    const active = document.activeElement;
-    if (active instanceof HTMLButtonElement) {
-      active.click();
-      return;
-    }
-    if (active instanceof HTMLInputElement && active.type === 'checkbox') {
-      active.checked = !active.checked;
-      active.dispatchEvent(new Event('change', { bubbles: true }));
-      this.hooks.audio.play('ui_select');
-    }
-  }
-
-  private adjust(dir: number): void {
-    const active = document.activeElement;
-    if (!(active instanceof HTMLInputElement)) return;
-
-    if (active.type === 'range') {
-      const min = Number(active.min);
-      const max = Number(active.max);
-      const step = Number(active.step) || 0.05;
-      active.value = String(clamp(Number(active.value) + step * dir, min, max));
-      active.dispatchEvent(new Event('input', { bubbles: true }));
-      this.hooks.audio.play('ui_move', { gain: 0.4 });
-      return;
-    }
-
-    if (active.type === 'checkbox') {
-      const want = dir > 0;
-      if (active.checked === want) return;
-      active.checked = want;
-      active.dispatchEvent(new Event('change', { bubbles: true }));
-      this.hooks.audio.play('ui_select');
-    }
-  }
 }
 
 // ── DOM helpers, shared with the results screens ─────────────────────────────

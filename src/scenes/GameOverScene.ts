@@ -19,10 +19,10 @@ import { poly } from '@/render/Shapes';
 
 import { button, panel } from '@/ui/Widgets';
 import type { Ui } from '@/ui/Ui';
+import { MenuInput } from '@/ui/MenuInput';
 
 import type { FightResult, SceneHost } from '@/scenes/FightScene';
 import {
-  MenuInput,
   div,
   narrow,
   nav,

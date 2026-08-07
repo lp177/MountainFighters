@@ -522,7 +522,13 @@ export class EnemyAI implements InputSource {
 
     if (this.plan === 'ranged') {
       if (adx < RANGED_MIN * 0.55 || adx > RANGED_MAX) return 0;
-      this.startPress(Btn.Special, PRESS_FRAMES, 26 + this.rng.int(0, 22));
+      // Aim before firing. A fighter only turns on a frame it is given a
+      // direction, so a shooter that has spent the last second backing away
+      // keeps whatever way the retreat left it pointing and puts the whole
+      // magazine into the empty half of the screen. Holding the direction
+      // toward the target on the trigger frame is how a human would do it.
+      const toward = dx > 0 ? Btn.Right : Btn.Left;
+      this.startPress(Btn.Special | toward, PRESS_FRAMES, 26 + this.rng.int(0, 22));
       return this.atkBtn;
     }
 

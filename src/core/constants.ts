@@ -98,7 +98,7 @@ export const WALL_BOUNCE = 0.45;
 /** Extra hitstop applied on the final blow of a fight, for the KO slam. */
 export const KO_HITSTOP = 26;
 export const KO_SLOWMO_SCALE = 0.22;
-export const KO_SLOWMO_FRAMES = 90;
+export const KO_SLOWMO_FRAMES = 36;
 /** Global multiplier applied to every shake, scaled again by user settings. */
 export const SHAKE_SCALE = 1.0;
 export const SHAKE_DECAY = 0.86;

@@ -27,6 +27,7 @@ import type { NotePage, StoryShot, StoryShotId } from '@/content/story';
 import type { AnimClip, Pose, RigStyle, Scene, SfxCue } from '@/core/types';
 import type { SceneHost } from '@/scenes/FightScene';
 
+import { Btn } from '@/core/types';
 import { GROUND_Y, VIEW_H, VIEW_W } from '@/core/constants';
 import { TAU, clamp, easeIn, easeInOut, easeOut, easeOutBack, lerp } from '@/core/math';
 
@@ -119,6 +120,8 @@ const FADE_OUT = 24;
 const SKIP_LOCK = 24;
 const HINT_AT = 132;
 const HINT_FADE = 40;
+/** Off the note, anything at all ends the film, on either kind of hardware. */
+const HINT_ANY = 'ANY KEY OR BUTTON TO SKIP';
 
 // ── The note ────────────────────────────────────────────────────────────────
 //
@@ -318,11 +321,15 @@ export class CutsceneScene implements Scene {
 
   // Input. Every source — DOM key, pointer, bound button, pad — folds into one
   // edge-triggered request per frame, so a key that is both a DOM event and a
-  // bound action cannot turn two pages at once.
+  // bound action cannot turn two pages at once. The one thing kept out of that
+  // fold is the way out: ESCAPE on the keyboard, Start on a pad.
   private pressReq = false;
+  private skipReq = false;
   private pads: GamepadSource[] = [];
   private padPrev = 0;
   private padScan = 0;
+  /** The note's skip hint, rebuilt whenever the set of pads changes. */
+  private noteHint = 'ESC TO SKIP';
 
   constructor(host: SceneHost, opts?: CutsceneOpts) {
     this.host = host;
@@ -348,6 +355,7 @@ export class CutsceneScene implements Scene {
     this.abr = 0;
     this.flashA = 0;
     this.pressReq = false;
+    this.skipReq = false;
     this.padPrev = 0;
     this.particles.clear();
 
@@ -2390,10 +2398,7 @@ export class CutsceneScene implements Scene {
         setFont(ctx, 7, 700, false);
         ctx.textAlign = 'right';
         ctx.fillStyle = FAINT;
-        ctx.fillText(
-          this.noteLive() ? 'ESC TO SKIP' : 'PRESS ANY KEY TO SKIP',
-          VIEW_W - 16, VIEW_H - 11,
-        );
+        ctx.fillText(this.noteLive() ? this.noteHint : HINT_ANY, VIEW_W - 16, VIEW_H - 11);
         ctx.textAlign = 'left';
         ctx.globalAlpha = 1;
       }
@@ -2432,6 +2437,25 @@ export class CutsceneScene implements Scene {
     // Sampled directly, never attached: a cutscene has no business rearranging
     // the input slots the player is about to fight with.
     for (const idx of live) this.pads.push(new GamepadSource(idx));
+    this.buildNoteHint();
+  }
+
+  /**
+   * Names the way off the note for whatever hardware is in the room, and names
+   * it by what is printed on that hardware: Start on an Xbox, Options on a
+   * DualSense, + on a Switch pro. Telling somebody holding a pad to press ESC
+   * is the same lie as telling them nothing. Built here rather than in the
+   * draw path, which never concatenates a string.
+   */
+  private buildNoteHint(): void {
+    for (const p of this.pads) {
+      const start = p.profile()?.labels.start;
+      if (start) {
+        this.noteHint = `ESC / ${start.toUpperCase()} TO SKIP`;
+        return;
+      }
+    }
+    this.noteHint = 'ESC TO SKIP';
   }
 
   /**
@@ -2439,15 +2463,17 @@ export class CutsceneScene implements Scene {
    * are edge-triggered at source — `pressed` is derived against last frame's
    * mask, and the pad is diffed against its own previous mask — so a button
    * that is merely being held never reaches the page turner.
+   *
+   * Pause comes out of the fold and lands on its own request. It is the same
+   * bit ESCAPE binds to, and it is the pad's only route past the note: rolled
+   * in with everything else it would just turn a page like every other button,
+   * and the player would have to press through all six of them to get to a way
+   * out that a keyboard has from the first frame.
    */
   private pollPads(): void {
     const input = this.host.input;
-    for (const slot of input.slots) {
-      if (input.get(slot).pressed !== 0) {
-        this.pressReq = true;
-        break;
-      }
-    }
+    let fresh = 0;
+    for (const slot of input.slots) fresh |= input.get(slot).pressed;
 
     if (++this.padScan >= 15) {
       this.padScan = 0;
@@ -2455,13 +2481,17 @@ export class CutsceneScene implements Scene {
     }
     let mask = 0;
     for (const p of this.pads) mask |= p.sample(this.frame);
-    if ((mask & ~this.padPrev) !== 0) this.pressReq = true;
+    fresh |= mask & ~this.padPrev;
     this.padPrev = mask;
+
+    if ((fresh & Btn.Pause) !== 0) this.skipReq = true;
+    if ((fresh & ~Btn.Pause) !== 0) this.pressReq = true;
   }
 
   /**
    * One press, consumed once, meaning whatever the shot on screen says it
-   * means. Note: advance. Anything else: leave.
+   * means. Note: advance. Anything else: leave. A pause request means leave
+   * wherever it arrives, which is what makes the note escapable from a pad.
    *
    * The lockout is deliberately applied twice — once against the start of the
    * cinematic, so the keypress that launched it cannot end it, and once
@@ -2471,8 +2501,19 @@ export class CutsceneScene implements Scene {
   private handleInput(): void {
     this.pollPads();
     const press = this.pressReq;
+    const out = this.skipReq;
     this.pressReq = false;
-    if (!press || this.done || this.frame < SKIP_LOCK) return;
+    this.skipReq = false;
+    if (this.done || this.frame < SKIP_LOCK) return;
+
+    // The one request that reaches skip() while the note is up. On a cinematic
+    // there is no way out of, pause is just another button, and turning a page
+    // with it beats swallowing the press.
+    if (out && this.skippable) {
+      this.skip();
+      return;
+    }
+    if (!press && !out) return;
 
     if (this.noteLive()) {
       // Page turning is not a skip and does not ask permission from

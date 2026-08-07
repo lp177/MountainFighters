@@ -24,6 +24,7 @@ import { isCapturing } from '@/engine/input/KeyboardSource';
 
 import type { Ui } from '@/ui/Ui';
 import { cancelActiveCapture } from '@/ui/KeyBindingEditor';
+import { TOAST_ID } from '@/pwa/UpdatePrompt';
 
 /**
  * Frames a held direction waits before it starts repeating, and the gap between
@@ -242,13 +243,21 @@ export class MenuInput {
   };
 
   private focusables(): HTMLElement[] {
-    const view = this.hooks.ui()?.current;
-    if (!view) return [];
     const sel =
       'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
-    return Array.from(view.querySelectorAll<HTMLElement>(sel)).filter(
-      (el) => el.offsetParent !== null || el.getClientRects().length > 0,
-    );
+    const out: HTMLElement[] = [];
+    // The mounted view, plus any transient layer that lives outside it. The
+    // update toast is appended to <body> so scenes cannot clear it away, which
+    // also put it outside the focus ring — a controller could see the Reload
+    // button and had no way to press it.
+    const roots = [this.hooks.ui()?.current ?? null, document.getElementById(TOAST_ID)];
+    for (const root of roots) {
+      if (!root) continue;
+      for (const el of Array.from(root.querySelectorAll<HTMLElement>(sel))) {
+        if (el.offsetParent !== null || el.getClientRects().length > 0) out.push(el);
+      }
+    }
+    return out;
   }
 
   private moveFocus(dir: number): void {

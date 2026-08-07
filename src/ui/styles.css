@@ -1274,6 +1274,29 @@ html.reduced-motion .btn__spinner {
   justify-content: flex-end;
 }
 
+/* Narrow or short: full width along the bottom edge, buttons inline, so it
+ * never covers the letterboxed stage or the pause control. */
+@media (max-width: 520px), (max-height: 460px) {
+  .sw-toast {
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    border-radius: 0;
+    border-left: 0;
+    border-top: 3px solid var(--accent-2);
+    padding: 10px 12px;
+  }
+
+  .sw-toast__text span {
+    display: none;
+  }
+}
+
 html.reduced-motion .sw-toast {
   transition: none;
 }

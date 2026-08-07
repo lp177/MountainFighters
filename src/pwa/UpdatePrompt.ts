@@ -14,7 +14,26 @@
 
 import { attachRipple } from '@/ui/Widgets';
 
-const LAYER_ID = 'sw-toast';
+export const TOAST_ID = 'sw-toast';
+const LAYER_ID = TOAST_ID;
+
+/**
+ * Space and Enter, by hand.
+ *
+ * The game owns Space — it is Jump, and KeyboardSource preventDefaults every
+ * bound key on window — so a focused button in this toast never receives the
+ * browser's own activation. MenuInput hands Space back inside the mounted view;
+ * the toast lives outside it, so it does the same thing for itself.
+ */
+function activateOnKey(btn: HTMLButtonElement): void {
+  btn.addEventListener('keydown', (e) => {
+    if (e.repeat || e.altKey || e.ctrlKey || e.metaKey) return;
+    if (e.key !== ' ' && e.key !== 'Spacebar' && e.key !== 'Enter') return;
+    e.preventDefault();
+    e.stopPropagation();
+    btn.click();
+  });
+}
 
 let host: HTMLElement | null = null;
 
@@ -49,6 +68,7 @@ export function showUpdatePrompt(onApply: () => void): void {
   later.className = 'btn btn--text';
   later.textContent = 'Later';
   later.addEventListener('click', dismiss);
+  activateOnKey(later);
   attachRipple(later);
 
   const reload = document.createElement('button');
@@ -60,17 +80,16 @@ export function showUpdatePrompt(onApply: () => void): void {
     reload.textContent = 'Reloading…';
     onApply();
   });
+  activateOnKey(reload);
   attachRipple(reload);
 
   row.append(later, reload);
   box.append(text, row);
 
-  box.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      e.stopPropagation();
-      dismiss();
-    }
-  });
+  // Capture, on window, because MenuInput also listens on window in the capture
+  // phase and would otherwise back the whole menu out from under a player who
+  // only meant to dismiss the toast. Only while focus is actually inside it.
+  window.addEventListener('keydown', onEscape, true);
 
   document.body.appendChild(box);
   host = box;
@@ -79,10 +98,22 @@ export function showUpdatePrompt(onApply: () => void): void {
   requestAnimationFrame(() => box.classList.add('is-in'));
 }
 
+const onEscape = (e: KeyboardEvent): void => {
+  if (e.key !== 'Escape') return;
+  const box = host;
+  if (!box) return;
+  const active = document.activeElement;
+  if (!(active instanceof Node) || !box.contains(active)) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  dismiss();
+};
+
 function dismiss(): void {
   const box = host;
   if (!box) return;
   host = null;
+  window.removeEventListener('keydown', onEscape, true);
   box.classList.remove('is-in');
   // Leaves on the same curve it arrived on, and is gone either way — a toast
   // that outlives a cancelled transition is a toast that never leaves.

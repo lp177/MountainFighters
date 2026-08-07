@@ -41,7 +41,8 @@ export interface SwOptions {
 }
 
 let lastCheck = 0;
-let reloading = false;
+/** The very first claim of an uncontrolled page is not an update to reload for. */
+let firstInstall = false;
 
 /**
  * Start the worker. Safe to call unconditionally: it does nothing in dev, on a
@@ -63,6 +64,7 @@ async function start(opts: SwOptions): Promise<void> {
   try {
     // Relative, so the scope follows the base path: the same bundle registers
     // at /MountainFighters/ on Pages and at / on a local preview.
+    firstInstall = navigator.serviceWorker.controller === null;
     reg = await navigator.serviceWorker.register('./sw.js', { scope: './' });
   } catch (err) {
     // A failed registration must never take the game down with it. The player
@@ -72,28 +74,33 @@ async function start(opts: SwOptions): Promise<void> {
   }
 
   // Already parked from a previous visit the player did not act on.
-  if (reg.waiting && navigator.serviceWorker.controller) announce(reg, opts);
+  //
+  // Decided by the registration, NOT by `navigator.serviceWorker.controller`.
+  // On a hard reload the page is deliberately uncontrolled, so a controller
+  // test suppresses the prompt on exactly the load where somebody is trying to
+  // force their way past a stale build. A worker that is `waiting` while
+  // another is `active` is an update by definition.
+  if (reg.waiting && reg.active) announce(reg, opts);
+  // Registration resolves after `installing` may already have been set, and the
+  // updatefound below would then never fire for it.
+  if (reg.installing) watch(reg, reg.installing, opts);
 
   reg.addEventListener('updatefound', () => {
-    const next = reg.installing;
-    if (!next) return;
-    next.addEventListener('statechange', () => {
-      if (next.state !== 'installed') return;
-      if (navigator.serviceWorker.controller) {
-        // There was a controller before this one, so this is an UPDATE rather
-        // than a first install. Only then is there anything to announce.
-        announce(reg, opts);
-      } else {
-        opts.onOfflineReady?.();
-      }
-    });
+    if (reg.installing) watch(reg, reg.installing, opts);
   });
 
   // The worker calls skipWaiting when the player accepts; the browser then
   // swaps controller under us, and that is the cue to reload into the new one.
+  //
+  // Every controlled tab reloads, not only the one that clicked. The others are
+  // running the old build's JS against the new build's worker, which is the
+  // same mismatch this whole design exists to prevent — and `firstInstall`
+  // keeps the very first claim from bouncing a page nobody asked to reload.
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (!reloading) return;
-    reloading = false;
+    if (firstInstall) {
+      firstInstall = false;
+      return;
+    }
     location.reload();
   });
 
@@ -111,6 +118,26 @@ async function start(opts: SwOptions): Promise<void> {
   });
   window.addEventListener('online', check);
   window.setInterval(check, CHECK_EVERY_MS);
+
+  // And once now. Wiring the listeners is not the same as asking, and the
+  // commonest case by far is a player who opens the game, plays, and closes it
+  // without ever switching tabs.
+  check();
+}
+
+/**
+ * Watch a worker through to `installed`. Reaching that state while another
+ * worker is already `active` is what makes it an update rather than a first
+ * install — and it is the moment the new build is fully downloaded.
+ */
+function watch(reg: ServiceWorkerRegistration, sw: ServiceWorker, opts: SwOptions): void {
+  const settled = (): void => {
+    if (sw.state !== 'installed') return;
+    if (reg.active && reg.active !== sw) announce(reg, opts);
+    else opts.onOfflineReady?.();
+  };
+  sw.addEventListener('statechange', settled);
+  settled();
 }
 
 function announce(reg: ServiceWorkerRegistration, opts: SwOptions): void {
@@ -118,16 +145,10 @@ function announce(reg: ServiceWorkerRegistration, opts: SwOptions): void {
   if (!waiting) return;
   opts.onUpdateReady({
     apply(): void {
-      reloading = true;
       waiting.postMessage({ type: 'SKIP_WAITING' });
       // If the swap does not happen — a worker that failed to activate, a
       // browser being strange — reload anyway rather than leave a dead button.
-      window.setTimeout(() => {
-        if (reloading) {
-          reloading = false;
-          location.reload();
-        }
-      }, 3000);
+      window.setTimeout(() => location.reload(), 3000);
     },
   });
 }

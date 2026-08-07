@@ -1,74 +1,107 @@
 /*
  * Mountain Fighters — service worker.
  *
- * Not built by Vite: the two placeholder constants below are substituted by the
+ * Not built by Vite: the placeholder constants below are substituted by the
  * plugin in vite.config.ts, which is the only thing that knows the hashed file
  * names. It runs in ServiceWorkerGlobalScope, so nothing here may import from
  * the app — a service worker that drags the game into its own scope is a
  * service worker that reinstalls itself every time the game changes.
  *
- * ── The strategy, and why ──────────────────────────────────────────────────
+ * ── The strategy ───────────────────────────────────────────────────────────
  *
- * The game is a single static bundle with no server behind it. Once it is on
- * the machine there is no reason to ask the network for it again, so:
+ * The game is a static bundle with no server behind it, and the precache is
+ * COMPLETE: every file the game will ever ask for is in the cache before this
+ * worker is allowed to control anything. That is the load-bearing fact, and
+ * everything else follows from it.
  *
- *   hashed assets   cache-first, forever. The hash IS the version; a file that
- *                   is in the cache under that name can never be stale.
- *   navigations     cache-first with a network fallback. This is what makes it
- *                   start instantly and work on a train.
- *   everything else stale-while-revalidate: served from cache at once, and
- *                   quietly refreshed for next time.
+ *   navigations     answered from the precached shell. Never re-fetched, never
+ *                   re-stored, never written to at runtime.
+ *   hashed assets   answered from the precache. The hash IS the version.
+ *   anything else   passed straight through to the network, uncached.
  *
- * Cache-first everywhere would normally mean never seeing a new version. It
- * does not here, because the browser re-fetches THIS FILE on every navigation
- * and whenever the page asks for an update — and this file's contents change
- * whenever the shipped bytes do. So the update channel is the worker itself,
- * not any cached response. When a new one installs it waits, tells the page,
- * and the page offers the player a reload. Nobody is interrupted mid-fight.
+ * ── Why nothing is written at runtime ──────────────────────────────────────
  *
- * Cross-origin is never touched. The PeerJS broker and the TURN credential
- * endpoint must reach the network every time, and a stale ICE grant is worse
- * than no ICE grant.
+ * An earlier version refreshed the shell in the background "so the copy on disk
+ * stays current". It refreshed it INTO THE RUNNING BUILD'S CACHE, so after a
+ * deploy that cache held the new index.html next to the old hashed assets — an
+ * incoherent pair. The next offline load asked for chunks that were in no cache
+ * on the machine and rendered a blank page, permanently, with no way back on
+ * GitHub Pages. Three independent reviewers reproduced it.
+ *
+ * There was never anything to gain: a cache is per-build and its shell is only
+ * valid alongside its own assets. New shells arrive the only way they can, with
+ * a new worker.
+ *
+ * ── How anyone sees a new version ──────────────────────────────────────────
+ *
+ * The browser re-fetches THIS FILE on navigation and whenever the page asks,
+ * and its contents change exactly when the shipped bytes do. A new worker
+ * installs into its OWN cache, waits, and the page offers the player a reload.
+ * It never calls skipWaiting itself: activating under a running fight would
+ * swap the bundle beneath it.
+ *
+ * ── The rules this file must never break ───────────────────────────────────
+ *
+ * 1. Install is all-or-nothing. A partial precache must FAIL, so the previous
+ *    worker keeps serving a complete one. A half-cached build that reaches
+ *    `waiting` is a blank page dressed up as an upgrade.
+ * 2. No handler may reject. `respondWith` on a rejected promise is a network
+ *    error for the document — strictly worse than having no worker at all — so
+ *    every path degrades to the network and then to a legible response.
+ * 3. Cross-origin is never touched. The PeerJS broker and the TURN credential
+ *    endpoint must reach the network every time, and a stale ICE grant is worse
+ *    than no ICE grant.
  */
 
-const BUILD = '09993ae40c8b';
-const CACHE = `mountainfighters-${BUILD}`;
+const BUILD = '21c86c2ea269';
+/** Namespaced by scope: two copies of the game on one origin must not reap each other's caches. */
+const PREFIX = `mountainfighters:${new URL(self.registration.scope).pathname}:`;
+const CACHE = `${PREFIX}${BUILD}`;
+
 const PRECACHE = [
   "./",
-  "./index.html",
-  "./manifest.webmanifest",
-  "./icon.svg",
+  "./assets/index-DLaSBNs_.js",
+  "./assets/index-le1Xzab-.css",
+  "./assets/peer-BsvW7Dtp.js",
   "./icon-maskable.svg",
-  "./assets/index-CUal59Xy.js",
-  "./assets/index-D0rStDz_.css",
-  "./assets/peer-BsvW7Dtp.js"
+  "./icon.svg",
+  "./index.html",
+  "./manifest.webmanifest"
 ];
+/** Content-hashed output, named by the build rather than guessed from the shape of a filename. */
+const IMMUTABLE = new Set([
+  "./assets/index-DLaSBNs_.js",
+  "./assets/index-le1Xzab-.css",
+  "./assets/peer-BsvW7Dtp.js"
+]);
 
-/** Hashed build output. Immutable by construction — the name contains the hash. */
-function isImmutable(url) {
-  return /\/assets\/[^/]+-[A-Za-z0-9_-]{8,}\.[a-z0-9]+$/.test(url.pathname);
+/** Absolute URL for a scope-relative precache path, which is how entries are keyed. */
+function scoped(path) {
+  return new URL(path, self.registration.scope).href;
 }
+
+const PRECACHE_URLS = new Set(PRECACHE.map(scoped));
+const IMMUTABLE_URLS = new Set([...IMMUTABLE].map(scoped));
+const SHELL = scoped('./index.html');
+const ROOT = scoped('./');
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
     (async () => {
       const cache = await caches.open(CACHE);
-      // Individually, so one 404 does not throw away the whole install. A
-      // missing file will simply be fetched on demand later.
-      await Promise.all(
-        PRECACHE.map(async (path) => {
-          try {
-            const url = new URL(path, self.registration.scope);
-            const res = await fetch(url, { cache: 'reload' });
-            if (res.ok) await cache.put(url, res);
-          } catch {
-            /* offline during install; the runtime handlers will cope */
-          }
-        }),
-      );
-      // Deliberately NOT skipWaiting() here. A new worker waits until the
-      // player says so, because activating under a running fight would swap the
-      // bundle beneath it.
+      // All of it, or none of it. addAll rejects the whole install if any one
+      // request fails, which is exactly what we want: the worker never reaches
+      // `waiting`, the player is never told a broken build is "already
+      // downloaded", and the previous complete cache keeps serving.
+      //
+      // `reload` for the two unhashed entries only. The hashed assets were just
+      // pulled by the page and sitting in the HTTP cache; forcing those past it
+      // doubles the download of the entire game on first visit.
+      const fresh = [ROOT, SHELL];
+      await Promise.all([
+        cache.addAll(fresh.map((url) => new Request(url, { cache: 'reload' }))),
+        cache.addAll(PRECACHE.map(scoped).filter((url) => !fresh.includes(url))),
+      ]);
     })(),
   );
 });
@@ -76,15 +109,31 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     (async () => {
-      const names = await caches.keys();
-      await Promise.all(
-        names
-          .filter((n) => n.startsWith('mountainfighters-') && n !== CACHE)
-          .map((n) => caches.delete(n)),
-      );
-      // Navigation preload would race the cache-first path for no gain.
+      // Only reap once this build's cache is provably complete. If it is not,
+      // leave every generation alone: a stale cache beats no cache.
+      let complete = false;
+      try {
+        const cache = await caches.open(CACHE);
+        const held = new Set((await cache.keys()).map((r) => r.url));
+        complete = [...PRECACHE_URLS].every((url) => held.has(url));
+      } catch {
+        complete = false;
+      }
+
+      if (complete) {
+        const names = await caches.keys();
+        await Promise.all(
+          names.filter((n) => n.startsWith(PREFIX) && n !== CACHE).map((n) => caches.delete(n)),
+        );
+      }
+
+      // Navigation preload would race a cache hit for no gain.
       if (self.registration.navigationPreload) {
-        await self.registration.navigationPreload.disable();
+        try {
+          await self.registration.navigationPreload.disable();
+        } catch {
+          /* not supported here; nothing to disable */
+        }
       }
       await self.clients.claim();
     })(),
@@ -106,74 +155,75 @@ self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET') return;
 
-  const url = new URL(req.url);
+  let url;
+  try {
+    url = new URL(req.url);
+  } catch {
+    return;
+  }
   // Someone else's server. The broker and the TURN grant both live out there
   // and both must be asked fresh, every time.
   if (url.origin !== self.location.origin) return;
 
   if (req.mode === 'navigate') {
-    event.respondWith(navigateFirst(req));
+    event.respondWith(serveShell(req));
     return;
   }
-  if (isImmutable(url)) {
-    event.respondWith(cacheFirst(req));
-    return;
+
+  // Only what we precached is ours to answer. Everything else — a same-origin
+  // fetch the game makes at runtime, a file added to the server later — goes to
+  // the network untouched, so it can still honour its own cache directives.
+  const key = url.origin + url.pathname;
+  if (IMMUTABLE_URLS.has(key) || PRECACHE_URLS.has(key)) {
+    event.respondWith(fromCache(req, key));
   }
-  event.respondWith(staleWhileRevalidate(req));
 });
 
 /**
- * A navigation is answered from the cache when we have it, so the game opens
- * at the speed of a local file and opens at all on a dead connection. The
- * network is still asked, in the background, so the copy on disk stays current
- * for the visit after this one.
+ * Navigations are answered from the precached shell, with the query string
+ * ignored — an invite link carries `?room=<id>`, and caching one shell per room
+ * would grow the cache forever for no benefit. Nothing is written back.
  */
-async function navigateFirst(req) {
-  const cache = await caches.open(CACHE);
-  const cached = (await cache.match(req)) ?? (await cache.match('./')) ?? (await cache.match('./index.html'));
-  if (cached) {
-    void refresh(cache, req);
-    return cached;
-  }
+async function serveShell(req) {
   try {
-    const res = await fetch(req);
-    if (res.ok) await cache.put(req, res.clone());
-    return res;
+    const cache = await caches.open(CACHE);
+    const hit =
+      (await cache.match(SHELL)) ??
+      (await cache.match(ROOT)) ??
+      (await cache.match(req, { ignoreSearch: true }));
+    if (hit) return hit;
   } catch {
-    const shell = await cache.match('./index.html');
-    if (shell) return shell;
-    return new Response('Mountain Fighters is offline and was never cached.', {
+    /* storage is unavailable; the network is still worth a try */
+  }
+  return networkOr(
+    req,
+    'Mountain Fighters is offline, and this build was never finished downloading.',
+  );
+}
+
+async function fromCache(req, key) {
+  try {
+    const cache = await caches.open(CACHE);
+    const hit = (await cache.match(key)) ?? (await cache.match(req));
+    if (hit) return hit;
+  } catch {
+    /* fall through to the network */
+  }
+  return networkOr(req, 'Mountain Fighters could not load part of itself.');
+}
+
+/**
+ * The last line of rule 2: this never throws. A worker that lets a rejection
+ * reach respondWith turns a working site into a browser error page, and the
+ * player has no way to unregister it.
+ */
+async function networkOr(req, message) {
+  try {
+    return await fetch(req);
+  } catch {
+    return new Response(message, {
       status: 503,
-      headers: { 'Content-Type': 'text/plain' },
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
     });
-  }
-}
-
-async function cacheFirst(req) {
-  const cache = await caches.open(CACHE);
-  const cached = await cache.match(req);
-  if (cached) return cached;
-  const res = await fetch(req);
-  if (res.ok) await cache.put(req, res.clone());
-  return res;
-}
-
-async function staleWhileRevalidate(req) {
-  const cache = await caches.open(CACHE);
-  const cached = await cache.match(req);
-  const network = refresh(cache, req);
-  if (cached) return cached;
-  const res = await network;
-  if (res) return res;
-  return new Response('', { status: 504 });
-}
-
-async function refresh(cache, req) {
-  try {
-    const res = await fetch(req);
-    if (res.ok) await cache.put(req, res.clone());
-    return res;
-  } catch {
-    return null;
   }
 }

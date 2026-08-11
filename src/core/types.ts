@@ -961,18 +961,26 @@ export type NetMessage =
    */
   | { t: 'cue'; slot: number; busy: boolean }
   | { t: 'stage'; mapIndex: number }
-  | { t: 'start'; mapIndex: number; seed: number; startFrame: number }
+  | {
+      t: 'start';
+      mapIndex: number;
+      seed: number;
+      startFrame: number;
+      inputDelay: number;
+      /** Distinguishes frame zero in this fight from frame zero in an earlier fight. */
+      epoch: number;
+    }
   /** Input for a range of frames; batched to cut packet count. */
-  | { t: 'in'; slot: number; from: number; inputs: number[] }
+  | { t: 'in'; epoch: number; slot: number; from: number; inputs: number[] }
   /** Periodic state checksum so desyncs are detected loudly, not silently. */
-  | { t: 'sync'; frame: number; checksum: number }
+  | { t: 'sync'; epoch: number; frame: number; checksum: number }
   | { t: 'pause'; paused: boolean; by: number }
   | { t: 'bye'; slot: number }
   | { t: 'ping'; ts: number }
   | { t: 'pong'; ts: number };
 
 export interface NetConfig {
-  /** Frames of input delay. Higher = more lag but fewer stalls. */
+  /** Minimum frames of input delay. Online play raises this from measured RTT/jitter. */
   inputDelay: number;
   /** PeerJS broker. Defaults to the public cloud broker. */
   host?: string;

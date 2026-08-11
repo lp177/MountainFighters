@@ -16,7 +16,7 @@
 
 import type { NetMessage, NetPlayer, Scene } from '@/core/types';
 import type { Game } from '@/Game';
-import type { NetSession } from '@/net/NetSession';
+import type { NetSession, NetTransportInfo } from '@/net/NetSession';
 import type { SelectParams } from '@/scenes/SelectScene';
 import type { HomeParams } from '@/scenes/HomeScene';
 
@@ -107,6 +107,14 @@ function chip(text: string, className = 'chip'): HTMLElement {
   el.className = className;
   el.textContent = text;
   return el;
+}
+
+function transportChip(info: NetTransportInfo): HTMLElement | null {
+  if (info.route === 'unknown') return null;
+  const wire = (info.relayProtocol || info.protocol || '').toUpperCase();
+  const label = `${info.route === 'relay' ? 'TURN' : 'P2P'}${wire ? `/${wire}` : ''}`;
+  const cls = info.route === 'direct' ? 'chip chip--live' : wire === 'TCP' ? 'chip chip--bad' : 'chip chip--warn';
+  return chip(label, cls);
 }
 
 export class LobbyScene implements Scene {
@@ -718,12 +726,18 @@ export class LobbyScene implements Scene {
     }
 
     const others = players.filter((p) => p.slot !== selfSlot);
-    const ready = players.length >= 2 && others.every((p) => this.connected(p));
+    // Guests have only one WebRTC link: every other guest is reached through
+    // the host. Requiring a nonexistent direct link to each of them leaves a
+    // 3-4 player guest stuck on "Shaking hands" forever.
+    const host = players.find((p) => p.slot === 0);
+    const ready =
+      players.length >= 2 &&
+      (this.isGuest ? !!host && this.connected(host) : others.every((p) => this.connected(p)));
 
     if (this.startBtn) {
-      this.startBtn.disabled = !ready;
+      this.startBtn.disabled = this.isGuest || !ready;
       const labelEl = this.startBtn.querySelector('.btn__label');
-      if (labelEl) labelEl.textContent = ready ? 'Start' : 'Waiting…';
+      if (labelEl) labelEl.textContent = this.isGuest ? 'Waiting for host' : ready ? 'Start' : 'Waiting…';
     }
 
     if (this.statusEl) {
@@ -731,12 +745,18 @@ export class LobbyScene implements Scene {
         this.statusEl.className = 'notice notice--warn';
         this.statusEl.textContent = this.error;
       } else {
+        const delay = s?.recommendedInputDelay ?? 0;
+        const buffer = delay > 0 ? `${delay}f / ${Math.round(delay * (1000 / 60))}ms buffer` : '';
         this.statusEl.className = 'hint';
         this.statusEl.textContent =
           players.length < 2
             ? 'Nobody yet. Send the link — this page keeps the room alive.'
             : ready
-              ? 'Everyone is here. Start when you are.'
+              ? s?.inputDelayCapped
+                ? `Everyone is here. ${buffer}; this route is beyond the smooth-play budget.`
+                : this.isGuest
+                  ? `Connected with a ${buffer}. Waiting for the host.`
+                  : `Everyone is here. ${buffer}. Start when you are.`
               : 'Shaking hands with the new arrival…';
       }
     }
@@ -744,7 +764,8 @@ export class LobbyScene implements Scene {
 
   /** A peer we have measured, or ourselves. Anything else is still negotiating. */
   private connected(p: NetPlayer): boolean {
-    return p.ping > 0 || p.ready || p.dwarfId !== null;
+    const measured = p.ping > 0 || p.ready || p.dwarfId !== null;
+    return measured && (this.session?.inputReady(p.peerId) ?? true);
   }
 
   private playerRow(p: NetPlayer, self: boolean): HTMLLIElement {
@@ -773,6 +794,9 @@ export class LobbyScene implements Scene {
       li.appendChild(
         p.ping > 0 ? chip(`${p.ping} ms`, pingClass(p.ping)) : chip('connecting', 'chip chip--warn'),
       );
+      const transport = this.session?.transportFor(p.peerId);
+      const path = transport ? transportChip(transport) : null;
+      if (path) li.appendChild(path);
     }
 
     li.appendChild(p.ready ? chip('ready', 'chip chip--live') : chip('picking'));

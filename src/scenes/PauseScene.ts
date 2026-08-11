@@ -604,10 +604,26 @@ export class PauseScene implements Scene {
           li.appendChild(cell(`P${p.slot + 1}  ${p.name}`, 'grow'));
           li.appendChild(chip(p.dwarfId ? p.dwarfId.toUpperCase() : 'CHOOSING'));
           if (p.ping > 0) li.appendChild(chip(`${p.ping} ms`));
+          const path = this.net?.transportFor(p.peerId);
+          if (path && path.route !== 'unknown') {
+            const wire = (path.relayProtocol || path.protocol).toUpperCase();
+            li.appendChild(chip(`${path.route === 'relay' ? 'TURN' : 'P2P'}${wire ? `/${wire}` : ''}`));
+          }
           list.appendChild(li);
         }
       }
       body.appendChild(list);
+
+      if (this.net) {
+        // During a fight the host-negotiated value is fixed. RTT may drift,
+        // but showing a newly recommended value here would claim a buffer the
+        // running simulation is not actually using.
+        const delay = this.host.lockstep?.inputDelay ?? this.net.recommendedInputDelay;
+        const quality = document.createElement('p');
+        quality.className = this.net.inputDelayCapped ? 'notice notice--warn' : 'hint';
+        quality.textContent = `${delay}-frame network buffer (${Math.round(delay * (1000 / 60))} ms)`;
+        body.appendChild(quality);
+      }
     }
 
     const foot = div('row row--between');

@@ -12,9 +12,9 @@
  *
  * Required call order inside the fixed-step loop:
  *
- *     if (!lockstep.canAdvance(frame)) return;   // hold the sim
  *     input.sampleAll(frame);
  *     lockstep.prepare(frame);                   // send local, apply everyone
+ *     if (!lockstep.canAdvance(frame)) return;   // hold the sim
  *     world.update();
  *     lockstep.confirm(frame, world.checksum());
  *
@@ -24,9 +24,9 @@
 
 import type { BtnMask, NetConfig, NetMessage, NetPlayer } from '@/core/types';
 import { DEFAULT_INPUT_DELAY, NET_TIMEOUT_FRAMES, SYNC_INTERVAL } from '@/core/constants';
-import { clamp } from '@/core/math';
 import type { InputManager } from '@/engine/input/InputManager';
 import type { NetSession } from '@/net/NetSession';
+import { clampInputDelay } from '@/net/latency';
 
 /** Frames of already-sent input repeated in each packet, to ride out a loss. */
 const REDUNDANCY = 3;
@@ -39,8 +39,10 @@ export class Lockstep {
   private readonly session: NetSession;
   private readonly input: InputManager;
 
-  private readonly delay: number;
-  private readonly sendInterval: number;
+  private delay: number;
+  private sendInterval: number;
+  /** Match identity; frame numbers alone restart at zero for every fight. */
+  private epoch = 0;
 
   /** slot -> frame -> held mask. */
   private readonly inputs = new Map<number, Map<number, BtnMask>>();
@@ -67,10 +69,8 @@ export class Lockstep {
     this.input = input;
 
     const raw = Number.isFinite(cfg.inputDelay) ? cfg.inputDelay : DEFAULT_INPUT_DELAY;
-    this.delay = Math.round(clamp(raw, 0, 20));
-    // With a generous delay we can afford to pack several frames per packet and
-    // cut the send rate; with a tight delay every frame goes out on its own.
-    this.sendInterval = Math.max(1, Math.min(3, Math.floor(this.delay / 3)));
+    this.delay = clampInputDelay(raw, 0);
+    this.sendInterval = sendEvery(this.delay);
 
     session.onPlayersChanged(this.onRoster);
     session.onMessage(this.onNet);
@@ -98,6 +98,23 @@ export class Lockstep {
 
   get inputDelay(): number {
     return this.delay;
+  }
+
+  /**
+   * Install the host's agreed input lead before a match resets its frame clock.
+   * Every peer receives the value in `start`; changing it independently during
+   * a fight would leave holes in the frame history and is deliberately not an
+   * adaptive mid-match operation.
+   */
+  configureDelay(frames: number): number {
+    this.delay = clampInputDelay(frames, 0);
+    this.sendInterval = sendEvery(this.delay);
+    return this.delay;
+  }
+
+  configureEpoch(epoch: number): number {
+    this.epoch = epoch >>> 0;
+    return this.epoch;
   }
 
   /** True when lockstep is actually doing something — a live remote peer exists. */
@@ -227,7 +244,7 @@ export class Lockstep {
 
     const c = checksum | 0;
     this.localChecks.set(frame, c);
-    this.session.send({ t: 'sync', frame, checksum: c });
+    this.session.send({ t: 'sync', epoch: this.epoch, frame, checksum: c });
 
     const bucket = this.remoteChecks.get(frame);
     if (bucket) {
@@ -279,6 +296,9 @@ export class Lockstep {
 
   private readonly onNet = (m: NetMessage, from: string): void => {
     if (m.t === 'in') {
+      // A delayed packet from the prior fight may arrive after the new fight's
+      // frame counter reset. Never let it masquerade as current frame input.
+      if ((m.epoch >>> 0) !== this.epoch) return;
       // Nobody else gets to drive a slot we own.
       if (this.localSlots.includes(m.slot)) return;
       if (this.dropped.has(m.slot)) return;
@@ -288,6 +308,7 @@ export class Lockstep {
     }
 
     if (m.t === 'sync') {
+      if ((m.epoch >>> 0) !== this.epoch) return;
       const remote = m.checksum | 0;
       const local = this.localChecks.get(m.frame);
       if (local === undefined) {
@@ -308,6 +329,8 @@ export class Lockstep {
     }
 
     if (m.t === 'start') {
+      this.configureDelay(m.inputDelay);
+      this.configureEpoch(m.epoch);
       this.reset(m.startFrame);
     }
   };
@@ -348,7 +371,7 @@ export class Lockstep {
       if (from > target) continue;
       const inputs: number[] = [];
       for (let f = from; f <= target; f++) inputs.push(hist.get(f) ?? 0);
-      this.session.send({ t: 'in', slot, from, inputs });
+      this.session.send({ t: 'in', epoch: this.epoch, slot, from, inputs });
     }
   }
 
@@ -377,4 +400,10 @@ export class Lockstep {
         'The simulations have diverged; the match is no longer trustworthy.',
     );
   }
+}
+
+function sendEvery(delay: number): number {
+  // With a generous delay we can afford to pack several frames per packet and
+  // cut the send rate; with a tight delay every frame goes out on its own.
+  return Math.max(1, Math.min(3, Math.floor(delay / 3)));
 }

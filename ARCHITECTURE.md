@@ -626,8 +626,27 @@ carries `#join=<roomId>`, and a guest who opens that link goes straight to
 character select and then into the running game.
 
 Netcode is **input-delay lockstep** with a rolling checksum: simple, exact, and
-honest about its tradeoff (a few frames of input latency instead of the
-mispredictions of rollback). Determinism is enforced by the sim rules above.
+honest about its tradeoff (fixed input latency instead of the mispredictions of
+rollback). The host sizes and broadcasts one shared input lead from the
+smoothed RTT and jitter measured before Start; a slow relay therefore adds a
+stable delay instead of repeatedly stopping the simulation.
+
+Each peer link has two PeerJS data connections. Roster, scene, pause, checksum,
+and lifecycle messages use a reliable ordered control lane. Frame-addressed
+input uses a reliable unordered lane, so a redundant newer packet can pass an
+older delayed packet without allowing state transitions to reorder. If that
+lane cannot open, input falls back to control after a bounded wait. The switch
+is coordinated on control and replays a bounded per-link input history so no
+frame can fall between the two lanes. Every fight also carries an input epoch;
+late packets from the prior fight are rejected, while a start acknowledgement
+keeps the new fight's opening inputs ordered behind its reset. The lobby
+reports the selected P2P/TURN path, UDP/TCP relay protocol, RTT, and chosen
+frame buffer so relay problems are visible rather than guessed at.
+
+Determinism is enforced by the sim rules above. `NET_VERSION` is a compatibility
+contract and must change whenever frame numbering, message shape, or lockstep
+semantics change; the PWA can legitimately leave two tabs on different complete
+builds until both activate an update.
 
 The default broker is the public PeerJS cloud server, so there is no
 infrastructure to run. `NetConfig.host` can point at a self-hosted PeerServer

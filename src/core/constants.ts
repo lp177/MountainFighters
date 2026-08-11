@@ -176,8 +176,8 @@ export const STARTING_LIVES = 3;
 // ── Networking ───────────────────────────────────────────────────────────────
 
 /** Wire-format version; peers refuse to connect across a mismatch. */
-export const NET_VERSION = '1';
-/** Default frames of input delay for lockstep. ~50ms at 60Hz. */
+export const NET_VERSION = '2';
+/** Minimum input lead; the host raises it from measured RTT/jitter. ~50ms at 60Hz. */
 export const DEFAULT_INPUT_DELAY = 3;
 /** Send a state checksum every N frames to catch desyncs early. */
 export const SYNC_INTERVAL = 60;

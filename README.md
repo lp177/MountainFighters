@@ -125,6 +125,20 @@ of devtools expires in a couple of hours. Point `VITE_ICE_ENDPOINT` at your own
 issuer, or set a static `VITE_TURN_*` in `.env` (see `.env.example`) if you
 would rather configure one directly.
 
+A room keeps the grant its Peer was created with. If a lobby is deliberately
+left open longer than the issuer's credential TTL (two hours on the default
+endpoint), recreate the room before accepting new players.
+
+Before a match starts, the host measures the actual gameplay lane and negotiates
+an input buffer large enough for its RTT and jitter. Input packets travel on a
+separate unordered data channel while lobby and scene state stays ordered. The
+lobby shows whether that lane selected direct P2P or TURN and, for a relay, UDP
+or TCP. Match epochs reject late packets from a previous fight, and the opening
+frames stay ordered behind the start handshake. TURN/UDP is strongly preferred
+for play; TURN/TCP is a reachability fallback and needs a larger buffer. Very
+distant routes can therefore remain smooth but will still feel delayed; hiding
+that physical latency requires rollback/prediction.
+
 If no relay can be reached, the game falls back to STUN and still works on a LAN
 and between permissive networks, and says so plainly instead of hanging.
 

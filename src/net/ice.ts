@@ -110,9 +110,14 @@ export async function resolveIceServers(cfg: NetConfig): Promise<RTCIceServer[]>
     const relay = Array.isArray(grant.iceServers) ? grant.iceServers : [];
     if (relay.length === 0) return [...STUN];
     const servers = [...STUN, ...relay];
-    // Re-fetch a little before the credentials actually lapse.
-    const ttl = typeof grant.ttl === 'number' && grant.ttl > 60 ? grant.ttl : 600;
-    cached = { servers, expires: Date.now() + (ttl - 60) * 1000 };
+    // Re-fetch before the credentials lapse. A short but valid TTL stays short
+    // instead of accidentally being cached for the ten-minute default.
+    const ttl =
+      typeof grant.ttl === 'number' && Number.isFinite(grant.ttl) && grant.ttl > 0
+        ? grant.ttl
+        : 600;
+    const refreshLead = Math.min(60, ttl / 2);
+    cached = { servers, expires: Date.now() + (ttl - refreshLead) * 1000 };
     return servers;
   } catch {
     return [...STUN];
@@ -120,8 +125,8 @@ export async function resolveIceServers(cfg: NetConfig): Promise<RTCIceServer[]>
 }
 
 /** The RTCConfiguration handed to PeerJS. */
-export function rtcConfig(cfg: NetConfig): RTCConfiguration {
-  const iceServers = cfg.iceServers ?? defaultIceServers();
+export function rtcConfig(cfg: NetConfig, resolved?: RTCIceServer[]): RTCConfiguration {
+  const iceServers = resolved ?? cfg.iceServers ?? defaultIceServers();
   const out: RTCConfiguration = {
     iceServers,
     // Gather a few candidates before the offer is created, which shaves a
@@ -141,6 +146,6 @@ export function rtcConfig(cfg: NetConfig): RTCConfiguration {
  */
 export function iceFailureMessage(cfg?: NetConfig): string {
   return hasRelay(cfg)
-    ? 'Could not reach your friend, even through the relay. One of you is on a network that is blocking it — a VPN or a different connection usually gets around it.'
+    ? 'Could not establish a WebRTC connection. A relay is configured, but it may be blocked or unavailable — a VPN or a different connection usually gets around it.'
     : 'Could not open a direct connection. One of you is behind a network that needs a relay server (most mobile connections do), and this build has no relay configured.';
 }

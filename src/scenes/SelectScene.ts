@@ -853,7 +853,14 @@ export class SelectScene implements Scene {
     if (this.launch <= 0) {
       const seed = this.online && net ? net.seed || randomSeed() : randomSeed();
       if (this.online && net) {
-        net.send({ t: 'start', mapIndex: this.mapIndex, seed, startFrame: 0 });
+        const inputDelay = net.recommendedInputDelay;
+        this.game.lockstep?.configureDelay(inputDelay);
+        // A room may start more than one fight with the same deterministic
+        // world seed. The input epoch must still be fresh so late packets from
+        // the prior fight can never share its frame numbers.
+        const epoch = randomSeed() >>> 0;
+        this.game.lockstep?.configureEpoch(epoch);
+        net.send({ t: 'start', mapIndex: this.mapIndex, seed, startFrame: 0, inputDelay, epoch });
       }
       this.begin(seed, this.mapIndex);
     }

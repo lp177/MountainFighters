@@ -1140,7 +1140,19 @@ export class FightScene implements Scene {
        * prepare is first-write-wins, so calling it again on a stalled frame is
        * harmless.
        */
-      this.host.input.sampleAll(this.simFrame);
+      // ONLY under lockstep. Game.ts has already sampled this tick, and
+      // sampleAll() rolls the pressed/released baseline every time it is
+      // called with a frame number it has not seen — so a second sample on a
+      // DIFFERENT clock recomputes `pressed` as `mask & ~mask`, i.e. zero.
+      //
+      // Under lockstep that is harmless: Game.ts samples with netFrameOf(),
+      // which IS this sim clock, so the second call is a no-op and the edge
+      // survives. Offline it samples with the RENDER frame, so this call used
+      // to wipe every press edge before the fighters read it. Movement reads
+      // `held` and was unaffected, which is exactly why a solo player could
+      // walk but never attack, jump, grab or super, and why rebinding the keys
+      // changed nothing — the bits arrived and were then zeroed.
+      if (ls) this.host.input.sampleAll(this.simFrame);
       ls?.prepare(this.simFrame);
 
       if (ls && !ls.canAdvance(this.simFrame)) {

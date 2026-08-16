@@ -12,7 +12,7 @@ The dwarfs have put down the pickaxes, put on the leather, and gone to work.
 A satirical browser beat-em-up. Street Fighter's combat depth in a Final Fight
 chassis, with a great deal of screen shake.
 
-▶ **[Play it](https://lp177.github.io/mountainfighters/)**
+▶ **[Play it](https://lp177.github.io/MountainFighters/)**
 
 ---
 

@@ -29,9 +29,27 @@ import type { NetSession } from '@/net/NetSession';
 import { clampInputDelay } from '@/net/latency';
 
 /** Frames of already-sent input repeated in each packet, to ride out a loss. */
-const REDUNDANCY = 3;
+const REDUNDANCY = 5;
 /** While stalled, re-send recent input this often in case a packet went missing. */
 const RESEND_EVERY = 12;
+/**
+ * Frames of remote input, beyond the one being stalled on, that must be
+ * buffered before a stalled sim resumes.
+ *
+ * A stall re-anchors this machine's timeline to the packet that ends it: wall
+ * time spent stalled is never caught up, so resuming the instant frame F's
+ * input arrives would leave zero standing margin, and every later latency
+ * wobble above the one that caused the stall would be another visible hitch.
+ * Refilling a small buffer first — exactly a jitter buffer — trades a couple
+ * of extra frames on a stall that is already happening for margin against the
+ * next one.
+ *
+ * Scaled away near the DEFAULT_INPUT_DELAY floor: a floor-sized delay means a
+ * near-perfect link where a stall is either a one-off or the start of the
+ * chronic latency-outruns-delay regime — and in the chronic regime a refill
+ * only makes each unavoidable stall longer.
+ */
+const RESUME_CUSHION = 2;
 /** Cap on stored history per slot; well beyond anything lockstep needs. */
 const HISTORY = 240;
 
@@ -40,7 +58,6 @@ export class Lockstep {
   private readonly input: InputManager;
 
   private delay: number;
-  private sendInterval: number;
   /** Match identity; frame numbers alone restart at zero for every fight. */
   private epoch = 0;
 
@@ -70,7 +87,6 @@ export class Lockstep {
 
     const raw = Number.isFinite(cfg.inputDelay) ? cfg.inputDelay : DEFAULT_INPUT_DELAY;
     this.delay = clampInputDelay(raw, 0);
-    this.sendInterval = sendEvery(this.delay);
 
     session.onPlayersChanged(this.onRoster);
     session.onMessage(this.onNet);
@@ -108,7 +124,6 @@ export class Lockstep {
    */
   configureDelay(frames: number): number {
     this.delay = clampInputDelay(frames, 0);
-    this.sendInterval = sendEvery(this.delay);
     return this.delay;
   }
 
@@ -179,8 +194,21 @@ export class Lockstep {
       return true;
     }
 
+    // Once stalled, also demand the refill cushion. The remote keeps sending
+    // while we wait (it can run up to `delay` frames past our stall point, and
+    // addresses input `delay` frames ahead of itself), so asking for a couple
+    // of future frames cannot deadlock while the cushion stays below `delay`.
+    const ahead =
+      this._stalled > 0
+        ? Math.min(RESUME_CUSHION, Math.max(0, this.delay - DEFAULT_INPUT_DELAY))
+        : 0;
     for (const slot of this.activeSlots) {
-      if (this.lookup(slot, frame) === undefined) this._waiting.push(slot);
+      for (let k = 0; k <= ahead; k++) {
+        if (this.lookup(slot, frame + k) === undefined) {
+          this._waiting.push(slot);
+          break;
+        }
+      }
     }
 
     if (this._waiting.length === 0) {
@@ -354,16 +382,18 @@ export class Lockstep {
   }
 
   /**
-   * One packet carries the newly-sampled frame plus a few already-sent ones, so
-   * a single dropped datagram never costs a stall and the packet rate stays at
-   * or below one per simulated frame.
+   * One packet per simulated frame, carrying the newly-sampled frame plus a
+   * few already-sent ones so a dropped datagram never costs a stall. Batching
+   * several frames per packet was tried and reverted: it held a sampled input
+   * back for up to two extra frames precisely when the negotiated delay was
+   * already high, and sixty ~90-byte packets a second cost nothing.
    */
   private flush(frame: number, force: boolean): void {
-    if (!force && frame - this.lastFlush < this.sendInterval) return;
+    if (!force && frame <= this.lastFlush) return;
     this.lastFlush = frame;
 
     const target = frame + this.delay;
-    const span = this.sendInterval + REDUNDANCY;
+    const span = 1 + REDUNDANCY;
     for (const slot of this.localSlots) {
       const hist = this.inputs.get(slot);
       if (!hist) continue;
@@ -400,10 +430,4 @@ export class Lockstep {
         'The simulations have diverged; the match is no longer trustworthy.',
     );
   }
-}
-
-function sendEvery(delay: number): number {
-  // With a generous delay we can afford to pack several frames per packet and
-  // cut the send rate; with a tight delay every frame goes out on its own.
-  return Math.max(1, Math.min(3, Math.floor(delay / 3)));
 }

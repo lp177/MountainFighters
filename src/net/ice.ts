@@ -78,6 +78,13 @@ export function defaultIceServers(): RTCIceServer[] {
  */
 const ICE_ENDPOINT = env('VITE_ICE_ENDPOINT') || 'https://lp177.fr/ice';
 
+/**
+ * NetSession awaits this fetch before opening any Peer, so an endpoint that
+ * hangs (rather than fails) must degrade to STUN instead of leaving the player
+ * staring at a hosting/joining screen that never resolves.
+ */
+const ICE_FETCH_TIMEOUT_MS = 4000;
+
 interface IceGrant {
   ttl?: number;
   iceServers?: RTCIceServer[];
@@ -104,7 +111,11 @@ export async function resolveIceServers(cfg: NetConfig): Promise<RTCIceServer[]>
   if (!ICE_ENDPOINT) return [...STUN];
 
   try {
-    const res = await fetch(ICE_ENDPOINT, { mode: 'cors', cache: 'no-store' });
+    const res = await fetch(ICE_ENDPOINT, {
+      mode: 'cors',
+      cache: 'no-store',
+      signal: AbortSignal.timeout(ICE_FETCH_TIMEOUT_MS),
+    });
     if (!res.ok) return [...STUN];
     const grant = (await res.json()) as IceGrant;
     const relay = Array.isArray(grant.iceServers) ? grant.iceServers : [];

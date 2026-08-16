@@ -629,7 +629,15 @@ Netcode is **input-delay lockstep** with a rolling checksum: simple, exact, and
 honest about its tradeoff (fixed input latency instead of the mispredictions of
 rollback). The host sizes and broadcasts one shared input lead from the
 smoothed RTT and jitter measured before Start; a slow relay therefore adds a
-stable delay instead of repeatedly stopping the simulation.
+stable delay instead of repeatedly stopping the simulation. The lead covers the
+**one-way** trip of the worst route an input packet can travel — one link for
+host↔guest, the two worst links summed for guest↔guest relayed through the
+host — because steady-state lockstep never pays the return leg. The clock
+offset from `start` crossing the link burns off as one early stall, and every
+stall refills a small jitter buffer before the sim resumes, so each re-anchor
+banks standing margin instead of leaving the next latency wobble to hitch the
+match again. Input goes out every simulated frame, each packet repeating the
+last few frames so one lost datagram never stalls anybody.
 
 Each peer link has two PeerJS data connections. Roster, scene, pause, checksum,
 and lifecycle messages use a reliable ordered control lane. Frame-addressed

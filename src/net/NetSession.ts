@@ -31,8 +31,10 @@ import {
   MAX_INPUT_DELAY,
   addRttSample,
   clampInputDelay,
-  isInputDelayCapped,
-  recommendedInputDelay,
+  combinedRouteBudgetMs,
+  isBudgetCapped,
+  recommendedInputDelayForBudget,
+  routeBudgetMs,
 } from '@/net/latency';
 import type { RttEstimate } from '@/net/latency';
 
@@ -79,6 +81,9 @@ interface Link {
   pingSentAt: number;
   /** Separate fast-lane probe. Its failure falls back; it never kills control. */
   inputPingSentAt: number;
+  /** performance.now() of the last ping sent per lane, answered or not. */
+  lastControlPingAt: number;
+  lastInputPingAt: number;
   controlRtt: RttEstimate;
   inputRtt: RttEstimate;
   /** Effective estimate: inputRtt while fast is active, controlRtt on fallback. */
@@ -115,6 +120,16 @@ const RELAYED: ReadonlySet<NetMessage['t']> = new Set<NetMessage['t']>([
 
 const JOIN_TIMEOUT_MS = 20_000;
 const PING_INTERVAL_MS = 2000;
+/** The ping timer's resolution; each lane decides its own cadence per tick. */
+const PING_TICK_MS = 500;
+/**
+ * Ping fast until the smoothed estimate has this many samples. The host reads
+ * the estimate the moment the Start countdown ends, and an EWMA with a 1/8
+ * gain is still dominated by its first sample until roughly this depth; at the
+ * old one-ping-per-2s cadence a quick lobby sized the whole match's input lead
+ * from two or three data points.
+ */
+const RTT_WARMUP_SAMPLES = 8;
 const INPUT_LANE_TIMEOUT_MS = 8000;
 const HOST_ID_ATTEMPTS = 3;
 const CONTROL_LABEL = 'mtnfight';
@@ -178,21 +193,29 @@ export class NetSession {
 
   /** Shared lead the host will put in the start packet. */
   get recommendedInputDelay(): number {
-    let frames = clampInputDelay(this.cfg.inputDelay, DEFAULT_INPUT_DELAY);
-    for (const link of this.links.values()) {
-      if (!link.greeted) continue;
-      frames = Math.max(frames, recommendedInputDelay(delayEstimate(link), frames));
-    }
-    return frames;
+    const floor = clampInputDelay(this.cfg.inputDelay, DEFAULT_INPUT_DELAY);
+    return recommendedInputDelayForBudget(this.combinedBudgetMs(), floor);
   }
 
   /** True when the measured route wanted more buffering than the gameplay cap permits. */
   get inputDelayCapped(): boolean {
+    return isBudgetCapped(this.combinedBudgetMs());
+  }
+
+  /**
+   * The worst route an input packet can travel this room, in milliseconds.
+   * On the host that is every link; guest-to-guest traffic crosses the two
+   * links the combination sums. A guest only sees its own link to the host, so
+   * its value is a display estimate — the negotiated number always comes from
+   * the host inside `start`.
+   */
+  private combinedBudgetMs(): number {
+    const budgets: number[] = [];
     for (const link of this.links.values()) {
       if (!link.greeted) continue;
-      if (isInputDelayCapped(delayEstimate(link))) return true;
+      budgets.push(routeBudgetMs(delayEstimate(link)));
     }
-    return false;
+    return combinedRouteBudgetMs(budgets);
   }
 
   /** The low-latency lane is open, or its ordered fallback has been deliberately selected. */
@@ -476,6 +499,8 @@ export class NetSession {
       greeted: false,
       pingSentAt: 0,
       inputPingSentAt: 0,
+      lastControlPingAt: 0,
+      lastInputPingAt: 0,
       controlRtt: { ...EMPTY_RTT },
       inputRtt: { ...EMPTY_RTT },
       rtt: { ...EMPTY_RTT },
@@ -1012,12 +1037,15 @@ export class NetSession {
 
   private startPinging(): void {
     if (this.pingTimer) return;
-    this.pingTimer = window.setInterval(() => this.pingAll(), PING_INTERVAL_MS);
+    this.pingTimer = window.setInterval(() => this.pingAll(), PING_TICK_MS);
   }
 
   private pingControl(link: Link): void {
     if (!link.control?.open || link.pingSentAt > 0) return;
     const now = performance.now();
+    const cadence = link.controlRtt.samples < RTT_WARMUP_SAMPLES ? 0 : PING_INTERVAL_MS;
+    if (now - link.lastControlPingAt < cadence) return;
+    link.lastControlPingAt = now;
     link.pingSentAt = now;
     this.rawSend(link.control, { t: 'ping', ts: now });
   }
@@ -1025,6 +1053,9 @@ export class NetSession {
   private pingInput(link: Link): void {
     if (!link.input?.open || link.inputFailed || link.inputPingSentAt > 0) return;
     const now = performance.now();
+    const cadence = link.inputRtt.samples < RTT_WARMUP_SAMPLES ? 0 : PING_INTERVAL_MS;
+    if (now - link.lastInputPingAt < cadence) return;
+    link.lastInputPingAt = now;
     link.inputPingSentAt = now;
     this.rawSend(link.input, { t: '_iping', ts: now });
   }
@@ -1231,18 +1262,16 @@ function emptyTransport(): NetTransportInfo {
 }
 
 /**
- * Start travels on control and input returns on the realtime lane. Their
- * RTCPeerConnections may select different ICE paths, so size for the slower of
- * the two instead of assuming the input lane's RTT describes both halves.
+ * Size the delay for the lane that will actually carry the fight's input. The
+ * ordered control lane's RTT includes retransmit and head-of-line stalls the
+ * unordered input lane never pays, so taking the slower of the two inflated
+ * the lead whenever control had a bad moment. Start still crosses control, but
+ * that costs one opening stall inside the grace window, not per-input latency
+ * for the whole match.
  */
 function delayEstimate(link: Link): RttEstimate {
-  if (link.inputFailed || link.inputRtt.samples <= 0) return link.controlRtt;
-  if (link.controlRtt.samples <= 0) return link.inputRtt;
-  return {
-    rttMs: Math.max(link.controlRtt.rttMs, link.inputRtt.rttMs),
-    jitterMs: Math.max(link.controlRtt.jitterMs, link.inputRtt.jitterMs),
-    samples: Math.min(link.controlRtt.samples, link.inputRtt.samples),
-  };
+  if (!link.inputFailed && link.inputRtt.samples > 0) return link.inputRtt;
+  return link.controlRtt;
 }
 
 function stringStat(stats: Record<string, unknown> | undefined, key: string): string {

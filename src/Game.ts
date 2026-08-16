@@ -838,8 +838,22 @@ export class Game {
     own: Record<string, number>,
     localCount: number,
   ): Record<string, number> {
+    // Player one's SHIPPED map. Only the keys still sitting where the defaults
+    // put them are up for grabs — see the deliberate-binding rule below.
+    const shipped = defaultBindingsFor(0);
+
     const out: Record<string, number> = {};
     for (const code of Object.keys(own)) {
+      // A key player one was deliberately given is never taken away. Player
+      // two's DEFAULTS used to outrank player one's EXPLICIT binding: bind the
+      // numpad to player one's attacks and it was stripped right back out here,
+      // because slot 1 holds the whole numpad by default. Rebinding therefore
+      // looked broken and no amount of resetting could fix it, since the
+      // defaults were the thing doing the stealing.
+      if (own[code] !== shipped[code]) {
+        out[code] = own[code];
+        continue;
+      }
       let taken = false;
       for (let s = 1; s < localCount; s++) {
         const bit = this.savedMapFor(s)[code];

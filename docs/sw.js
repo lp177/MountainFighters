@@ -53,7 +53,7 @@
  *    than no ICE grant.
  */
 
-const BUILD = 'b2658ab66eb6';
+const BUILD = '8750ea53c4f9';
 /** Namespaced by scope: two copies of the game on one origin must not reap each other's caches. */
 const PREFIX = `mountainfighters:${new URL(self.registration.scope).pathname}:`;
 const CACHE = `${PREFIX}${BUILD}`;
@@ -61,17 +61,18 @@ const CACHE = `${PREFIX}${BUILD}`;
 const PRECACHE = [
   "./",
   "./assets/index-CRCZkXvh.css",
-  "./assets/index-DT5ZCeEX.js",
+  "./assets/index-Ceo073wS.js",
   "./assets/peer-BsvW7Dtp.js",
   "./icon-maskable.svg",
   "./icon.svg",
   "./index.html",
-  "./manifest.webmanifest"
+  "./manifest.webmanifest",
+  "./social-card.png"
 ];
 /** Content-hashed output, named by the build rather than guessed from the shape of a filename. */
 const IMMUTABLE = new Set([
   "./assets/index-CRCZkXvh.css",
-  "./assets/index-DT5ZCeEX.js",
+  "./assets/index-Ceo073wS.js",
   "./assets/peer-BsvW7Dtp.js"
 ]);
 

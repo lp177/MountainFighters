@@ -94,6 +94,7 @@ import { drawBossRig, hasBossRig } from '@/render/rig/BossRigs';
 import { drawCharacter, drawLooseHat } from '@/render/rig/CharacterRig';
 import { pickFlourish } from '@/content/fatalities';
 
+import { FONT_DISPLAY } from '@/ui/theme';
 type C2D = CanvasRenderingContext2D;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -111,7 +112,7 @@ const STEEL_DARK = '#4c525d';
 const PAPER = '#f2ecdc';
 const CARD = '#c89a5e';
 const NEON = '#37e6c8';
-const DISPLAY = 'Impact, "Arial Black", "Helvetica Neue", system-ui, sans-serif';
+const DISPLAY = FONT_DISPLAY;
 
 const BLOOD_COLORS = [BLOOD_LIGHT, BLOOD, BLOOD_DARK];
 const DUST_COLORS = ['#cfc6b8', '#9a9086', '#6b6259'];
@@ -132,6 +133,46 @@ const BANNER_AT = 0.52;
 /** Lens drops live this long and there are at most this many. */
 const SPLAT_MAX = 18;
 const SPLAT_LIFE = 150;
+
+/**
+ * Where the performers' floor sits on screen while the camera is slammed in.
+ *
+ * The slam zooms about the middle of the frame, and the belt is not in the
+ * middle of the frame: at 2.15x a pair standing anywhere but the back third of
+ * it had their legs under the bottom letterbox bar, and a pair at the front
+ * were off the screen altogether. The camera now carries them up to this line —
+ * a little floor above the bar, and every head on the roster under the top one.
+ */
+const FRAME_FLOOR_Y = VIEW_H - BAR_H - 30;
+
+/**
+ * A blow this hard does something to the FILM, not just to the room: the
+ * picture holds on it. Below this, a hit is a shake and nothing else.
+ */
+const BEAT_FROM = 6;
+/** ...and one this hard is the killing frame. It gets the grade and the lines. */
+const BEAT_KILL = 9;
+/** Most frames a single blow may hold the picture for. */
+const HOLD_MAX = 7;
+/**
+ * Frames of hold one whole show may spend.
+ *
+ * A held frame is a frame the film does not advance, so every one of them is
+ * added to how long the fight stays frozen. Capped, so that a finisher made of
+ * six big hits is still a three-second finisher. The scene's watchdog knows
+ * this number — see FATALITY_GRACE in FightScene.
+ */
+export const HOLD_BUDGET = 24;
+/** The lean the camera settles into, in radians, and how fast a knock dies. */
+const DUTCH = 0.032;
+const TILT_DECAY = 0.84;
+/** How dark the room goes round the two of them, at the edge of the pool. */
+const VEIL = 0.62;
+/** ...and how much of that the middle of the pool keeps. */
+const VEIL_CORE = 0.08;
+/** Frames the focus lines stay up, and how many of them there are. */
+const FOCUS_FRAMES = 13;
+const FOCUS_LINES = 30;
 
 /**
  * Hard ceiling on a follow-through, in frames.
@@ -441,6 +482,14 @@ interface Stage {
   mechanical: boolean;
   reduced: boolean;
   seed: number;
+  /**
+   * Where the action has gone, for the camera to go after it: screen pixels to
+   * the side of the pair's midpoint, and above their floor. A renderer sets
+   * these from `tick` when its choreography leaves the spot — a body launched
+   * overhead, a charge through three walls — and leaves them at zero otherwise.
+   */
+  pan: number;
+  lift: number;
 
   // ── the follow-through, only meaningful while a flourish is on stage ───────
   /** Frames elapsed in the flourish, and the same thing normalised to 0..1. */
@@ -631,6 +680,17 @@ function squash(s: Stage, cx: number, cy: number, sx: number, sy: number, fn: ()
   ctx.restore();
 }
 
+/** Run `fn` with the canvas turned about (cx, cy). Positive is clockwise on screen. */
+function rolled(s: Stage, cx: number, cy: number, rot: number, fn: () => void): void {
+  const ctx = s.ctx;
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(rot);
+  ctx.translate(-cx, -cy);
+  fn();
+  ctx.restore();
+}
+
 /** Run `fn` clipped to a screen-space rectangle. */
 function clipRect(s: Stage, x: number, y: number, w: number, h: number, fn: () => void): void {
   const ctx = s.ctx;
@@ -691,6 +751,33 @@ function dustPool(s: Stage, x: number, y: number, w: number, k: number): void {
   ellipse(s.ctx, x, y, r, r * 0.2, 0, 'rgba(30,26,36,0.35)', 'none');
 }
 
+/**
+ * A dent in the floor with cracks running out of it. `k` grows it in.
+ *
+ * Flattened like everything else that lies on the belt, and seeded per
+ * performance so two craters in one fight are not the same crater.
+ */
+function drawCrater(s: Stage, x: number, y: number, w: number, k: number): void {
+  if (k <= 0) return;
+  const r = w * easeOut(clamp(k, 0, 1));
+  ellipse(s.ctx, x, y, r, r * 0.2, 0, 'rgba(14,11,19,0.78)', 'none');
+  for (let i = 0; i < 7; i++) {
+    const a = (i / 7) * TAU + jitter(s.seed, i + 60) * 0.3;
+    const len = r * (1.25 + 0.5 * hash(i * 2.3 + 1));
+    zigzag(
+      s.ctx,
+      x + Math.cos(a) * r * 0.7,
+      y + Math.sin(a) * r * 0.16,
+      x + Math.cos(a) * len,
+      y + Math.sin(a) * len * 0.22,
+      1.2,
+      4,
+      'rgba(14,11,19,0.7)',
+      1,
+    );
+  }
+}
+
 const SPEC: ParticleSpec = {
   count: 0,
   x: 0,
@@ -720,7 +807,7 @@ const CROWD_SPEC: ParticleSpec = {
   x: 0,
   y: 0,
   z: 0,
-  angle: -Math.PI * 0.5,
+  angle: Math.PI * 0.5,
   spread: 2.2,
   speed: [1, 3],
   life: [20, 40],
@@ -743,6 +830,13 @@ function byId(a: Fighter, b: Fighter): number {
  * Particles live in world space, the stage thinks in screen space, and the two
  * differ by the victim's depth — so every emission in this file goes through
  * here rather than doing the conversion four ways in forty places.
+ *
+ * `angle` is a SCREEN angle like everything else a renderer hands over: zero is
+ * right, and NEGATIVE is up, because the canvas's y runs down. The particle
+ * system's own angles run the other way (PI/2 is straight up), so it is turned
+ * over here, once. It used to be passed through as it stood, which sent every
+ * fountain in the book — written as `-PI / 2`, meaning "up" — straight into the
+ * floor, and every drip up into the air.
  */
 function emit(
   s: Stage,
@@ -765,7 +859,7 @@ function emit(
   SPEC.x = sx;
   SPEC.y = s.gy - sy;
   SPEC.z = s.vz;
-  SPEC.angle = angle;
+  SPEC.angle = -angle;
   SPEC.spread = spread;
   SPEC.speed[0] = speedLo;
   SPEC.speed[1] = speedHi;
@@ -1308,6 +1402,12 @@ export interface FatalityDeps {
   reducedMotion?: boolean;
   /** Everyone currently in the fight, for the follow-through to sweep. */
   crowd?: () => Fighter[];
+  /**
+   * The world's vertical framing offset, as the scene applies it inside its
+   * camera transform. The director needs it to work out where the floor will
+   * land on screen; left unset, it assumes there is none.
+   */
+  frameY?: number;
 }
 
 /** Nothing to sweep. Frozen and shared, so the no-crowd path allocates nothing. */
@@ -1370,6 +1470,15 @@ export class FatalityDirector {
 
   private savedZoom = 1;
   private targetX = 0;
+  private readonly frameY: number;
+
+  /** Frames the picture is being held on a blow. See `beat`. */
+  private hold = 0;
+  private holdBudget = 0;
+  /** Roll the last blow knocked the camera to; decays to nothing. */
+  private tiltKick = 0;
+  /** Frames of focus lines left. */
+  private focus = 0;
 
   /** Lens splatter, screen space. Presentation only, hence Math.random. */
   private readonly spX = new Float32Array(SPLAT_MAX);
@@ -1386,6 +1495,7 @@ export class FatalityDirector {
     this.cam = deps.cam;
     this.rng = deps.rng;
     this.crowd = deps.crowd ?? (() => NO_CROWD);
+    this.frameY = deps.frameY ?? 0;
     this.gore = deps.gore;
     this.reduced =
       deps.reducedMotion ??
@@ -1463,6 +1573,8 @@ export class FatalityDirector {
       gore: 1,
       reduced: this.reduced,
       seed: 0,
+      pan: 0,
+      lift: 0,
       ff: 0,
       ft: 0,
       fdur: 1,
@@ -1577,6 +1689,12 @@ export class FatalityDirector {
 
     this.savedZoom = this.cam.baseZoom;
     this.targetX = s.mx - VIEW_W * 0.5;
+    s.pan = 0;
+    s.lift = 0;
+    this.hold = 0;
+    this.holdBudget = HOLD_BUDGET;
+    this.tiltKick = 0;
+    this.focus = this.reduced ? 0 : FOCUS_FRAMES;
 
     // The stop. Everything after this happens in a room that has gone quiet.
     this.fx.slowmo(this.reduced ? 0.6 : 0.32, Math.min(26, s.dur));
@@ -1592,12 +1710,43 @@ export class FatalityDirector {
     this._active = false;
     this._done = true;
     this.inFlourish = false;
+    this.releaseCamera();
+  }
+
+  /** Everything the director borrowed from the camera, handed back at once. */
+  private releaseCamera(): void {
     this.cam.zoom = this.savedZoom;
+    this.cam.y = 0;
+    this.cam.rotation = 0;
+    this.hold = 0;
+    this.focus = 0;
   }
 
   update(): void {
     if (!this._active) return;
     const s = this.stage;
+
+    for (let i = 0; i < SPLAT_MAX; i++) {
+      if (this.spLife[i] > 0) this.spLife[i]--;
+    }
+    if (this.focus > 0) this.focus--;
+
+    /*
+     * The held frame.
+     *
+     * A blow that earned one stops the film on the picture of it landing: the
+     * clock does not advance, no cue fires, no beat is re-run. The camera keeps
+     * working — it is still settling from the knock — and that is all that
+     * moves. This is the same trick hitstop plays in the fight, and the reason
+     * a finisher's big hit used to feel lighter than an ordinary uppercut is
+     * that the fight had it and the film did not.
+     */
+    if (this.hold > 0) {
+      this.hold--;
+      if (this.inFlourish) this.driveFlourishCamera(s);
+      else this.driveCamera(s);
+      return;
+    }
 
     if (this.inFlourish) {
       this.updateFlourish(s);
@@ -1608,10 +1757,6 @@ export class FatalityDirector {
       this.driveCamera(s);
       this.playScheduledCues(s);
       if (this.vis?.tick) this.vis.tick(s);
-    }
-
-    for (let i = 0; i < SPLAT_MAX; i++) {
-      if (this.spLife[i] > 0) this.spLife[i]--;
     }
 
     if (this.inFlourish) {
@@ -1635,7 +1780,7 @@ export class FatalityDirector {
     this._active = false;
     this._done = true;
     this.inFlourish = false;
-    this.cam.zoom = this.savedZoom;
+    this.releaseCamera();
   }
 
   // ── the follow-through ─────────────────────────────────────────────────────
@@ -1869,7 +2014,14 @@ export class FatalityDirector {
 
     // Bigger crowd, bigger everything.
     const heft = Math.min(landed, 6);
-    this.hit(4 + heft * 2.4, 14 + heft * 3, wet > 0 ? Math.min(wet, 5) * 2 : 0);
+    // The blow landed on the crowd, not on the spot the victim died on.
+    this.hit(
+      4 + heft * 2.4,
+      14 + heft * 3,
+      wet > 0 ? Math.min(wet, 5) * 2 : 0,
+      cx,
+      (point ? s.ty : s.ky) - 22,
+    );
     if (landed > 0) {
       this.fx.slowmo(this.reduced ? 0.55 : 0.1, 5 + heft * 2);
       if (!this.reduced) this.cam.punch(0.05 + heft * 0.02);
@@ -1898,7 +2050,8 @@ export class FatalityDirector {
   private crowdImpact(f: Fighter): void {
     this.fx.impactFrame(f.id, this.reduced ? 3 : 5);
     const gore = goreMul(this.gore);
-    const up = -Math.PI * 0.5;
+    // World angles here, not the stage's: PI/2 is straight up. See `emit`.
+    const up = Math.PI * 0.5;
     CROWD_SPEC.x = f.pos.x;
     CROWD_SPEC.y = Math.max(0, f.pos.y) + 16;
     CROWD_SPEC.z = f.pos.z;
@@ -1994,7 +2147,19 @@ export class FatalityDirector {
     cam.zoom = zoom;
 
     const lead = this.frame < SLAM_IN ? 0.34 : 0.12;
-    cam.x = lerp(cam.x, this.targetX, this.reduced ? 0.2 : lead);
+    cam.x = lerp(cam.x, this.targetX + s.pan, this.reduced ? 0.2 : lead);
+
+    // Vertical framing rides on the zoom: all of it at the peak, none of it at
+    // the fight's own zoom, so the two arrive together and let go together and
+    // there is never a frame of one without the other. See FRAME_FLOOR_Y.
+    const k = clamp((zoom - this.savedZoom) / Math.max(0.01, peak - this.savedZoom), 0, 1);
+    const floor = Math.max(s.gy, s.ky);
+    const framed = floor + this.frameY - VIEW_H * 0.5 - (FRAME_FLOOR_Y - VIEW_H * 0.5) / peak;
+    cam.y = lerp(cam.y, (framed - s.lift) * k, this.frame < SLAM_IN ? 0.5 : 0.22);
+
+    // A slow lean into the shot, and whatever the last blow knocked it to.
+    this.tiltKick *= TILT_DECAY;
+    cam.rotation = this.reduced ? 0 : -s.dir * DUTCH * k + this.tiltKick;
   }
 
   /**
@@ -2010,9 +2175,22 @@ export class FatalityDirector {
     const mid = (s.kx + s.tx) * 0.5;
     const want = clamp(mid, s.kx - 110, s.kx + 110) - VIEW_W * 0.5;
     cam.x = lerp(cam.x, want, this.reduced ? 0.1 : 0.16);
+    // The fight's framing is level and unlifted; get back to it.
+    cam.y = lerp(cam.y, 0, 0.22);
+    this.tiltKick *= TILT_DECAY;
+    cam.rotation = this.reduced ? 0 : lerp(cam.rotation, 0, 0.2) + this.tiltKick * 0.5;
   }
 
-  /** Spread the def's cue list across the first two thirds of the film. */
+  /**
+   * Spread the def's cue list across the first two thirds of the film.
+   *
+   * These, and whatever the renderer plays from its own `tick`, are the whole
+   * soundtrack of a finisher — the director adds nothing of its own. It did,
+   * briefly: a boom on the stop, a sting on the title card and one big hit
+   * under every killing blow, the same three sounds on all forty-seven films.
+   * Every one of those films already has a sound written for exactly that
+   * moment, and a stock one laid over it only makes them all sound alike.
+   */
   private playScheduledCues(s: Stage): void {
     const cues = s.def.sfx;
     const n = cues.length;
@@ -2028,10 +2206,54 @@ export class FatalityDirector {
     this.audio.play(id, { pitch, gain });
   }
 
-  /** A visual asking for weight: shake, flash, and a wet lens if it earned it. */
-  hit(mag: number, frames = 12, splat = 0): void {
+  /**
+   * A visual asking for weight: shake, a wet lens if it earned it, and — from
+   * BEAT_FROM up — a beat of the film itself.
+   *
+   * `sx`/`sy` are where on screen the blow landed, for the impact star. Left
+   * out, it is the victim's chest, which is where most of the book hits.
+   */
+  hit(mag: number, frames = 12, splat = 0, sx?: number, sy?: number): void {
     this.fx.shake({ magnitude: mag, duration: frames });
     if (splat > 0) this.splatter(splat);
+    if (mag >= BEAT_FROM) this.beat(mag, sx, sy);
+  }
+
+  /**
+   * What a hard blow does to the film: the picture holds, the camera is
+   * knocked off its lean, and an ink star goes up where it landed. The hardest
+   * ones — the frame somebody actually dies on — also drain the colour out of
+   * the shot and pull the focus lines in.
+   *
+   * Every finisher in the book calls `hit` on its big moments, so this is the
+   * one place that had to change for all of them to get heavier at once.
+   */
+  private beat(mag: number, sx?: number, sy?: number): void {
+    const s = this.stage;
+    const kill = mag >= BEAT_KILL;
+
+    const want = Math.min(HOLD_MAX, Math.round(2 + (mag - BEAT_FROM) * 0.85));
+    const add = Math.min(Math.max(0, want - this.hold), this.holdBudget);
+    this.hold += add;
+    this.holdBudget -= add;
+
+    // The star is asked for in world terms; the stage thinks in screen ones.
+    const px = sx ?? s.vx;
+    const py = sy ?? s.vy - s.vh * 0.55;
+    this.fx.impactLines(px, s.gy - py, s.vz, s.dir, kill ? 2.6 : 1.4);
+    this.fx.flash('#ffffff', 2, this.reduced ? 0.08 : kill ? 0.42 : 0.2);
+    this.fx.aberration(0.25 + mag * 0.05, 8 + Math.round(mag));
+
+    if (!this.reduced) {
+      this.cam.punch(0.025 + mag * 0.006);
+      // Knocked the way the blow went, and a little further each time it is big.
+      this.tiltKick = s.dir * (0.012 + mag * 0.0024);
+    }
+    if (kill) {
+      this.fx.fatalityGrade(28, 0.8);
+      this.fx.slowmo(this.reduced ? 0.7 : 0.38, 12);
+      if (!this.reduced) this.focus = FOCUS_FRAMES;
+    }
   }
 
   /**
@@ -2062,9 +2284,41 @@ export class FatalityDirector {
     s.ctx = ctx;
     // Nothing to draw if the whole performance is off the side of the view.
     if (s.mx - cam.x < -260 || s.mx - cam.x > VIEW_W + 260) return;
+    this.drawVeil(ctx, cam, s);
     ctx.save();
     if (this.inFlourish && this.flVis) this.flVis.draw(s);
     else this.vis.draw(s);
+    ctx.restore();
+  }
+
+  /**
+   * The room goes dark and the two of them do not.
+   *
+   * Drawn after the map and before the performance, so it falls on everything
+   * that is NOT the finisher — the set, the props, the six guards waiting their
+   * turn — and leaves a pool of light on the floor under the pair. It is one
+   * gradient fill, and it does more for "this is the shot" than the zoom does:
+   * a busy factory floor behind a spine being pulled out is a lot of picture
+   * competing with the only part of it that matters.
+   *
+   * Gone by the time the follow-through starts, because the crowd is the shot
+   * then and has to be seen.
+   */
+  private drawVeil(ctx: C2D, cam: Camera, s: Stage): void {
+    if (this.inFlourish) return;
+    const k =
+      easeOut(clamp(this.frame / 10, 0, 1)) * (1 - clamp((this.frame - (s.dur - 18)) / 18, 0, 1));
+    if (k <= 0.01) return;
+    const cx = s.mx + s.pan;
+    const cy = s.gy - 30 - s.lift;
+    const g = ctx.createRadialGradient(cx, cy, 34, cx, cy, 210);
+    g.addColorStop(0, `rgba(7,6,11,${(VEIL_CORE * k).toFixed(3)})`);
+    g.addColorStop(1, `rgba(7,6,11,${(VEIL * k).toFixed(3)})`);
+    ctx.save();
+    ctx.fillStyle = g;
+    // Everything the camera could be showing, and then some: cheaper than
+    // working the visible rectangle back out through a zoom, a lift and a roll.
+    ctx.fillRect(cam.x - VIEW_W, -VIEW_H, VIEW_W * 3, VIEW_H * 3);
     ctx.restore();
   }
 
@@ -2082,6 +2336,8 @@ export class FatalityDirector {
     const inK = easeOut(clamp(shown / BAR_IN, 0, 1));
     const outK = 1 - easeIn(clamp((shown - (total - 14)) / 14, 0, 1));
     const bar = BAR_H * inK * outK;
+    // Under the bars, so the lines run out from behind the frame of the shot.
+    if (this.focus > 0) this.drawFocus(ctx, this.focus / FOCUS_FRAMES);
     if (bar > 0.5) {
       ctx.fillStyle = '#07060b';
       ctx.fillRect(0, 0, VIEW_W, bar);
@@ -2099,6 +2355,40 @@ export class FatalityDirector {
     } else if (t >= at) {
       this.drawBanner(ctx, clamp((t - at) / Math.max(0.02, 1 - at), 0, 1), bar);
     }
+  }
+
+  /**
+   * Focus lines: every edge of the frame pointing at the middle of it.
+   *
+   * The oldest trick in the comic for "LOOK HERE", used twice — on the frame
+   * the fight stops, and on the frame somebody dies. Re-dealt every other frame
+   * so they flicker like ink rather than sitting there like a sunburst, and off
+   * entirely under reduced motion, which is exactly the kind of thing that
+   * setting exists to switch off.
+   */
+  private drawFocus(ctx: C2D, k: number): void {
+    const cx = VIEW_W * 0.5;
+    const cy = VIEW_H * 0.56;
+    const deal = Math.floor(this.focus * 0.5);
+    const far = VIEW_W * 0.75;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = '#ffffff';
+    for (let i = 0; i < FOCUS_LINES; i++) {
+      const h = hash(i * 3.7 + deal * 11.3);
+      const h2 = hash(i * 9.1 + deal * 5.9);
+      const ang = (i / FOCUS_LINES) * TAU + (h - 0.5) * 0.16;
+      const near = 96 + h2 * 90 + (1 - k) * 60;
+      const w = 0.012 + h * 0.02;
+      ctx.globalAlpha = k * (0.1 + h2 * 0.22);
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(ang) * near, cy + Math.sin(ang) * near);
+      ctx.lineTo(cx + Math.cos(ang - w) * far, cy + Math.sin(ang - w) * far);
+      ctx.lineTo(cx + Math.cos(ang + w) * far, cy + Math.sin(ang + w) * far);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
   }
 
   private drawSplatter(ctx: C2D): void {
@@ -2127,7 +2417,10 @@ export class FatalityDirector {
     const def = this.def!;
     const slam = this.reduced ? easeOut(clamp(k * 6, 0, 1)) : easeOutBack(clamp(k * 5, 0, 1));
     const shudder = this.reduced ? 0 : Math.max(0, 1 - k * 8) * 3.2;
-    const cy = VIEW_H - bar - 44;
+    // Straddling the top edge of the bottom bar. It used to sit a card's height
+    // higher, which is exactly where the camera now puts the floor — and a
+    // title drawn across the body it is the title of has hidden its own joke.
+    const cy = VIEW_H - bar - 10;
 
     ctx.save();
     ctx.translate(VIEW_W * 0.5, cy);
@@ -3036,6 +3329,735 @@ VISUALS.cubicle_seal = {
   },
 };
 
+// ── PLAYER — the action reel ─────────────────────────────────────────────────
+//
+// The first thirteen are mostly one beat and a punchline: reach in, take the
+// thing, hold it up. These six are choreography — a launch and what happens in
+// the air, a barrage and the bill for it, a charge and everything it goes
+// through — and they are the ones that use the camera's `lift` and `pan`, since
+// a fight scene that never leaves the spot it started on is a tableau.
+//
+// One rule they all keep: the killer finishes where he started. The fight
+// resumes from his real position the frame the film ends, and a performer left
+// eighty pixels away would be seen to teleport home.
+
+/** How far up the org chart he goes, in screen pixels. */
+const SKIP_HEIGHT = 92;
+/** When the three rungs land, as fractions of the film, and what each one is. */
+const SKIP_RUNGS: readonly number[] = [0.42, 0.48, 0.54];
+const SKIP_TITLES: readonly string[] = ['VP', 'SVP', 'CEO'];
+
+/** 1 on the frame a rung lands, falling to 0 over the next few. */
+function rungPulse(t: number): number {
+  let k = 0;
+  for (const r of SKIP_RUNGS) if (t >= r) k = Math.max(k, 1 - seg(t, r, r + 0.045));
+  return k;
+}
+
+/** SKIP LEVEL — up the org chart one fist at a time, and back down it in one. */
+VISUALS.launch_spike = {
+  banner: 0.72,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    const crouch = seg(t, 0.04, 0.14);
+    const upper = seg(t, 0.14, 0.19);
+    const rise = seg(t, 0.17, 0.34);
+    const leap = seg(t, 0.26, 0.38);
+    const spike = seg(t, 0.6, 0.64);
+    const drop = seg(t, 0.62, 0.67);
+    const fall = seg(t, 0.7, 0.78);
+    const home = easeInOut(seg(t, 0.9, 0.98));
+    const landed = t >= 0.67;
+    const jolt = rungPulse(t);
+
+    // Where he is in the air, and where the other man hangs beside him.
+    const ax = s.vx + dir * 8;
+    const ay = -SKIP_HEIGHT * easeOut(rise) * (1 - easeIn(drop)) - jolt * 5 * (1 - drop);
+    const gap = s.vx - s.kx;
+    const beside = gap + dir * 8 - dir * s.kh * 0.42;
+
+    drawCrater(s, ax, s.gy, s.vh * 0.55, seg(t, 0.67, 0.72));
+
+    if (landed) {
+      bloodPool(s, ax, s.gy, s.vh * 0.5, seg(t, 0.68, 0.9));
+      squash(s, ax, s.gy, 1.12, 0.78, () => {
+        vict(s, dir * 8, 2, posePlank(0, 1));
+      });
+    } else if (upper <= 0) {
+      vict(s, 0, 0, poseSlump(0, crouch * 0.3));
+    } else {
+      // Tumbling on the way up, hung out flat for the three rungs, and coming
+      // down head first like something dropped off a roof.
+      const p = P(0);
+      spine(p, -0.3, -0.2, -0.2, -0.4);
+      arms(p, -1.4, 0.3, -1.6, 0.4);
+      legs(p, 0.5, 0.7, 0.2, 0.9);
+      const off = dir * 8 * easeOut(rise) + dir * jolt * 5;
+      const turn = dir * (rise * 2.2 + drop * 2.6);
+      rolled(s, s.vx + off, s.vy + ay - s.vh * 0.5, turn, () => {
+        vict(s, off, ay, p, 1, jolt > 0.6 ? 0.7 : 0);
+      });
+      if (jolt > 0.05) {
+        burst(s.ctx, ax, s.vy + ay - s.vh * 0.5, s.vh * 0.45 * jolt, 9, '#fff3c4', t * 9);
+      }
+      if (drop > 0 && drop < 1) {
+        const y = s.vy + ay - s.vh;
+        lineSmear(s, ax - 5, y, ax - 5, y - 46 * drop, 1.8, '#ffffff', 0.5);
+        lineSmear(s, ax + 6, y, ax + 6, y - 34 * drop, 1.4, '#ffffff', 0.4);
+      }
+    }
+
+    let kp: Pose;
+    let kdx = 0;
+    let kdy = 0;
+    if (t < 0.14) {
+      // Coiled under it. The whole uppercut is in the legs.
+      kp = P(1);
+      spine(kp, 0.3 * crouch, 0.2 * crouch, 0, -0.2 * crouch);
+      arms(kp, -0.7 * crouch, 1.2 * crouch, -0.9 * crouch, 1.4 * crouch);
+      legs(kp, 0.5 * crouch, 1.1 * crouch, 0.4 * crouch, 1.0 * crouch);
+      body(kp, 0, -4 * crouch);
+      kdx = dir * 5 * crouch;
+    } else if (t < 0.26) {
+      kp = posePresent(1, 0);
+      kdx = dir * 5;
+      kdy = -7 * Math.sin(upper * Math.PI);
+    } else if (t < 0.6) {
+      const up = easeOut(leap);
+      kdx = lerp(dir * 5, beside, up);
+      kdy = -(SKIP_HEIGHT - 4) * up;
+      // Fist, fist, boot. Each one a promotion he did not apply for.
+      const boot = t >= SKIP_RUNGS[2];
+      kp = boot ? poseKick(1, jolt) : poseThrust(1, 0.35 + jolt * 0.65, 0.3);
+    } else if (t < 0.7) {
+      kp = poseSwing(1, spike);
+      kdx = beside;
+      kdy = -(SKIP_HEIGHT - 4);
+    } else if (t < 0.78) {
+      kp = P(1);
+      arms(kp, -2.2, 0.2, -2.1, 0.2);
+      legs(kp, 0.5, 0.9, 0.3, 1.1);
+      kdx = lerp(beside, gap + dir * 8, fall);
+      kdy = -(SKIP_HEIGHT - 4) * (1 - easeIn(fall));
+    } else {
+      // Standing on the result, then stepping back off it to where he began.
+      kp = poseSmug(1, Math.sin(t * 40));
+      kdx = lerp(gap + dir * 8, 0, home);
+      kdy = lerp(-s.vh * 0.14, 0, home);
+    }
+    kill(s, kdx, kdy, kp);
+
+    for (let i = 0; i < SKIP_RUNGS.length; i++) {
+      const r = SKIP_RUNGS[i];
+      const sx = ax + dir * (s.vh * 0.5 + 14);
+      shout(s, SKIP_TITLES[i], sx, s.vy - SKIP_HEIGHT - s.vh * 0.3 + i * 5, seg(t, r, r + 0.1), 10, '#ffe14a');
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    // The camera goes up the org chart with them and comes back for the landing.
+    s.lift =
+      SKIP_HEIGHT * 0.6 * easeInOut(seg(s.t, 0.17, 0.36)) * (1 - easeIn(seg(s.t, 0.6, 0.68)));
+    const ax = s.vx + s.dir * 8;
+    const ay = s.vy - SKIP_HEIGHT - s.vh * 0.5;
+    if (at(0.14)) s.d.cue('whiff', 0.8, 0.7);
+    if (at(0.17)) {
+      s.d.cue('punch_heavy', 0.8);
+      s.d.hit(8, 14, 2);
+      dust(s, s.vx, s.gy, 10, 2.4);
+    }
+    if (at(0.26)) s.d.cue('jump', 1.1, 0.7);
+    for (let i = 0; i < SKIP_RUNGS.length; i++) {
+      if (!at(SKIP_RUNGS[i])) continue;
+      s.d.cue(i === 2 ? 'jump_kick' : 'punch_heavy', 1.1 + i * 0.12, 0.8);
+      s.d.hit(4.4 + i * 0.6, 8, i === 2 ? 2 : 0, ax, ay);
+      spray(s, ax, ay, 6 + i * 3, -Math.PI * 0.5, 2.2, 2.6);
+    }
+    if (at(0.6)) s.d.cue('whoosh_big', 1.5, 0.7);
+    if (at(0.62)) {
+      s.d.cue('punch_heavy', 0.7);
+      s.d.hit(7, 12, 3, ax, ay);
+    }
+    if (at(0.67)) {
+      s.d.cue('slam', 0.85);
+      s.d.cue('bone_snap', 0.9);
+      s.d.hit(12, 26, 8, ax, s.gy - 6);
+      dust(s, ax, s.gy, 26, 4.2);
+      spray(s, ax, s.gy - 4, 24, -Math.PI * 0.5, 2.6, 4.6);
+    }
+    if (at(0.78)) {
+      s.d.cue('slam', 1.2, 0.8);
+      s.d.hit(6.5, 12, 2, ax, s.gy - 8);
+      dust(s, ax, s.gy, 12, 2.6);
+    }
+  },
+};
+
+/** How many of them land. Nobody is counting; it is called a hundred anyway. */
+const FISTS = 14;
+
+/** ALREADY REDUNDANT — every blow lands now and is felt later, all at once. */
+VISUALS.hundred_fists = {
+  banner: 0.82,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    const step = seg(t, 0.03, 0.12);
+    const barrage = t >= 0.12 && t < 0.5;
+    const count = seg(t, 0.12, 0.5) * FISTS;
+    const turn = seg(t, 0.5, 0.57);
+    const snap = seg(t, 0.67, 0.71);
+    const cash = seg(t, 0.71, 0.79);
+    const fold = seg(t, 0.79, 0.9);
+
+    if (fold > 0) {
+      bloodPool(s, s.vx, s.gy, s.vh * 0.6, fold);
+      vict(s, 0, 0, poseSprawl(0, easeIn(fold)));
+    } else {
+      // Rattled where he stands, then perfectly fine, then not.
+      const rattle = barrage
+        ? jitter(s.seed, s.f) * 1.7
+        : cash > 0
+          ? jitter(s.seed, s.f * 3) * 3.2 * cash
+          : 0;
+      const vp = barrage
+        ? poseSlump(0, 0.2 + 0.08 * Math.sin(s.f * 1.7))
+        : poseStand(0, Math.sin(t * 30));
+      const flash = barrage ? ((s.f & 3) === 0 ? 0.45 : 0) : cash * 0.85;
+      squash(s, s.vx, s.vy - s.vh * 0.5, 1 + cash * 0.2, 1 + cash * 0.05, () => {
+        vict(s, rattle, 0, vp, 1, flash);
+      });
+    }
+
+    // Where each one went in. They flash as they land, go out, and all come
+    // back on together when the bill arrives.
+    for (let i = 0; i < FISTS; i++) {
+      if (count < i) break;
+      const mx = s.vx + jitter(s.seed, i + 7) * s.vh * 0.17;
+      const my = s.vy - s.vh * (0.28 + 0.5 * hash(s.seed * 0.013 + i * 3.1));
+      const age = count - i;
+      if (barrage && age < 1.3) {
+        burst(s.ctx, mx, my, s.vh * 0.17 * (1.3 - age), 7, '#fff3c4', i * 1.7);
+      } else if (cash > 0 && fold < 0.35) {
+        const lit = clamp(cash * FISTS * 1.3 - i, 0, 1);
+        if (lit > 0) burst(s.ctx, mx, my, s.vh * 0.22 * lit, 8, '#ffe14a', i + t * 9);
+      }
+    }
+
+    if (t < 0.5) {
+      const beat = barrage ? (s.f % 4) / 4 : 0;
+      const reach = barrage ? 0.5 + 0.5 * (1 - beat) : step * 0.45;
+      const lunge = step * 5 + (barrage ? (1 - beat) * 2 : 0);
+      kill(s, dir * lunge, 0, poseThrust(1, reach, ((s.f >> 2) & 1) * 0.5));
+      if (barrage) {
+        // The fists the eye cannot keep up with: three more of them, in flight.
+        const fromX = s.kx + dir * s.kh * 0.34;
+        const fromY = s.ky - s.kh * 0.62;
+        const toX = s.vx - dir * s.vh * 0.1;
+        for (let g = 0; g < 3; g++) {
+          const u = (s.f * 0.37 + g * 0.31) % 1;
+          const gx = lerp(fromX, toX, u);
+          const gy = fromY + jitter(s.seed, g + s.f) * s.vh * 0.15;
+          lineSmear(s, gx - dir * 9, gy, gx, gy, 1.6, '#ffffff', 0.35 * (1 - u));
+          ellipse(s.ctx, gx, gy, 2.6, 2.2, 0, s.killer.style.skin, INK, 1);
+        }
+      }
+    } else {
+      // Back turned. He is finished; the other man has not been told yet.
+      const kp = snap > 0 && snap < 1 ? posePresent(1, 0) : poseSmug(1, Math.sin(t * 30));
+      const face = (turn > 0.5 ? -dir : dir) as Facing;
+      actor(s, s.killer, s.kx + dir * 5 * (1 - easeInOut(turn)), s.ky, kp, face, s.ks);
+    }
+
+    shout(s, '?', s.vx, s.vy - s.vh * 1.18, seg(t, 0.57, 0.69), 12, '#e8e2ff');
+    shout(s, 'CLICK', s.kx - dir * 4, s.ky - s.kh * 1.3, seg(t, 0.68, 0.78), 8, '#ffe14a');
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    if (s.t >= 0.12 && s.t < 0.5 && s.f % 4 === 0) {
+      const n = s.f >> 2;
+      const my = s.vy - s.vh * (0.3 + 0.45 * hash(n * 2.9));
+      s.d.cue('punch_light', 0.9 + (n % 3) * 0.13, 0.55);
+      s.d.hit(2.2, 4);
+      if (s.mechanical) sparks(s, s.vx, my, 3, s.dir > 0 ? 0 : Math.PI);
+      else dust(s, s.vx, my, 2, 1.2);
+    }
+    if (at(0.5)) s.d.cue('whiff', 1.2, 0.5);
+    if (at(0.68)) s.d.cue('ui_select', 1.4, 0.8);
+    if (at(0.71) || at(0.735) || at(0.76)) {
+      s.d.cue('squelch', 1.1, 0.8);
+      s.d.hit(4.5, 6, 2);
+      spray(s, s.vx, s.vy - s.vh * 0.5, 9, -Math.PI * 0.5, 2.8, 3.4);
+    }
+    if (at(0.79)) {
+      s.d.cue('bone_snap', 0.9);
+      s.d.cue('ko', 0.9, 0.8);
+      s.d.hit(11, 24, 9);
+      spray(s, s.vx, s.vy - s.vh * 0.55, 34, -Math.PI * 0.5, 3, 5.2);
+      dust(s, s.vx, s.gy, 12, 2.4);
+    }
+    if (at(0.9)) s.d.cue('slam', 1.25, 0.6);
+  },
+};
+
+/** How high the pair of them go before they come back down as one object. */
+const PILE_HEIGHT = 88;
+
+/** BOTTOM LINE — turned over, taken up, and delivered to the floor head first. */
+VISUALS.piledriver = {
+  banner: 0.72,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    const grab = seg(t, 0.04, 0.14);
+    const flip = seg(t, 0.14, 0.26);
+    const up = seg(t, 0.26, 0.44);
+    const down = seg(t, 0.5, 0.58);
+    const planted = t >= 0.58;
+    // Held against the chest, half a step in front of him.
+    const holdX = s.kx + dir * s.kh * 0.3;
+
+    drawCrater(s, holdX, s.gy, s.vh * 0.5, seg(t, 0.58, 0.63));
+
+    if (!planted) {
+      const air = -PILE_HEIGHT * easeOut(up) * (1 - easeIn(down));
+      // One full turn between leaving the floor and meeting it again, so they
+      // come down exactly as they went up: him upright, the other man not.
+      const spin = dir * TAU * easeInOut(seg(t, 0.28, 0.57));
+      const cx = lerp(s.vx, holdX, easeInOut(grab));
+      rolled(s, holdX, s.ky + air - s.kh * 0.5, spin, () => {
+        rolled(s, cx, s.vy + air - s.vh * 0.5, Math.PI * easeInOut(flip) * dir, () => {
+          const p = P(0);
+          spine(p, 0.2 * grab, 0.1, 0, 0.2);
+          arms(p, -0.4 - flip * 1.6, 0.3, -0.5 - flip * 1.5, 0.3);
+          legs(p, 0.2 + flip * 0.3, 0.3 + flip * 0.5, -0.1 - flip * 0.2, 0.4 + flip * 0.4);
+          actor(s, s.victim, cx, s.vy + air, p, (-dir) as Facing, s.vs);
+        });
+        kill(s, 0, air, poseThrust(1, 0.5 + grab * 0.5, flip * 0.5));
+      });
+      if (down > 0) {
+        const y = s.ky + air - s.kh;
+        lineSmear(s, holdX - 7, y, holdX - 7, y - 44 * down, 1.8, '#ffffff', 0.5);
+        lineSmear(s, holdX + 8, y, holdX + 8, y - 30 * down, 1.4, '#ffffff', 0.4);
+      }
+      return;
+    }
+
+    // In to the shoulders. What is left above the floor is a pair of legs and
+    // an opinion, and the legs stop first.
+    const sink = s.vh * 0.3;
+    const twitch = (1 - seg(t, 0.58, 0.84)) * Math.sin(s.f * 0.9);
+    clipRect(s, holdX - 80, s.gy - 300, 160, 300, () => {
+      rolled(s, holdX, s.gy - s.vh * 0.5 + sink, Math.PI, () => {
+        const p = P(0);
+        arms(p, -0.3, 0.2, -0.3, 0.2);
+        legs(p, 0.25 + twitch * 0.5, 0.4 + twitch * 0.4, -0.2 - twitch * 0.5, 0.5 - twitch * 0.3);
+        actor(s, s.victim, holdX, s.gy + sink, p, (-dir) as Facing, s.vs);
+      });
+    });
+    bloodPool(s, holdX, s.gy, s.vh * 0.4, seg(t, 0.62, 0.9));
+
+    // He steps off it, has a look at his work, and goes back to his mark.
+    const off = seg(t, 0.58, 0.68);
+    const home = easeInOut(seg(t, 0.9, 0.98));
+    const kp = off < 1 ? poseReach(1, 0.4) : poseSmug(1, Math.sin(t * 30));
+    kill(s, -dir * s.kh * 0.55 * easeOut(off) * (1 - home), -Math.sin(off * Math.PI) * 14, kp);
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    s.lift =
+      PILE_HEIGHT * 0.6 * easeInOut(seg(s.t, 0.26, 0.44)) * (1 - easeIn(seg(s.t, 0.5, 0.6)));
+    const x = s.kx + s.dir * s.kh * 0.3;
+    if (at(0.06)) s.d.cue('grunt', 0.9);
+    if (at(0.14)) s.d.cue('whoosh_big', 1.3, 0.7);
+    if (at(0.26)) {
+      s.d.cue('jump', 0.9);
+      dust(s, s.kx, s.gy, 10, 2.2);
+    }
+    if (at(0.5)) s.d.cue('whoosh_big', 0.9);
+    if (at(0.58)) {
+      s.d.cue('slam', 0.8);
+      s.d.cue('bone_snap', 0.85);
+      s.d.hit(12.5, 28, 9, x, s.gy - 6);
+      dust(s, x, s.gy, 28, 4.4);
+      spray(s, x, s.gy - 3, 26, -Math.PI * 0.5, 2.4, 5);
+    }
+    if (at(0.68)) s.d.cue('land', 1.1, 0.6);
+    if (at(0.84)) s.d.cue('drop', 0.8, 0.5);
+  },
+};
+
+/** How far back each rollback carries the pair of them. */
+const SUPLEX_STEP = 26;
+const SUPLEX_STARTS: readonly number[] = [0.06, 0.28, 0.5];
+const SUPLEX_LEN = 0.22;
+/** How far through one suplex the other man meets the floor. */
+const SUPLEX_HIT = 0.55;
+/** A little past flat: enough to put the back of a head into the concrete. */
+const SUPLEX_ARC = 1.72;
+/** Each one lands harder than the last. The third is the one that sticks. */
+const SUPLEX_WEIGHT: readonly number[] = [7.5, 8.5, 11.5];
+
+/** When suplex `n` lands, as a fraction of the film. */
+function suplexHit(n: number): number {
+  return SUPLEX_STARTS[n] + SUPLEX_LEN * SUPLEX_HIT;
+}
+
+/**
+ * ROLLBACK — the same suplex three times, rewound between takes.
+ *
+ * The rewind is the joke and also the solution: a real suplex leaves both men
+ * on the floor, and getting them back up three times would be three getting-up
+ * animations nobody wants to watch. So the first two simply run backwards.
+ */
+VISUALS.suplex_chain = {
+  banner: 0.8,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    let i = 0;
+    for (let n = 0; n < SUPLEX_STARTS.length; n++) if (t >= SUPLEX_STARTS[n]) i = n;
+    const last = i === SUPLEX_STARTS.length - 1;
+    const u = seg(t, SUPLEX_STARTS[i], SUPLEX_STARTS[i] + SUPLEX_LEN);
+    const out = easeIn(seg(u, 0.2, SUPLEX_HIT));
+    // A breath on the floor, then back up the way it came.
+    const back = easeInOut(seg(u, SUPLEX_HIT + 0.1, 1));
+    const home = easeInOut(seg(t, 0.84, 0.96));
+    const down = last && u >= SUPLEX_HIT;
+    const hug = s.kh * 0.3;
+
+    const base = lerp(s.kx - dir * SUPLEX_STEP * (i + back), s.kx, home);
+    const vBase = down ? s.kx - dir * SUPLEX_STEP * i : base;
+    // The first clinch has to be walked into; after that he never gets out of it.
+    const clinch = easeInOut(seg(t, 0, SUPLEX_STARTS[0] + SUPLEX_LEN * 0.18));
+    const vx = lerp(s.vx, vBase + dir * hug, clinch);
+    const kAng = -dir * SUPLEX_ARC * out * (1 - back);
+    const vAng = down ? -dir * SUPLEX_ARC * 1.06 : kAng * 1.06;
+
+    // One dent per landing, each a step further back than the one before.
+    for (let n = 0; n <= i; n++) {
+      const x = s.kx - dir * (SUPLEX_STEP * n + s.vh * 0.95);
+      drawCrater(s, x, s.gy, s.vh * (0.3 + n * 0.08), seg(t, suplexHit(n), suplexHit(n) + 0.05));
+    }
+    if (down) dustPool(s, vBase - dir * s.vh * 0.9, s.gy, s.vh * 0.42, seg(t, suplexHit(i), 0.92));
+
+    rolled(s, vBase, s.ky, vAng, () => {
+      const flash = out > 0.95 && back <= 0 && !down ? 0.6 : 0;
+      const vp = poseSlump(0, (0.5 + out * 0.4) * clinch);
+      actor(s, s.victim, vx, lerp(s.vy, s.ky, clinch) - out * 3, vp, (-dir) as Facing, s.vs, 1, flash);
+    });
+    rolled(s, base, s.ky, kAng, () => {
+      const kp = t >= 0.74 ? poseSmug(1, Math.sin(t * 30)) : poseThrust(1, down ? 0.2 : 1, out * 0.4);
+      actor(s, s.killer, base, s.ky, kp, dir, s.ks);
+    });
+
+    // The tape running backwards.
+    if (!last && back > 0 && back < 1) {
+      for (let g = 0; g < 4; g++) {
+        const y = s.ky - s.kh * (0.2 + g * 0.28);
+        const x = base + dir * (10 + hash(g * 3.1 + s.f) * 30);
+        lineSmear(s, x, y, x + dir * 22, y, 0.9, NEON, 0.4 * Math.sin(back * Math.PI));
+      }
+    }
+    for (let n = 0; n < SUPLEX_STARTS.length; n++) {
+      const x = s.kx - dir * (SUPLEX_STEP * n + s.vh * 0.5);
+      const k = seg(t, suplexHit(n) + 0.02, suplexHit(n) + 0.13);
+      shout(s, n === 2 ? 'STILL BROKEN' : `ROLLBACK ${n + 1}`, x, s.ky - s.kh * 1.45, k, n === 2 ? 9 : 8, n === 2 ? '#ffe14a' : NEON);
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    let i = 0;
+    for (let n = 0; n < SUPLEX_STARTS.length; n++) if (s.t >= SUPLEX_STARTS[n]) i = n;
+    const u = seg(s.t, SUPLEX_STARTS[i], SUPLEX_STARTS[i] + SUPLEX_LEN);
+    const back = easeInOut(seg(u, SUPLEX_HIT + 0.1, 1));
+    // The camera backs up with them, and comes home when he does.
+    s.pan = -s.dir * SUPLEX_STEP * (i + back) * 0.9 * (1 - easeInOut(seg(s.t, 0.84, 0.96)));
+
+    for (let n = 0; n < SUPLEX_STARTS.length; n++) {
+      if (at(SUPLEX_STARTS[n] + SUPLEX_LEN * 0.18)) s.d.cue(n === 0 ? 'grunt' : 'whiff', 0.9 + n * 0.1);
+      if (!at(suplexHit(n))) continue;
+      const x = s.kx - s.dir * (SUPLEX_STEP * n + s.vh * 0.95);
+      s.d.cue('slam', 1.1 - n * 0.1);
+      s.d.hit(SUPLEX_WEIGHT[n], 14 + n * 5, 0, x, s.gy - 6);
+      dust(s, x, s.gy, 12 + n * 7, 2.6 + n * 0.7);
+      if (n === 2) {
+        s.d.cue('bone_snap', 0.9);
+      } else {
+        // The tape, spooling back.
+        s.d.cue('ui_back', 1.3, 0.6);
+      }
+    }
+  },
+};
+
+/** How high the pane hangs over the floor. */
+const CEILING = 80;
+const CEILING_HALF = 74;
+const GLASS = ['#dff3ff', '#9fd8ff', '#ffffff'];
+
+/** GLASS CEILING — he finally got through it. Most of the way. */
+VISUALS.glass_ceiling = {
+  banner: 0.6,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    const ctx = s.ctx;
+    const slide = easeOut(seg(t, 0.03, 0.18));
+    const crouch = seg(t, 0.14, 0.24);
+    const launch = seg(t, 0.24, 0.33);
+    const through = t >= 0.33;
+    const drop = seg(t, 0.36, 0.48);
+    const limp = seg(t, 0.4, 0.75);
+    const shoe = seg(t, 0.62, 0.74);
+    const home = easeInOut(seg(t, 0.9, 0.98));
+    const paneY = s.gy - CEILING;
+    // How much of him ends up on the executive floor: head and shoulders.
+    const stuck = -(CEILING + s.vh * 0.42 - s.vh);
+
+    if (!through) {
+      const look = seg(t, 0.06, 0.2);
+      const p = P(0);
+      spine(p, -0.1 * look, -0.12 * look, -0.35 * look, -0.6 * look);
+      arms(p, -0.3 - launch * 1.6, 0.4, -0.25 - launch * 1.7, 0.4);
+      legs(p, 0.05 + launch * 0.3, 0.12 + launch * 0.5, -0.05, 0.12 + launch * 0.6);
+      vict(s, 0, stuck * easeIn(launch), p, 1, launch > 0 && launch < 0.3 ? 0.6 : 0);
+    } else {
+      // Kicking, then not. The view from below is all anybody down here gets.
+      const k = (1 - limp) * Math.sin(s.f * 0.8);
+      const p = P(0);
+      arms(p, -2.2, 0.2, -2.3, 0.2);
+      legs(p, 0.3 + k * 0.7, 0.4 + k * 0.3, -0.2 - k * 0.7, 0.3 - k * 0.2);
+      vict(s, 0, stuck + Math.sin(s.f * 0.2) * 0.6 * (1 - limp), p);
+    }
+
+    // The pane, on two cables, and after him a pane with a man-shaped opinion in it.
+    ctx.save();
+    ctx.globalAlpha *= slide;
+    const y = paneY - 40 * (1 - slide);
+    const x0 = s.vx - CEILING_HALF;
+    const x1 = s.vx + CEILING_HALF;
+    capsule(ctx, x0 + 8, y - 70, x0 + 8, y, 0.7, STEEL_DARK, 'none');
+    capsule(ctx, x1 - 8, y - 70, x1 - 8, y, 0.7, STEEL_DARK, 'none');
+    if (!through) {
+      roundRect(ctx, x0, y - 3, CEILING_HALF * 2, 5, 1, 'rgba(159,216,255,0.36)', GLASS[0], 1);
+    } else {
+      const hole = s.vh * 0.2;
+      roundRect(ctx, x0, y - 3, CEILING_HALF - hole, 5, 1, 'rgba(159,216,255,0.36)', GLASS[0], 1);
+      roundRect(ctx, s.vx + hole, y - 3, CEILING_HALF - hole, 5, 1, 'rgba(159,216,255,0.36)', GLASS[0], 1);
+      for (let i = 0; i < 6; i++) {
+        const side = i & 1 ? 1 : -1;
+        const len = 14 + hash(i * 4.7) * 26;
+        zigzag(ctx, s.vx + side * hole, y, s.vx + side * (hole + len), y + (hash(i * 2.2) - 0.5) * 3, 1.4, 4, GLASS[0], 0.8);
+      }
+    }
+    label(s, 'L7 EXECUTIVE', x1 - 6, y - 10, 4.5, GLASS[0], 'right', '700');
+    ctx.restore();
+
+    const gap = s.vx - s.kx - dir * s.kh * 0.3;
+    const jump = Math.max(8, CEILING - s.kh * 1.28);
+    let kp: Pose;
+    let kdy = 0;
+    if (t < 0.24) {
+      kp = P(1);
+      spine(kp, 0.3 * crouch, 0.2 * crouch, 0, -0.3 * crouch);
+      arms(kp, -0.7 * crouch, 1.2 * crouch, -0.9 * crouch, 1.4 * crouch);
+      legs(kp, 0.5 * crouch, 1.1 * crouch, 0.4 * crouch, 1.0 * crouch);
+      body(kp, 0, -4 * crouch);
+    } else if (t < 0.36) {
+      kp = posePresent(1, 0);
+      kdy = -jump * easeOut(launch);
+    } else if (t < 0.48) {
+      kp = poseReach(1, 0.2);
+      kdy = -jump * (1 - easeIn(drop));
+    } else {
+      // Looking up at it. Then the shoe arrives.
+      const bonk = seg(t, 0.74, 0.86);
+      kp = shoe >= 1 ? poseSlump(1, 0.3 * Math.sin(bonk * Math.PI)) : poseReach(1, 0.5);
+    }
+    const kdx = gap * easeOut(seg(t, 0.14, 0.24)) * (1 - home);
+    kill(s, kdx, kdy, kp);
+
+    if (shoe > 0) {
+      // One shoe, off one foot, onto the one person standing under it.
+      const headY = s.ky - s.kh * 1.04;
+      const fromY = s.vy + stuck;
+      const bounce = seg(t, 0.74, 0.84);
+      const sx = lerp(s.vx, s.kx + kdx, shoe) + dir * bounce * 16;
+      const sy = shoe < 1 ? lerp(fromY, headY, easeIn(shoe)) : lerp(headY, s.gy - 3, easeIn(bounce)) - Math.sin(bounce * Math.PI) * 12;
+      rolled(s, sx, sy, shoe * 5 + bounce * 4, () => {
+        roundRect(ctx, sx - 4, sy - 2, 8, 4, 1.6, '#2a2530', INK, 1.1);
+      });
+      shout(s, 'BONK', s.kx + kdx, headY - 12, seg(t, 0.74, 0.86), 8, '#ffe14a');
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    const paneY = s.gy - CEILING;
+    // Up just far enough to keep his head in shot above the pane, and no
+    // further: the man standing under it has to stay in the picture too.
+    s.lift = 12 * easeInOut(seg(s.t, 0.1, 0.3)) * (1 - seg(s.t, 0.92, 1));
+    if (at(0.03)) s.d.cue('ui_move', 0.7, 0.5);
+    if (at(0.24)) {
+      s.d.cue('jump', 0.9);
+      s.d.cue('punch_heavy', 0.8);
+      s.d.hit(8, 14, 2);
+      dust(s, s.vx, s.gy, 10, 2.4);
+    }
+    if (at(0.33)) {
+      s.d.cue('glass', 1);
+      s.d.cue('hit_flesh', 0.8);
+      s.d.hit(10.5, 22, 0, s.vx, paneY);
+      emit(s, s.vx, paneY, 28, Math.PI * 0.5, 2.6, 1, 4.2, GLASS, 'shard', 0.3, 2.6, 64);
+    }
+    if (at(0.48)) s.d.cue('land', 1, 0.6);
+    if (at(0.74)) {
+      s.d.cue('drop', 1.4, 0.7);
+      s.d.hit(2, 4);
+    }
+  },
+};
+
+/** How far the charge carries, and where along it each partition stands. */
+const PLAN_RUN = 150;
+const PLAN_WALLS: readonly number[] = [0.3, 0.55, 0.8];
+/** The charge itself, as fractions of the film. */
+const PLAN_FROM = 0.24;
+const PLAN_TO = 0.6;
+const PLAN_WEIGHT: readonly number[] = [7, 8, 9.5];
+const PARTITION = ['#8d93a0', '#5f6673', '#c9cfd9', '#3f8f86'];
+
+/** When partition `n` is gone through, as a fraction of the film. */
+function planCrash(n: number): number {
+  return PLAN_FROM + (PLAN_TO - PLAN_FROM) * PLAN_WALLS[n];
+}
+
+/** OPEN PLAN — three partitions, one shoulder, and a man used as the door. */
+VISUALS.wall_run = {
+  banner: 0.72,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    const ctx = s.ctx;
+    const wind = seg(t, 0.04, 0.16);
+    const dash = easeIn(seg(t, 0.16, 0.24));
+    const run = seg(t, PLAN_FROM, PLAN_TO);
+    const skid = seg(t, PLAN_TO, 0.66);
+    const fly = seg(t, PLAN_TO, 0.74);
+    const back = easeInOut(seg(t, 0.78, 0.96));
+    const contact = s.vx - s.kx - dir * s.kh * 0.34;
+
+    // The partitions: up out of the floor while he paws the ground, and then
+    // in two pieces each, the top one travelling.
+    for (let n = 0; n < PLAN_WALLS.length; n++) {
+      const x = s.vx + dir * (PLAN_RUN * PLAN_WALLS[n] + 14);
+      const h = 62 * easeOut(wind);
+      const q = seg(t, planCrash(n), planCrash(n) + 0.16);
+      if (q <= 0) {
+        roundRect(ctx, x - 3, s.gy - h, 6, h, 1, PARTITION[0], INK, 1.3);
+        roundRect(ctx, x - 2, s.gy - h + 3, 4, Math.max(0, h * 0.5), 1, PARTITION[3], 'none');
+      } else {
+        roundRect(ctx, x - 3, s.gy - 13, 6, 13, 1, PARTITION[1], INK, 1.3);
+        // Two and a half turns: it lands flat, a step past where it stood.
+        const px = x + dir * 54 * easeOut(q);
+        const py = s.gy - 38 - Math.sin(q * Math.PI) * 30 + easeIn(q) * 35;
+        rolled(s, px, py, dir * q * Math.PI * 2.5, () => {
+          roundRect(ctx, px - 3, py - 24, 6, 48, 1, PARTITION[0], INK, 1.3);
+        });
+      }
+    }
+
+    // Him: a step back, a sprinter's lean, and then nothing but shoulder.
+    const stride = Math.sin(s.f * 0.9);
+    let kdx: number;
+    let kp: Pose;
+    if (t < 0.16) {
+      kdx = -dir * 10 * wind;
+      kp = P(1);
+      tilt(kp, 0.28 * wind);
+      arms(kp, 0.6 * wind, 1.2 * wind, -0.5 * wind, 1.1 * wind);
+      legs(kp, 0.5 * wind, 0.9 * wind, -0.5 * wind, 0.5 * wind);
+      body(kp, 0, -3 * wind);
+    } else if (t < 0.66) {
+      kdx = lerp(-dir * 10, contact, dash) + dir * PLAN_RUN * run;
+      kp = P(1);
+      tilt(kp, 0.5 - skid * 0.75);
+      arms(kp, 0.9, 1.5, 0.8, 1.4);
+      legs(kp, 0.8 * stride, 0.6 + 0.5 * stride, -0.8 * stride, 0.6 - 0.5 * stride);
+    } else if (t < 0.78) {
+      kdx = contact + dir * PLAN_RUN;
+      kp = poseSmug(1, Math.sin(t * 34));
+    } else {
+      // The walk back through the gaps he has just made.
+      kdx = (contact + dir * PLAN_RUN) * (1 - back);
+      kp = back < 1 ? P(1) : poseSmug(1, Math.sin(t * 34));
+      if (back < 1) {
+        arms(kp, 0.4 * stride, 0.3, -0.4 * stride, 0.3);
+        legs(kp, 0.45 * stride, 0.2 + 0.2 * stride, -0.45 * stride, 0.2 - 0.2 * stride);
+      }
+    }
+    const face = (t >= 0.78 && back < 1 ? -dir : dir) as Facing;
+    actor(s, s.killer, s.kx + kdx, s.ky, kp, face, s.ks);
+    if (run > 0 && run < 1) {
+      for (let g = 0; g < 3; g++) {
+        const y = s.ky - s.kh * (0.3 + g * 0.3);
+        lineSmear(s, s.kx + kdx - dir * (14 + g * 5), y, s.kx + kdx - dir * (40 + g * 9), y, 1.1, '#ffffff', 0.35);
+      }
+    }
+
+    // The other man: folded over the shoulder for the whole trip, and then
+    // let go of, which at that speed is the same as being thrown.
+    if (dash < 1) {
+      vict(s, 0, 0, poseReach(0, wind * 0.6));
+    } else if (fly <= 0) {
+      let flash = 0;
+      for (let n = 0; n < PLAN_WALLS.length; n++) {
+        if (t >= planCrash(n)) flash = Math.max(flash, 1 - seg(t, planCrash(n), planCrash(n) + 0.03));
+      }
+      vict(s, dir * PLAN_RUN * run, -s.kh * 0.22, poseSlump(0, 1), 1, flash * 0.8);
+    } else if (fly < 1) {
+      const u = easeOut(fly);
+      const x = s.vx + dir * (PLAN_RUN + u * 300);
+      const y = s.vy - s.kh * 0.22 - Math.sin(u * Math.PI) * 26;
+      rolled(s, x, y - s.vh * 0.5, dir * fly * 9, () => {
+        actor(s, s.victim, x, y, poseSlump(0, 1), (-dir) as Facing, s.vs, clamp(1.4 - fly * 1.4, 0, 1));
+      });
+    }
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    const dir = s.dir;
+    // The camera runs with them, and walks back with him.
+    s.pan =
+      dir * PLAN_RUN * 0.8 * easeInOut(seg(s.t, 0.2, PLAN_TO)) * (1 - easeInOut(seg(s.t, 0.78, 0.96)));
+    if (at(0.05) || at(0.11)) {
+      s.d.cue('dash', 0.8, 0.6);
+      dust(s, s.kx, s.gy, 5, 1.6);
+    }
+    if (at(0.16)) s.d.cue('dash', 1.1);
+    if (at(0.24)) {
+      s.d.cue('punch_heavy', 0.8);
+      s.d.hit(7, 12, 2);
+    }
+    for (let n = 0; n < PLAN_WALLS.length; n++) {
+      if (!at(planCrash(n))) continue;
+      const x = s.vx + dir * (PLAN_RUN * PLAN_WALLS[n] + 14);
+      s.d.cue('crash', 1.1 - n * 0.07);
+      s.d.hit(PLAN_WEIGHT[n], 12 + n * 4, 0, x, s.gy - 34);
+      emit(s, x, s.gy - 34, 14 + n * 4, dir > 0 ? 0 : Math.PI, 1.6, 1.6, 5, PARTITION, 'shard', 0.28, 3, 54);
+    }
+    if (at(PLAN_TO)) {
+      s.d.cue('tyres', 1.2, 0.6);
+      dust(s, s.vx + dir * PLAN_RUN, s.gy, 12, 2.4);
+    }
+    if (at(0.74)) {
+      s.d.cue('crash', 0.8, 0.6);
+      s.d.hit(5, 12);
+    }
+  },
+};
+
 // ── ENEMY — the damage type is humiliation ───────────────────────────────────
 
 /** Where a fighter's mouth is, near enough, on both skeletons. */
@@ -3522,6 +4544,208 @@ VISUALS.escort_out = {
     }
     if (at(0.58)) s.d.cue('ui_back', 0.9, 0.5);
     if (at(0.84)) dust(s, s.kx, s.ky - s.kh * 0.8, 8, 1.2);
+  },
+};
+
+/** How many times round he goes before anybody lets go. */
+const SPIN_TURNS = 4.5;
+
+/** TEAM BUILDING — the trust fall, performed at altitude, with nobody briefed to catch. */
+VISUALS.airplane_spin = {
+  banner: 0.76,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    const grab = seg(t, 0.04, 0.12);
+    const press = seg(t, 0.12, 0.2);
+    const spin = seg(t, 0.2, 0.6);
+    const fly = seg(t, 0.6, 0.76);
+    const ang = spin * spin * TAU * SPIN_TURNS;
+    const c = Math.cos(ang);
+    // Overhead, at arm's length: where a small man is held by a large one.
+    const topY = s.ky - s.kh * 1.12;
+
+    if (spin > 0 && spin < 1) {
+      spinDust(s, spin, ang);
+      spinBody(s, ang, poseHoist(1, 1));
+    } else if (t < 0.2) {
+      kill(s, 0, 0, press > 0 ? poseHoist(1, press) : poseThrust(1, grab));
+    } else {
+      // Empty hands, dusted off. Nothing to see up there any more.
+      const done = seg(t, 0.6, 0.68);
+      kill(s, 0, 0, done < 1 ? poseHoist(1, 1 - done) : poseSmug(1, Math.sin(t * 38)));
+    }
+
+    if (fly <= 0) {
+      // Lifted off his feet, turned flat, and then the room goes round.
+      const lift = easeInOut(seg(t, 0.06, 0.2));
+      const cx = lerp(s.vx, s.kx, lift);
+      const cy = lerp(s.vy - s.vh * 0.5, topY, lift);
+      const flat = dir * Math.PI * 0.5 * lift * (c >= 0 ? 1 : -1);
+      if (spin > 0.1) {
+        arcSmear(s, s.kx, topY, s.vh * 0.62, 3.2, ang, ang + 2.4, 2.2, '#ffffff', 0.3 * spin);
+      }
+      squash(s, cx, cy, spin > 0 ? Math.max(0.28, Math.abs(c)) : 1, 1, () => {
+        rolled(s, cx, cy, flat, () => {
+          const p = P(0);
+          const flail = Math.sin(s.f * 0.7) * spin;
+          arms(p, -2.3 + flail * 0.4, 0.15, -2.5 - flail * 0.4, 0.15);
+          legs(p, 0.3 + flail * 0.5, 0.3, -0.3 - flail * 0.5, 0.35);
+          head2(p, 0.6 * spin, 0.8 * spin);
+          actor(s, s.victim, cx, cy + s.vh * 0.5, p, (-dir) as Facing, s.vs);
+        });
+      });
+    } else if (fly < 1) {
+      // Released on the upswing. He leaves the shot before he has finished
+      // working out which way is down.
+      const u = easeOut(fly);
+      const x = s.kx + dir * u * 330;
+      const y = topY - Math.sin(u * Math.PI * 0.8) * 46;
+      lineSmear(s, x - dir * 34, y + 4, x - dir * 8, y, 1.6, '#ffffff', 0.4 * (1 - fly));
+      rolled(s, x, y, dir * fly * 14, () => {
+        const p = P(0);
+        arms(p, -2.3, 0.15, -2.5, 0.15);
+        legs(p, 0.6, 0.3, -0.5, 0.35);
+        actor(s, s.victim, x, y + s.vh * 0.5, p, (-dir) as Facing, s.vs * (1 - u * 0.25), clamp(1.5 - fly * 1.5, 0, 1));
+      });
+    }
+
+    shout(s, 'WHEEE', s.kx - dir * (s.vh * 0.6 + 22), topY + 4, seg(t, 0.3, 0.6), 9, '#e8e2ff');
+    shout(s, 'NOBODY?', s.kx - dir * 6, s.ky - s.kh * 1.3, seg(t, 0.8, 0.96), 8, '#ffe14a');
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    const spin = seg(s.t, 0.2, 0.6);
+    if (at(0.04)) s.d.cue('grunt', 0.8);
+    if (at(0.12)) s.d.cue('whiff', 0.7, 0.7);
+    // The whoosh comes round faster every time he does.
+    if (spin > 0 && spin < 1 && s.f % Math.max(4, Math.round(15 - spin * 11)) === 0) {
+      s.d.cue('whiff', 0.8 + spin * 0.8, 0.45);
+      if (spin > 0.5) s.d.hit(1.6, 4);
+    }
+    if (at(0.6)) {
+      s.d.cue('whoosh_big', 1.2);
+      s.d.hit(5, 10);
+    }
+    if (at(0.78)) {
+      // Somewhere off to the side, something that was not his breaks his fall.
+      s.d.cue('crash', 0.9, 0.7);
+      s.d.cue('glass', 0.9, 0.6);
+      s.d.hit(6.5, 14, 0, s.kx + s.dir * 260, s.ky - 20);
+    }
+    if (at(0.86)) s.d.cue('ui_back', 0.9, 0.6);
+  },
+};
+
+/** How far downfield the posts stand, and how tall the bar is. */
+const PUNT_POSTS = 128;
+const PUNT_BAR = 46;
+const POST = '#ffd166';
+
+/** KICKED UPSTAIRS — a lateral move, mostly vertical, and it is good. */
+VISUALS.punt = {
+  banner: 0.74,
+  draw(s) {
+    const t = s.t;
+    const dir = s.dir;
+    const ctx = s.ctx;
+    const back = seg(t, 0.05, 0.25);
+    const runUp = easeIn(seg(t, 0.27, 0.41));
+    const boot = seg(t, 0.41, 0.46);
+    const fly = seg(t, 0.42, 0.74);
+    const good = seg(t, 0.72, 0.8);
+    const u = easeOut(fly);
+    const px = s.vx + dir * PUNT_POSTS;
+
+    // The far upright first: he goes BETWEEN them, so one of them is behind him.
+    const rise = easeOut(seg(t, 0.03, 0.2));
+    const postH = 112 * rise;
+    capsule(ctx, px + dir * 9, s.gy - 6, px + dir * 9, s.gy - 6 - postH, 1.6, POST, INK, 1.2);
+
+    if (fly <= 0) {
+      // Set down like a ball: on his knees, seeing stars, facing the wrong way.
+      vict(s, 0, 0, poseKneel(0, 1), 1, 0);
+      const k = 0.5 + 0.5 * Math.sin(s.f * 0.3);
+      star(ctx, s.vx - 7 + k * 14, s.vy - s.vh * 0.92, 2.2, 5, '#ffe14a', 'none');
+      star(ctx, s.vx + 7 - k * 14, s.vy - s.vh * 0.98, 1.8, 5, '#ffffff', 'none');
+    } else if (fly < 1) {
+      // Tucked, end over end, getting smaller. A good clean strike.
+      const x = s.vx + dir * u * (PUNT_POSTS + 70);
+      const y = s.vy - Math.sin(u * Math.PI * 0.86) * 96 - u * 14;
+      const sc = s.vs * (1 - u * 0.3);
+      rolled(s, x, y - s.vh * 0.3, dir * fly * 20, () => {
+        const p = P(0);
+        spine(p, 0.5, 0.4, 0.2, 0.4);
+        arms(p, 0.9, 1.6, 0.9, 1.6);
+        legs(p, 1.2, 1.9, 1.1, 1.9);
+        actor(s, s.victim, x, y, p, (-dir) as Facing, sc, clamp(1.6 - fly * 1.6, 0, 1));
+      });
+    }
+
+    // Crossbar and the near upright, in front of everything that went through.
+    capsule(ctx, px - dir * 9, s.gy, px - dir * 9, s.gy - postH, 1.8, POST, INK, 1.3);
+    if (rise > 0.5) {
+      capsule(ctx, px - dir * 9, s.gy - PUNT_BAR, px + dir * 9, s.gy - 6 - PUNT_BAR, 1.6, POST, INK, 1.2);
+    }
+
+    // Three steps back, a run-up, and a boot that starts behind the hip.
+    const stride = Math.sin(s.f * 0.8);
+    const start = -dir * 26 * easeInOut(back);
+    let kp: Pose;
+    let kdx: number;
+    if (t < 0.27) {
+      kdx = start;
+      kp = P(1);
+      arms(kp, 0.3 * stride * back, 0.3, -0.3 * stride * back, 0.3);
+      legs(kp, -0.4 * stride * back, 0.2, 0.4 * stride * back, 0.25);
+    } else if (t < 0.41) {
+      kdx = lerp(-dir * 26, 0, runUp);
+      kp = P(1);
+      tilt(kp, 0.25);
+      arms(kp, 0.9 * stride, 0.9, -0.9 * stride, 0.9);
+      legs(kp, 0.8 * stride, 0.6 + 0.4 * stride, -0.8 * stride, 0.6 - 0.4 * stride);
+    } else if (good <= 0) {
+      // Through it, back on two feet, and a hand up to watch it go.
+      kdx = 0;
+      const watch = seg(t, 0.5, 0.6);
+      kp = watch < 1 ? poseKick(1, boot * (1 - watch)) : poseReach(1, 0.35);
+    } else {
+      // Both arms straight up. Every sport has agreed on what that means.
+      kdx = 0;
+      kp = poseReach(1, 1);
+    }
+    kill(s, kdx, 0, kp);
+
+    if (boot > 0 && boot < 1) {
+      burst(ctx, s.vx - dir * 4, s.vy - s.vh * 0.3, s.vh * 0.5 * (1 - boot), 9, '#fff3c4', t * 8);
+    }
+    shout(s, "IT'S GOOD", px, s.gy - PUNT_BAR - 62, seg(t, 0.74, 0.96), 11, '#ffe14a');
+  },
+  tick(s) {
+    const at = (u: number) => s.f === Math.round(s.dur * u);
+    const dir = s.dir;
+    const px = s.vx + dir * PUNT_POSTS;
+    // The camera follows the ball, like every broadcast there has ever been.
+    const track = easeInOut(seg(s.t, 0.42, 0.66)) * (1 - easeInOut(seg(s.t, 0.86, 0.98)));
+    s.pan = dir * PUNT_POSTS * 0.62 * track;
+    s.lift = 40 * track;
+    if (at(0.07) || at(0.13) || at(0.19)) {
+      s.d.cue('land', 1.2, 0.4);
+      dust(s, s.kx - dir * 12, s.gy, 3, 1.2);
+    }
+    if (at(0.27)) s.d.cue('dash', 1);
+    if (at(0.41)) s.d.cue('whoosh_big', 1.6, 0.6);
+    if (at(0.42)) {
+      s.d.cue('jump_kick', 0.8);
+      s.d.hit(9.5, 18, 0, s.vx, s.vy - s.vh * 0.3);
+      dust(s, s.vx, s.gy, 14, 3);
+    }
+    if (at(0.72)) {
+      s.d.cue('coin', 1.2);
+      confetti(s, px, s.gy - PUNT_BAR - 30, 26);
+    }
+    if (at(0.76)) s.d.cue('coin', 1.5, 0.8);
+    if (at(0.8)) s.d.cue('laugh', 1, 0.8);
   },
 };
 

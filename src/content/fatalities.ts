@@ -244,6 +244,91 @@ export const FATALITIES: FatalityDef[] = [
     trophy: 'none',
   },
 
+  // The action reel. These six are choreography rather than a single beat —
+  // a launch and what happens in the air, a barrage and the bill for it — and
+  // their renderers do their own sound to the frame, so `sfx` is only the
+  // effort that starts them. Half are `light` on purpose: a finisher that is
+  // all movement and no viscera is exactly what the default setting should
+  // have the most of.
+  {
+    id: 'skip_level',
+    name: 'SKIP LEVEL',
+    banner: "Went over his manager's head. Then his manager's.",
+    duration: 184,
+    by: 'player',
+    weight: 9,
+    gore: 'heavy',
+    visual: 'launch_spike',
+    sfx: ['grunt'],
+    // He finishes standing on it. There is nothing left to pick up.
+    trophy: 'none',
+  },
+  {
+    id: 'already_redundant',
+    name: 'ALREADY REDUNDANT',
+    banner: 'He just has not been told yet.',
+    duration: 188,
+    by: 'player',
+    weight: 8,
+    gore: 'heavy',
+    visual: 'hundred_fists',
+    sfx: ['grunt'],
+    // Fourteen fists and a snap of the fingers. Both hands are his own.
+    trophy: 'none',
+  },
+  {
+    id: 'bottom_line',
+    name: 'THE BOTTOM LINE',
+    banner: 'Read it carefully. It is at the bottom.',
+    duration: 176,
+    by: 'player',
+    weight: 9,
+    gore: 'heavy',
+    visual: 'piledriver',
+    sfx: ['whiff'],
+    // Planted to the shoulders. It is scenery now.
+    trophy: 'none',
+  },
+  {
+    id: 'rollback',
+    name: 'ROLLBACK',
+    banner: 'Three rollbacks. Still broken.',
+    duration: 190,
+    by: 'player',
+    weight: 8,
+    gore: 'light',
+    visual: 'suplex_chain',
+    sfx: ['whiff'],
+    // Left where the third one put him.
+    trophy: 'none',
+  },
+  {
+    id: 'glass_ceiling',
+    name: 'GLASS CEILING',
+    banner: 'He finally got through it. Most of the way.',
+    duration: 176,
+    by: 'player',
+    weight: 8,
+    gore: 'light',
+    visual: 'glass_ceiling',
+    sfx: ['whiff'],
+    // One shoe, off one foot, delivered to the top of his head.
+    trophy: 'object',
+  },
+  {
+    id: 'open_plan',
+    name: 'OPEN PLAN',
+    banner: 'No walls. Not any more.',
+    duration: 190,
+    by: 'player',
+    weight: 8,
+    gore: 'light',
+    visual: 'wall_run',
+    sfx: ['grunt'],
+    // Thrown through the last one and not seen again.
+    trophy: 'none',
+  },
+
   // ───────────────────────────────────────────────────────────────────────────
   // ENEMY — what security does to a dwarf. Humiliation is the damage type.
   // ───────────────────────────────────────────────────────────────────────────
@@ -324,6 +409,32 @@ export const FATALITIES: FatalityDef[] = [
     visual: 'escort_out',
     sfx: ['grunt', 'drop', 'ui_back'],
     // He walks back in dusting his hands, which is the whole shot.
+    trophy: 'none',
+  },
+  {
+    id: 'team_building',
+    name: 'TEAM BUILDING',
+    banner: 'The trust fall. Nobody was briefed to catch.',
+    duration: 186,
+    by: 'enemy',
+    weight: 9,
+    gore: 'light',
+    visual: 'airplane_spin',
+    sfx: ['grunt'],
+    // Let go of at the top of the swing, which empties the hands by definition.
+    trophy: 'none',
+  },
+  {
+    id: 'kicked_upstairs',
+    name: 'KICKED UPSTAIRS',
+    banner: 'A lateral move. Mostly vertical.',
+    duration: 184,
+    by: 'enemy',
+    weight: 9,
+    gore: 'light',
+    visual: 'punt',
+    sfx: ['land'],
+    // Through the uprights and into the car park.
     trophy: 'none',
   },
 

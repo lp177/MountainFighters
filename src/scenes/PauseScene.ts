@@ -19,23 +19,22 @@
 import type { NetConfig, NetPlayer, Scene, SceneName, Settings } from '@/core/types';
 
 import { DEFAULT_INPUT_DELAY, VIEW_H, VIEW_W } from '@/core/constants';
-import { clamp } from '@/core/math';
 import { saveSave } from '@/engine/Save';
 import { KeyboardSource, refreshOwnedKeys } from '@/engine/input/KeyboardSource';
 import { defaultBindingsFor } from '@/engine/input/Bindings';
 
-import { Ui, setReducedMotion } from '@/ui/Ui';
+import { Ui } from '@/ui/Ui';
 import { MenuInput } from '@/ui/MenuInput';
 import { gamepadPanel, keyBindingEditor } from '@/ui/KeyBindingEditor';
-import { button, panel, slider, toggle } from '@/ui/Widgets';
-
-import { setGoreLevel } from '@/game/Fighter';
+import { button, panel } from '@/ui/Widgets';
+import { settingsBody } from '@/ui/SettingsPanel';
 
 import { NetSession } from '@/net/NetSession';
 import { inviteLink } from '@/net/Room';
 
 import type { SceneHost } from '@/scenes/FightScene';
 
+import { PALETTE, inkText } from '@/ui/theme';
 // ─────────────────────────────────────────────────────────────────────────────
 // Scene navigation
 // ─────────────────────────────────────────────────────────────────────────────
@@ -194,29 +193,6 @@ export interface PauseParams {
 
 type View = 'root' | 'settings' | 'controls' | 'invite';
 
-const DISPLAY = 'Impact, "Arial Black", "Helvetica Neue", system-ui, sans-serif';
-
-/**
- * The gore control, as a three-stop slider.
- *
- * A slider rather than three radio buttons because the setting really is a
- * dial — off, on, more — and because it then behaves exactly like the screen
- * shake row sitting above it: same widget, same keyboard, same left/right on a
- * d-pad through `MenuInput.adjust`. The labels are what the player reads; the
- * index is an implementation detail that never leaves this file.
- */
-const GORE_LEVELS: readonly Settings['gore'][] = ['off', 'on', 'max'];
-const GORE_LABELS: readonly string[] = ['Off', 'On', 'Maximum'];
-
-function goreIndex(level: Settings['gore']): number {
-  const i = GORE_LEVELS.indexOf(level);
-  return i < 0 ? 1 : i;
-}
-
-function goreAt(v: number): Settings['gore'] {
-  return GORE_LEVELS[clamp(Math.round(v), 0, GORE_LEVELS.length - 1)] ?? 'on';
-}
-
 export class PauseScene implements Scene {
   readonly name = 'pause';
 
@@ -300,35 +276,34 @@ export class PauseScene implements Scene {
     const ctx = r.ctx;
 
     r.begin();
-    ctx.globalAlpha = 0.66;
-    ctx.fillStyle = '#04050a';
-    ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+    // The fight stays visible on the right, frozen mid-swing; the left, where
+    // the menu stands, goes nearly to black so the list reads without a box.
     ctx.globalAlpha = 1;
+    ctx.fillStyle = 'rgba(12,10,9,0.55)';
+    ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+    const g = ctx.createLinearGradient(0, 0, VIEW_W * 0.62, 0);
+    g.addColorStop(0, 'rgba(12,10,9,0.9)');
+    g.addColorStop(0.6, 'rgba(12,10,9,0.55)');
+    g.addColorStop(1, 'rgba(12,10,9,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, VIEW_W, VIEW_H);
 
-    // Hazard chevrons down the left edge. The menu itself is DOM; this is frame.
-    for (let y = -8; y < VIEW_H; y += 16) {
-      ctx.fillStyle = ((y / 16) | 0) % 2 === 0 ? '#ff2e6e' : '#1a141f';
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(6, y + 8);
-      ctx.lineTo(6, y + 16);
-      ctx.lineTo(0, y + 8);
-      ctx.closePath();
-      ctx.fill();
-    }
+    // One lamp-gold stripe down the left edge: the frame, not a decoration.
+    ctx.fillStyle = PALETTE.lamp;
+    ctx.fillRect(0, 0, 3, VIEW_H);
 
-    stamp(ctx, 'PAUSED', 12, VIEW_H - 14, 14, '#ffe14a', 'left');
+    // Where you are, quietly, bottom right. The menu itself says PAUSED.
     const map = this.params.mapName;
-    if (map) {
+    if (map && this.view === 'root') {
       const idx = this.params.mapIndex;
-      stamp(
+      inkText(
         ctx,
-        `${idx === undefined ? '' : `${idx}  `}${map}`.toUpperCase(),
-        VIEW_W - 12,
+        `${idx === undefined ? '' : `MAP ${String(idx).padStart(2, '0')}  ·  `}${map}`.toUpperCase(),
+        VIEW_W - 14,
         VIEW_H - 14,
         9,
-        '#9aa2b8',
-        'right',
+        PALETTE.boneDim,
+        { align: 'right', weight: 800, shadow: 0 },
       );
     }
     r.end();
@@ -362,149 +337,68 @@ export class PauseScene implements Scene {
   }
 
   private rootView(): HTMLElement {
-    const stack = div('stack');
+    const view = document.createElement('nav');
+    view.className = 'ui-view--pause';
+    view.setAttribute('aria-label', 'Pause menu');
 
     const title = document.createElement('h1');
     title.className = 'title';
     title.textContent = 'Paused';
-    stack.appendChild(title);
+    view.appendChild(title);
 
     const sub = document.createElement('p');
     sub.className = 'hint';
-    sub.textContent =
-      'She is still in there. The clock is not running — but it never really stops.';
-    stack.appendChild(sub);
+    sub.textContent = 'She is still in there. The clock is not running — but it never really stops.';
+    view.appendChild(sub);
 
-    const rows = div('stack');
-    rows.appendChild(
-      button('Resume', () => this.resume(), {
-        variant: 'filled',
-        wide: true,
-        autofocus: true,
-        icon: '▶',
-      }),
+    const list = div('menu');
+    list.appendChild(
+      button('Resume', () => this.resume(), { variant: 'filled', wide: true, autofocus: true }),
     );
-    rows.appendChild(
+    list.appendChild(
       button('Invite a friend', () => this.invite(), {
-        variant: 'tonal',
+        variant: 'outlined',
         wide: true,
-        icon: '⚑',
         title: 'Open the lobby and hand somebody a link, mid-fight',
       }),
     );
-    rows.appendChild(
-      button('Settings', () => this.go('settings'), { variant: 'tonal', wide: true, icon: '⚙' }),
-    );
-    rows.appendChild(
-      button('Controls', () => this.go('controls'), { variant: 'tonal', wide: true, icon: '⌨' }),
-    );
-    rows.appendChild(
-      button('Quit to menu', () => this.quit(), { variant: 'danger', wide: true, icon: '⏻' }),
-    );
-    stack.appendChild(panel('', rows));
+    list.appendChild(button('Settings', () => this.go('settings'), { variant: 'outlined', wide: true }));
+    list.appendChild(button('Controls', () => this.go('controls'), { variant: 'outlined', wide: true }));
+    list.appendChild(div('menu__rule'));
+    list.appendChild(button('Quit to title', () => this.quit(), { variant: 'danger', wide: true }));
+    view.appendChild(list);
 
-    const foot = document.createElement('p');
-    foot.className = 'hint';
-    foot.textContent = 'Esc resumes. Arrows or the d-pad move, Enter or A activates, B goes back.';
-    stack.appendChild(foot);
-
-    return stack;
+    const keys = document.createElement('p');
+    keys.className = 'menu__keys';
+    keys.setAttribute('aria-hidden', 'true');
+    for (const [k, verb] of [
+      ['Esc', 'Resume'],
+      ['Enter', 'Select'],
+    ] as const) {
+      const span = document.createElement('span');
+      const kbd = document.createElement('kbd');
+      kbd.textContent = k;
+      span.append(kbd, document.createTextNode(verb));
+      keys.appendChild(span);
+    }
+    view.appendChild(keys);
+    return view;
   }
 
   private settingsView(): HTMLElement {
-    const s = this.settings;
-    const body = div('stack');
-
-    body.appendChild(
-      slider('Master volume', 0, 1, s.masterVolume, (v) => {
-        s.masterVolume = v;
-        this.persist();
-      }),
-    );
-    body.appendChild(
-      slider('Music', 0, 1, s.musicVolume, (v) => {
-        s.musicVolume = v;
-        this.persist();
-      }),
-    );
-    body.appendChild(
-      slider('Sound effects', 0, 1, s.sfxVolume, (v) => {
-        s.sfxVolume = v;
-        this.host.audio.play('punch_light', { gain: 0.7 });
-        this.persist();
-      }),
-    );
-    body.appendChild(
-      slider(
-        'Screen shake',
-        0,
-        2,
-        s.screenShake,
-        (v) => {
-          s.screenShake = v;
-          this.persist();
-        },
-        {
-          step: 0.1,
-          format: (v) => `${Math.round(v * 100)}%`,
-          help: 'Zero turns the camera kick off completely.',
-        },
-      ),
-    );
-    body.appendChild(
-      slider(
-        'Gore',
-        0,
-        GORE_LEVELS.length - 1,
-        goreIndex(s.gore),
-        (v) => {
-          const level = goreAt(v);
-          if (level === s.gore) return;
-          s.gore = level;
-          // One module-level value drives the fighters, the combat resolver and
-          // the fatality director, so this lands on the fight frozen behind this
-          // menu rather than on the next one.
-          setGoreLevel(level);
-          this.host.audio.play(level === 'off' ? 'ui_back' : 'hit_flesh', { gain: 0.7 });
-          this.persist();
-        },
-        {
-          step: 1,
-          format: (v) => GORE_LABELS[clamp(Math.round(v), 0, GORE_LABELS.length - 1)] ?? 'On',
-          help:
-            'Off keeps the punches, the torn clothes and the wheezing — no blood, no finishers. ' +
-            'Maximum is a decision you are making on purpose.',
-        },
-      ),
-    );
-    body.appendChild(
-      toggle(
-        'Reduced motion',
-        s.reducedMotion,
-        (v) => {
-          s.reducedMotion = v;
-          setReducedMotion(v);
-          this.persist();
-        },
-        { help: 'Cuts particles, slow motion, screen flashes and menu animation.' },
-      ),
-    );
-    body.appendChild(
-      toggle(
-        'Show hitboxes',
-        s.showHitboxes,
-        (v) => {
-          s.showHitboxes = v;
-          this.persist();
-        },
-        { help: 'Draws every live hitbox and hurtbox. Ugly, honest, useful.' },
-      ),
-    );
+    const body = settingsBody({
+      settings: this.settings,
+      commit: () => this.persist(),
+      audio: this.host.audio,
+      midRun: true,
+    });
 
     const foot = div('row row--end');
     foot.appendChild(button('Back', () => this.back(), { variant: 'filled', autofocus: true }));
 
     const stack = div('stack');
+    stack.style.width = 'min(680px, 100%)';
+    stack.style.marginInline = 'auto';
     stack.appendChild(panel('Settings', body));
     stack.appendChild(foot);
     return stack;
@@ -514,9 +408,8 @@ export class PauseScene implements Scene {
     const intro = document.createElement('p');
     intro.className = 'hint';
     intro.textContent =
-      'Keys are stored by position on the board rather than by the letter on the cap, so the ' +
-      'movement diamond is ZQSD on an AZERTY keyboard and WASD on a QWERTY one on its own. ' +
-      'Change anything you like: it lands on the fight you are standing in, not on the next one.';
+      'Keys go by where they sit, not by what is printed on them. Pick a box and press a key ' +
+      'to rebind it — it lands on the fight you are standing in, not on the next one.';
 
     const editor = keyBindingEditor({
       bindings: this.settings.bindings,
@@ -537,7 +430,7 @@ export class PauseScene implements Scene {
     foot.appendChild(button('Back', () => this.back(), { variant: 'filled' }));
 
     const stack = div('stack');
-    stack.appendChild(panel('Controls', intro, editor, notes));
+    stack.appendChild(panel('Keyboard', intro, editor, notes));
     // Pads follow the same rule as the keys — bound by position, printed by
     // vendor — so this panel reads the pads that are actually in somebody's
     // hands and prints their own letters, mid-fight plug-ins included.
@@ -836,14 +729,5 @@ export function stamp(
   fill: string,
   align: CanvasTextAlign = 'center',
 ): void {
-  ctx.font = `900 ${size}px ${DISPLAY}`;
-  ctx.textAlign = align;
-  ctx.textBaseline = 'alphabetic';
-  ctx.lineJoin = 'round';
-  ctx.miterLimit = 2;
-  ctx.lineWidth = Math.max(1.6, size * 0.24);
-  ctx.strokeStyle = '#120e18';
-  ctx.strokeText(value, x, y);
-  ctx.fillStyle = fill;
-  ctx.fillText(value, x, y);
+  inkText(ctx, value, x, y, size, fill, { align, weight: 900, italic: true });
 }

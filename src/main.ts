@@ -19,6 +19,8 @@ import { installKeyboard } from '@/engine/input/KeyboardSource';
 import { roomIdFromUrl } from '@/net/Room';
 import { installServiceWorker } from '@/pwa/sw-client';
 import { showUpdatePrompt } from '@/pwa/UpdatePrompt';
+import { loadFonts } from '@/ui/fonts';
+import { FONT_DISPLAY, FONT_TEXT, PALETTE } from '@/ui/theme';
 
 const CRASH_TITLE = 'THE MOUNTAIN COLLAPSED';
 const CRASH_HINT = 'Reload the page. If it keeps happening, blame the billionaire.';
@@ -46,6 +48,19 @@ function boot(): void {
   const game = new Game(canvas, uiRoot);
   game.onFatal = (err) => crash(err, canvas, uiRoot);
 
+  // The first frame waits for the typefaces (or a short timeout): canvas text
+  // does not reflow when a font lands, so starting early would paint the title
+  // in a fallback face and leave it there for a frame or fifty.
+  void loadFonts().then(() => {
+    try {
+      start(game);
+    } catch (err) {
+      crash(err, canvas, uiRoot);
+    }
+  });
+}
+
+function start(game: Game): void {
   // A guest who opened an invite link goes straight to the lobby with the room
   // id already in hand — clicking the link IS the join.
   const room = roomIdFromUrl();
@@ -153,7 +168,7 @@ function crash(err: unknown, canvas: HTMLCanvasElement | null, uiRoot: HTMLEleme
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
 
-  ctx.fillStyle = '#06070a';
+  ctx.fillStyle = PALETTE.coal;
   ctx.fillRect(0, 0, VIEW_W, VIEW_H);
 
   // Hazard stripes across the top, because this is that kind of game.
@@ -161,9 +176,9 @@ function crash(err: unknown, canvas: HTMLCanvasElement | null, uiRoot: HTMLEleme
   ctx.beginPath();
   ctx.rect(0, 0, VIEW_W, 10);
   ctx.clip();
-  ctx.fillStyle = '#ffd23f';
+  ctx.fillStyle = PALETTE.lamp;
   ctx.fillRect(0, 0, VIEW_W, 10);
-  ctx.fillStyle = '#06070a';
+  ctx.fillStyle = PALETTE.coal;
   for (let x = -20; x < VIEW_W + 20; x += 20) {
     ctx.beginPath();
     ctx.moveTo(x, 10);
@@ -178,16 +193,16 @@ function crash(err: unknown, canvas: HTMLCanvasElement | null, uiRoot: HTMLEleme
   const margin = 34;
   const maxWidth = VIEW_W - margin * 2;
 
-  ctx.font = '900 30px Impact, "Arial Black", "Helvetica Neue", system-ui, sans-serif';
-  ctx.fillStyle = '#ff2e6e';
+  ctx.font = `italic 900 34px ${FONT_DISPLAY}`;
+  ctx.fillStyle = PALETTE.blood;
   ctx.fillText(CRASH_TITLE, margin, 74);
 
-  ctx.font = '600 13px ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif';
-  ctx.fillStyle = '#a2aabb';
+  ctx.font = `500 13px ${FONT_TEXT}`;
+  ctx.fillStyle = PALETTE.boneDim;
   ctx.fillText('The game failed to start. What it managed to say about it:', margin, 100);
 
   ctx.font = '13px ui-monospace, "Cascadia Mono", Consolas, monospace';
-  ctx.fillStyle = '#eceff6';
+  ctx.fillStyle = PALETTE.bone;
   let y = 128;
   for (const line of wrap(ctx, message, maxWidth)) {
     ctx.fillText(line, margin, y);
@@ -195,8 +210,8 @@ function crash(err: unknown, canvas: HTMLCanvasElement | null, uiRoot: HTMLEleme
     if (y > VIEW_H - 60) break;
   }
 
-  ctx.font = '600 13px ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif';
-  ctx.fillStyle = '#6d768a';
+  ctx.font = `500 13px ${FONT_TEXT}`;
+  ctx.fillStyle = PALETTE.boneFaint;
   ctx.fillText(CRASH_HINT, margin, VIEW_H - 30);
 }
 
@@ -207,11 +222,11 @@ function crashToDom(message: string): void {
   box.style.cssText =
     'position:fixed;inset:0;display:flex;flex-direction:column;gap:12px;' +
     'align-items:center;justify-content:center;padding:32px;text-align:center;' +
-    'background:#06070a;color:#eceff6;font:16px ui-sans-serif,system-ui,sans-serif;z-index:9999';
+    `background:${PALETTE.coal};color:${PALETTE.bone};font:16px ${FONT_TEXT};z-index:9999`;
 
   const title = document.createElement('h1');
   title.textContent = CRASH_TITLE;
-  title.style.cssText = 'margin:0;color:#ff2e6e;font:900 32px "Arial Black",Impact,sans-serif';
+  title.style.cssText = `margin:0;color:${PALETTE.blood};font:italic 900 34px ${FONT_DISPLAY}`;
 
   const detail = document.createElement('p');
   detail.textContent = message;
@@ -219,7 +234,7 @@ function crashToDom(message: string): void {
 
   const hint = document.createElement('p');
   hint.textContent = CRASH_HINT;
-  hint.style.cssText = 'margin:0;color:#6d768a';
+  hint.style.cssText = `margin:0;color:${PALETTE.boneFaint}`;
 
   box.append(title, detail, hint);
   document.body.appendChild(box);

@@ -51,13 +51,40 @@ export const WALK_SPEED = 1.75;
 export const RUN_SPEED = 3.6;
 export const DASH_SPEED = 6.2;
 export const DASH_FRAMES = 14;
-export const JUMP_VELOCITY = 11.2;
+/**
+ * Take-off speed of a jump, and the gravity a jumper falls under.
+ *
+ * A jump used to leave at 11.2 under the world's own gravity, which peaks at a
+ * hundred units — more than twice the height of the dwarf doing it. A standing
+ * hurtbox stops at 51, so for two thirds of the arc an aerial was swinging at
+ * the air above everybody's head, and the jump was a way of not being in the
+ * fight. This pair peaks at about 55: over a low blow, level with a guard's
+ * chin, and never out of reach of the thing you jumped at.
+ *
+ * The gravity is the jumper's own, and only the jumper's. A lower arc under
+ * GRAVITY would be over in twenty-two frames, which is no time to throw
+ * anything; and softening GRAVITY itself would re-tune every launch and juggle
+ * in the game to pay for it. Bodies that were HIT into the air still fall at
+ * GRAVITY — see `Fighter.physics`.
+ */
+export const JUMP_VELOCITY = 7.0;
+export const JUMP_GRAVITY = 0.42;
 /** Frames within which a second tap counts as a double-tap dash. */
 export const DOUBLE_TAP_FRAMES = 14;
 /** Input buffer window — a button pressed this many frames early still fires. */
 export const INPUT_BUFFER_FRAMES = 6;
 /** Coyote time: frames after leaving the ground where jump still works. */
 export const COYOTE_FRAMES = 4;
+/**
+ * Frames into a ground normal that a jump press still turns it into the aerial.
+ *
+ * "Jump and kick at the same time" is two fingers, and two fingers never land
+ * on the same sixtieth of a second. When the attack arrives first it has
+ * already started on the floor, so for this long — shorter than any normal's
+ * startup, so nothing has been thrown yet — a jump takes it back and re-issues
+ * it in the air. See `Fighter.jumpOutOfMove`.
+ */
+export const JUMP_ATTACK_LENIENCY = 3;
 
 // ── Combat ───────────────────────────────────────────────────────────────────
 
@@ -176,7 +203,7 @@ export const STARTING_LIVES = 3;
 // ── Networking ───────────────────────────────────────────────────────────────
 
 /** Wire-format version; peers refuse to connect across a mismatch. */
-export const NET_VERSION = '2';
+export const NET_VERSION = '3';
 /** Minimum input lead; the host raises it from measured RTT/jitter. ~50ms at 60Hz. */
 export const DEFAULT_INPUT_DELAY = 3;
 /** Send a state checksum every N frames to catch desyncs early. */

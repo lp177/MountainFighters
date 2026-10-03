@@ -30,6 +30,7 @@ import { inviteLink } from '@/net/Room';
 import { MenuInput } from '@/ui/MenuInput';
 import { attachRipple, button, panel } from '@/ui/Widgets';
 
+import { FONT_DISPLAY, PALETTE, inkText, trackedText } from '@/ui/theme';
 type C2D = CanvasRenderingContext2D;
 
 /** Params handed to `setScene('lobby', …)` / `pushScene('lobby', …)`. */
@@ -56,13 +57,11 @@ export interface LobbyParams {
 
 type Phase = 'opening' | 'joining' | 'open' | 'error';
 
-const ACCENT = '#ff2e6e';
-const GOLD = '#ffd23f';
-const DIM = '#a2aabb';
-const FAINT = '#6d768a';
+const ACCENT = PALETTE.lamp;
+const DIM = PALETTE.boneDim;
+const FAINT = PALETTE.boneFaint;
 
-const DISPLAY = '"Arial Black", "Helvetica Neue", Impact, system-ui, sans-serif';
-const SANS = 'ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif';
+const DISPLAY = FONT_DISPLAY;
 
 /** Refresh the roster on this cadence so pings tick even between net events. */
 const REFRESH_EVERY = 20;
@@ -282,7 +281,7 @@ export class LobbyScene implements Scene {
       ctx.fillRect(0, 0, VIEW_W, VIEW_H);
       this.drawBanner(ctx, t);
     } else {
-      r.clear('#06070a');
+      r.clear(PALETTE.coal);
       this.drawBackdrop(ctx, t);
     }
     r.end();
@@ -920,9 +919,9 @@ export class LobbyScene implements Scene {
 
   private drawBackdrop(ctx: C2D, t: number): void {
     const g = ctx.createLinearGradient(0, 0, 0, VIEW_H);
-    g.addColorStop(0, '#05060b');
-    g.addColorStop(0.5, '#100c22');
-    g.addColorStop(1, '#08070f');
+    g.addColorStop(0, '#07080d');
+    g.addColorStop(0.55, '#141018');
+    g.addColorStop(1, '#0c0908');
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, VIEW_W, VIEW_H);
 
@@ -930,7 +929,7 @@ export class LobbyScene implements Scene {
       const x = hash01(i * 5 + 1) * VIEW_W;
       const y = hash01(i * 5 + 2) * 210;
       ctx.globalAlpha = 0.2 + 0.5 * (0.5 + 0.5 * Math.sin(t * 0.026 + i));
-      ctx.fillStyle = '#dbe3ff';
+      ctx.fillStyle = '#e7e9f2';
       ctx.fillRect(x, y, 1, 1);
     }
     ctx.globalAlpha = 1;
@@ -945,8 +944,8 @@ export class LobbyScene implements Scene {
         const ang = -Math.PI / 2 + Math.sin(t * 0.0055 + k * Math.PI) * 1.05;
         const beam = ctx.createLinearGradient(bx, by, bx + Math.cos(ang) * 320, by + Math.sin(ang) * 320);
         const on = this.phase === 'open' ? 0.16 : 0.07;
-        beam.addColorStop(0, `rgba(255,46,110,${on})`);
-        beam.addColorStop(1, 'rgba(255,46,110,0)');
+        beam.addColorStop(0, `rgba(255,181,36,${on})`);
+        beam.addColorStop(1, 'rgba(255,181,36,0)');
         ctx.fillStyle = beam;
         ctx.beginPath();
         ctx.moveTo(bx, by);
@@ -967,23 +966,25 @@ export class LobbyScene implements Scene {
     }
     ctx.lineTo(VIEW_W + 4, VIEW_H);
     ctx.closePath();
-    ctx.fillStyle = '#0a0d18';
+    ctx.fillStyle = '#14121a';
     ctx.fill();
 
-    ctx.fillStyle = '#06070c';
+    ctx.fillStyle = '#0e0b0a';
     ctx.fillRect(0, 292, VIEW_W, VIEW_H - 292);
-    ctx.strokeStyle = 'rgba(255,46,110,0.2)';
+    ctx.strokeStyle = 'rgba(255,181,36,0.2)';
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(0, 292.5);
     ctx.lineTo(VIEW_W, 292.5);
     ctx.stroke();
 
-    this.drawBanner(ctx, t);
-
-    // The overlay is where the actual work happens; dim the canvas under it.
-    ctx.fillStyle = 'rgba(4,5,8,0.5)';
+    // The overlay is where the actual work happens; dim the scenery under it —
+    // but not the room code, which is the one thing on this screen somebody
+    // may have to read out loud over the phone. It used to sit under the dim.
+    ctx.fillStyle = 'rgba(12,10,9,0.45)';
     ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+
+    this.drawBanner(ctx, t);
   }
 
   private drawBanner(ctx: C2D, t: number): void {
@@ -993,21 +994,19 @@ export class LobbyScene implements Scene {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'alphabetic';
 
-    ctx.font = `900 11px ${DISPLAY}`;
-    ctx.fillStyle = FAINT;
-    ctx.fillText(this.fromPause ? 'INVITE, MID-FIGHT' : 'WAITING ROOM', VIEW_W * 0.5, 40);
+    ctx.font = `800 11px ${DISPLAY}`;
+    trackedText(ctx, this.fromPause ? 'INVITE, MID-FIGHT' : 'WAITING ROOM', VIEW_W * 0.5, 38, 3, DIM, 'center');
 
-    ctx.font = `900 40px ${DISPLAY}`;
-    ctx.globalAlpha = 0.85;
-    ctx.lineWidth = 6;
-    ctx.lineJoin = 'round';
-    ctx.strokeStyle = '#141019';
-    ctx.strokeText(code, VIEW_W * 0.5, 78);
-    ctx.fillStyle = this.phase === 'open' ? GOLD : DIM;
-    ctx.fillText(code, VIEW_W * 0.5, 78);
-    ctx.globalAlpha = 1;
+    inkText(ctx, code, VIEW_W * 0.5, 78, 42, this.phase === 'open' ? ACCENT : DIM, {
+      align: 'center',
+      weight: 900,
+      italic: true,
+      shadow: 2.6,
+      tracking: 1.5,
+    });
+    ctx.textAlign = 'center';
 
-    ctx.font = `700 9px ${SANS}`;
+    ctx.font = `800 9px ${DISPLAY}`;
     ctx.fillStyle = players > 1 ? ACCENT : FAINT;
     const pulse = 0.6 + 0.4 * Math.sin(t * 0.05);
     ctx.globalAlpha = players > 1 ? 1 : clamp(pulse, 0, 1);

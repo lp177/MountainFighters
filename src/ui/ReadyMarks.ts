@@ -17,6 +17,7 @@
 
 import { clamp } from '@/core/math';
 
+import { PALETTE, displayFont } from '@/ui/theme';
 type C2D = CanvasRenderingContext2D;
 
 export interface ReadyMark {
@@ -30,7 +31,7 @@ export interface ReadyMark {
 
 const GREY = '#3a4152';
 const GREY_DARK = '#242a37';
-const INK = '#06070a';
+const INK = PALETTE.coal;
 
 /**
  * Bottom-right of the stage, right-aligned, growing leftwards so the newest
@@ -67,7 +68,7 @@ export function drawReadyMarks(
 
     if (m.label) {
       ctx.globalAlpha = m.ready ? 0.9 : 0.5;
-      ctx.font = `700 6px ui-sans-serif, system-ui, sans-serif`;
+      ctx.font = displayFont(6.5, 800);
       ctx.fillStyle = m.ready ? m.color : GREY;
       ctx.fillText(m.label, x, y + 8);
     }
@@ -102,7 +103,7 @@ function bust(ctx: C2D, cx: number, baseY: number, u: number, color: string, lit
   ctx.fillRect(cx - w * 0.46, top + u * 0.5, w * 0.92, u * 0.16);
 
   // Beard.
-  ctx.fillStyle = lit ? '#eceff6' : GREY;
+  ctx.fillStyle = lit ? PALETTE.bone : GREY;
   ctx.beginPath();
   ctx.moveTo(cx - w * 0.42, top + u * 0.72);
   ctx.quadraticCurveTo(cx, top + u * 1.28, cx + w * 0.42, top + u * 0.72);

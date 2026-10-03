@@ -32,6 +32,7 @@ import {
   statRow,
 } from '@/scenes/PauseScene';
 
+import { PALETTE } from '@/ui/theme';
 type C2D = CanvasRenderingContext2D;
 
 /** What the fight scene hands the results screens so they can restart a run. */
@@ -53,7 +54,7 @@ interface Fleck {
   color: string;
 }
 
-const CONFETTI_COLORS = ['#ffd23f', '#ff2e6e', '#5fc9ff', '#63ff9d', '#ffffff', '#ff8a2a'];
+const CONFETTI_COLORS = [PALETTE.lamp, PALETTE.blood, PALETTE.steel, PALETTE.moss, PALETTE.bone, '#ff8a2a'];
 const FLECKS = 90;
 const GROUND = 306;
 
@@ -243,7 +244,7 @@ export class VictoryScene implements Scene {
     ctx.fillStyle = '#1c1220';
     ctx.fillRect(470, 250, 44, 30);
     poly(ctx, [464, 250, 492, 228, 520, 250], '#3a2036', '#150d1c', 1.8);
-    ctx.fillStyle = ((this.frame / 24) | 0) % 8 === 0 ? '#7a5f2a' : '#ffd23f';
+    ctx.fillStyle = ((this.frame / 24) | 0) % 8 === 0 ? '#7a5f2a' : PALETTE.lamp;
     ctx.fillRect(480, 258, 9, 9);
     ctx.fillRect(496, 258, 9, 9);
   }

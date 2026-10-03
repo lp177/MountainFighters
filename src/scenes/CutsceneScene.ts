@@ -50,6 +50,7 @@ import { drawReadyMarks, readyCaption } from '@/ui/ReadyMarks';
 import type { ReadyMark } from '@/ui/ReadyMarks';
 import { getDwarf } from '@/content/dwarfs';
 
+import { FONT_DISPLAY, FONT_TEXT, PALETTE } from '@/ui/theme';
 type C2D = CanvasRenderingContext2D;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -78,12 +79,13 @@ export interface CutsceneOpts {
 const INK = '#141019';
 const NO = 'none';
 
-const PAPER = '#e8ecf6';
-const GOLD = '#ffd23f';
-const GOLD_DEEP = '#e8a92a';
-const DIM = '#98a2b6';
-const FAINT = '#5c6474';
-const BLOOD = '#ff2e6e';
+const PAPER = PALETTE.bone;
+const GOLD = PALETTE.lamp;
+const GOLD_DEEP = PALETTE.lampDeep;
+const DIM = PALETTE.boneDim;
+const FAINT = PALETTE.boneFaint;
+/** It was hot pink once. Blood is red. */
+const BLOOD = PALETTE.blood;
 
 /** Warm side of the film: the forest, the windows, the fire, the leather. */
 const WARM = '#ffb347';
@@ -117,8 +119,8 @@ const SW_YELLOW = '#ffd447';
 const SW_YELLOW_DARK = '#d9a92c';
 const SW_WHITE = '#f6f8ff';
 
-const DISPLAY = '"Arial Black", "Helvetica Neue", Impact, system-ui, sans-serif';
-const SANS = 'ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif';
+const DISPLAY = FONT_DISPLAY;
+const SANS = FONT_TEXT;
 
 /** Height of each letterbox bar once it has finished sliding in. */
 const BAR_H = 30;
@@ -223,6 +225,36 @@ function quad(
   poly(ctx, P8, fill, outline, ow);
 }
 
+/**
+ * A headlamp cone that fades out along its length.
+ *
+ * It was a flat-filled quad, which ended in a hard vertical edge in the middle
+ * of the field — three of them, one per car, like panes of glass standing in
+ * the grass. Light falls off; the gradient runs from the lamp to the far end.
+ */
+function beam(
+  ctx: C2D,
+  x: number,
+  y: number,
+  len: number,
+  top: number,
+  bottom: number,
+  color: string,
+): void {
+  const g = ctx.createLinearGradient(x, y, x + len, y + (top + bottom) * 0.5);
+  g.addColorStop(0, color);
+  g.addColorStop(0.55, color.replace(/[\d.]+\)$/, (a) => `${(parseFloat(a) * 0.55).toFixed(3)})`));
+  g.addColorStop(1, color.replace(/[\d.]+\)$/, '0)'));
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(x, y - 4);
+  ctx.lineTo(x + len, y + top);
+  ctx.lineTo(x + len, y + bottom);
+  ctx.lineTo(x, y + 5);
+  ctx.closePath();
+  ctx.fill();
+}
+
 /** Stable value hash. Layout is a function of the index, never of the clock. */
 function hash(n: number): number {
   const s = Math.sin(n * 127.1 + 311.7) * 43758.5453;
@@ -309,7 +341,7 @@ export class CutsceneScene implements Scene {
     return net.players.map((p) => {
       const d = p.dwarfId ? getDwarf(p.dwarfId) : null;
       return {
-        color: d?.style.hatColor ?? '#ff2e6e',
+        color: d?.style.hatColor ?? PALETTE.blood,
         ready: this.watched.has(p.slot),
         label: `P${p.slot + 1}`,
       };
@@ -647,8 +679,8 @@ export class CutsceneScene implements Scene {
     ctx.save();
     ctx.globalAlpha = 0.75;
     ctx.textAlign = 'right';
-    ctx.font = `700 8px ui-sans-serif, system-ui, sans-serif`;
-    ctx.fillStyle = '#a2aabb';
+    ctx.font = `700 8px ${FONT_TEXT}`;
+    ctx.fillStyle = PALETTE.boneDim;
     ctx.fillText(caption, VIEW_W - 14, VIEW_H - 50);
     ctx.restore();
   }
@@ -1054,10 +1086,9 @@ export class CutsceneScene implements Scene {
       // and scale, so origin and lamp cannot drift apart.
       const bx = x + CAR_W * 0.44;
       const by = CAR_BODY_Y + 7 * CAR_S;
-      this.alpha(ctx, 0.13);
-      quad(ctx, bx, by - 4, bx + 320, by - 96 - sweep, bx + 320, by + 40 - sweep, bx, by + 5, WARM_HOT, NO, 0);
-      this.alpha(ctx, 0.09);
-      quad(ctx, bx, by - 4, bx + 460, by - 150 - sweep, bx + 460, by + 70 - sweep, bx, by + 5, '#fff6dc', NO, 0);
+      this.alpha(ctx, 1);
+      beam(ctx, bx, by, 320, -96 - sweep, 40 - sweep, 'rgba(255,217,160,0.13)');
+      beam(ctx, bx, by, 460, -150 - sweep, 70 - sweep, 'rgba(255,246,220,0.09)');
     }
     ctx.restore();
     ctx.globalAlpha = this.a;

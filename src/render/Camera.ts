@@ -41,8 +41,17 @@ function noise1(t: number, seed: number): number {
 export class Camera {
   /** World x of the left edge of the view. */
   x = 0;
+  /**
+   * How far the view is carried DOWN the screen's world, in world units.
+   *
+   * Zero for the whole of an ordinary fight. The fatality director borrows it
+   * to frame its two performers — a zoom about the middle of the frame leaves a
+   * pair at the front of the belt under the bottom of the screen — and hands it
+   * back at zero. `Renderer.withCamera` and the scenery pass both subtract it.
+   */
   y = 0;
   zoom = 1;
+  /** Roll about the middle of the view, in radians. Zero outside a finisher. */
   rotation = 0;
 
   private _trauma = 0;

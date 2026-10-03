@@ -459,57 +459,75 @@ const SPECIALS = [
 // and a run-in read the same on all seven, which is what makes the per-character
 // ground normals below legible in the first place.
 
+/*
+ * Both aerials reach DOWN, well past the soles. A standing hurtbox tops out at
+ * 51 and a jump peaks between 50 and 61 depending on who is jumping, so a box
+ * drawn where the knee actually is would sail over a guard's head for the
+ * middle of the arc — which is the bug these two replaced. Reaching a dozen
+ * units under the feet means there is no height in anybody's jump from which
+ * they cannot land, and that is the whole promise of pressing jump and attack
+ * together.
+ *
+ * They are also quick. An aerial thrown on the first frame of a jump has to be
+ * live while the body is still rising past the target, not after it.
+ */
 def({
   id: 'air_light',
-  name: 'Air Stomp',
-  duration: 20,
-  startup: 5,
-  anim: 'kick',
+  name: 'Flying Knee',
+  duration: 22,
+  startup: 3,
+  anim: 'air_knee',
   airOnly: true,
+  // Leaves the floor going forward, so jump-and-knee from a standstill still
+  // closes the last half step instead of rising on the spot.
+  motion: [{ frame: 0, x: 1.3, y: 0 }],
   windows: [
     win(
-      5,
-      12,
-      box(17, 12, 13, 11),
+      3,
+      13,
+      box(14, 8, 13, 20),
       hit({
-        dmg: 7,
-        stun: 17,
+        dmg: 8,
+        stun: 18,
         block: 9,
-        stop: 5,
-        kx: 1.7,
-        ky: -1,
+        stop: 6,
+        kx: 2.2,
+        ky: 0,
         level: 'overhead',
-        sfx: 'kick',
+        sfx: 'knee',
       }),
-      'footR',
+      'legR_lower',
     ),
   ],
-  cancels: [{ into: ['air_heavy'], from: 5 }],
+  cancels: [{ into: ['air_heavy'], from: 3 }],
 });
 
 def({
   id: 'air_heavy',
-  name: 'Anvil Drop',
-  duration: 28,
-  startup: 8,
-  anim: 'heavy_swing',
+  name: 'Flying Kick',
+  duration: 26,
+  startup: 6,
+  anim: 'air_kick',
   airOnly: true,
+  motion: [{ frame: 5, x: 2.4, y: 0 }],
   windows: [
     win(
-      8,
-      15,
-      box(19, 9, 15, 13),
+      6,
+      18,
+      box(22, 5, 17, 17),
+      // Up as well as back: a heavy that lifts is a knockdown, and a jump kick
+      // that leaves the other man standing is not a jump kick.
       hit({
         dmg: 13,
-        stun: 23,
+        stun: 24,
         block: 12,
-        kx: 3.0,
-        ky: -4.5,
+        kx: 5.2,
+        ky: 3.4,
         react: 'heavy',
         level: 'overhead',
-        sfx: 'punch_heavy',
+        sfx: 'jump_kick',
       }),
-      'handR',
+      'footR',
     ),
   ],
 });
@@ -1540,7 +1558,7 @@ weaponSet({
     startup: 4,
     active: 3,
     box: box(20, 27, 10, 9),
-    hit: hit({ dmg: 6, stun: 13, block: 6, stop: 4, kx: 1.2, sfx: 'hit_flesh' }),
+    hit: hit({ dmg: 6, stun: 13, block: 6, stop: 4, kx: 1.2, sfx: 'slice' }),
   },
   heavy: {
     name: 'Gut Twist',

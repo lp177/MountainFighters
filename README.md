@@ -39,6 +39,8 @@ chassis, with a great deal of screen shake.
   the lab, and seven dwarfs putting on the leather. Skippable, and it only
   plays once.
 - **Local multiplayer** on one keyboard or with gamepads, up to four players.
+- **Plays on a phone.** Touch it and a stick and a pad appear; press a key or
+  plug in a controller and they get out of the way.
 - **Online multiplayer** by sending a link. Your friend clicks it, picks a
   dwarf, and is in the fight. That is the entire flow — from the home screen or
   from the pause menu mid-game.
@@ -58,7 +60,20 @@ chassis, with a great deal of screen shake.
 | Super | `T` | `Numpad +` | RT / R2 / ZR |
 | Pause | `Esc` | `Esc` | Start |
 
+On a touchscreen: a floating stick under the left thumb, and on the right the
+pad's own diamond — Light at the bottom, Heavy right, Jump left, Special on
+top — with Block and Super above it and Grab and Use below. `II` pauses.
+
 Double-tap a direction to dash. Block just as a hit lands to parry.
+
+**Jump and hit at the same time.** Jump with Light is a flying knee; Jump with
+Heavy is a flying kick that puts whoever it lands on flat on their back. The two
+buttons do not have to arrive on the same frame — either order, a few frames
+apart, is the same move — and a jump out of a run carries the run with it.
+
+**On a vehicle your hands are still yours.** Light and Heavy are your own light
+and heavy, thrown from the saddle: the jab, the bat, the pistol. Special is a
+boot out the side with a crack of throttle behind it, and Jump is a wheelie.
 
 **Pick up / Use** is one key for everything at your feet: take the weapon lying
 there, trade the one in your hands for it, get on the bike, get off the bike,
@@ -97,8 +112,18 @@ This repository contains **no image files and no audio files.** Every character,
 prop, backdrop and effect is vector geometry drawn from a skeletal rig at
 runtime, and every sound — punches, gunshots, the music — is synthesised with
 WebAudio. That is a deliberate constraint, and it is why the art has a
-consistent house style and the whole game downloads in a couple of hundred
-kilobytes.
+consistent house style and the whole game downloads in about 420 KB
+compressed, fonts included.
+
+It does ship **two typefaces**, Barlow and Barlow Condensed (SIL Open Font
+License, from `@fontsource`): five woff2 files, about 110 KB. System fonts made
+the logo, the HUD and every banner a different shape on every OS — Android has
+neither Impact nor Arial Black — and that is the loudest "prototype" signal a
+game can send. The first frame waits for them, briefly, because canvas text
+does not reflow when a font arrives late.
+
+The visual language — palette, type, components, HUD, touch layout and the
+rules behind them — is documented in [DESIGN.md](DESIGN.md).
 
 The simulation is deterministic at a fixed 60Hz, which is what makes lockstep
 netcode possible without a game server. See

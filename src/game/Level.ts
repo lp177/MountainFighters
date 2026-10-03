@@ -57,6 +57,7 @@ import { WEAPONS } from '@/content/weapons';
 import { DWARF_SKELETON, HUMAN_SKELETON } from '@/render/rig/Skeleton';
 import { drawWeapon } from '@/render/rig/CharacterRig';
 import { drawBackdrop, drawForeground } from '@/game/Backdrop';
+import type { ActionFx } from '@/juice/Fx';
 import { capsule, ellipse, poly, roundRect, shadow, star } from '@/render/Shapes';
 import { clamp, easeOut, easeOutBack, lerp } from '@/core/math';
 import {
@@ -81,6 +82,7 @@ import {
   Z_SCALE,
 } from '@/core/constants';
 
+import { FONT_DISPLAY } from '@/ui/theme';
 type C2D = CanvasRenderingContext2D;
 
 const INK = '#141019';
@@ -943,7 +945,6 @@ export class Level {
     this.spawnTimer = 0;
 
     this.fx.shake({ magnitude: 2.4, duration: 12 });
-    this.audio.play('ui_error', { pitch: 0.7 });
     this.audio.music(this.waveIndex >= this.def.waves.length - 1 ? 'fight_high' : this.def.music);
   }
 
@@ -962,6 +963,10 @@ export class Level {
       if (reward.meter) this.dropMeter(x - 18, 26, z - 8, reward.meter);
     }
 
+    // The last body of the wave falls in slow motion. It is the one moment in a
+    // wave where nothing else is about to hit you, so it can afford the beat.
+    this.fx.slowmo(0.4, 16);
+    this.fx.flash('#ffe9a0', 4, 0.16);
     this.fx.text({
       text: 'CLEAR',
       x: this.cam.x + VIEW_W * 0.5,
@@ -1386,7 +1391,7 @@ export class Level {
         const left = (this.lives.get(p.id) ?? 0) - 1;
         this.lives.set(p.id, Math.max(0, left));
         this.respawn.set(p.id, left > 0 ? RESPAWN_FRAMES : 0);
-        this.audio.play('ko');
+        this.audio.play('sub_drop');
         this.fx.text({
           text: left > 0 ? `${left} LEFT` : 'GAME OVER',
           x: p.pos.x,
@@ -1931,7 +1936,10 @@ export class Level {
         additive: true,
       });
       this.audio.play('tyres', { pan: this.pan(v.x), gain: 0.4, pitch: 1.2 });
-      ctx.requestHitstop(4);
+      // Scaled by how fast it was going, so clipping somebody at a crawl and
+      // hitting them flat out are not the same event.
+      (this.fx as FxBus & ActionFx).impactLines?.(f.pos.x, 24, f.pos.z, dir, 1 + speed * 0.14);
+      ctx.requestHitstop(speed > 6 ? 6 : 4);
 
       // Bodies are not free. Twenty of them and it is scrap — which is what
       // stops one bike clearing a whole map and turning the level into a
@@ -1984,7 +1992,7 @@ export class Level {
       x,
       y: 22,
       z,
-      angle: -Math.PI / 2,
+      angle: Math.PI / 2,
       spread: Math.PI * 1.6,
       speed: [2, 8],
       life: [20, 52],
@@ -1999,7 +2007,7 @@ export class Level {
       x,
       y: 26,
       z,
-      angle: -Math.PI / 2,
+      angle: Math.PI / 2,
       spread: 1.2,
       speed: [0.6, 2.4],
       life: [40, 90],
@@ -2444,7 +2452,7 @@ export class Level {
         roundRect(ctx, sx - 11, sy - 14, 22, 4, 2, body ?? '#8d3324', 'none', 0);
         if (!body) {
           ctx.fillStyle = '#f5d14a';
-          ctx.font = '800 6px system-ui, sans-serif';
+          ctx.font = `800 6.5px ${FONT_DISPLAY}`;
           ctx.textAlign = 'center';
           ctx.fillText('FLAM', sx, sy - 19);
         }
@@ -2509,7 +2517,7 @@ export class Level {
         roundRect(ctx, sx - 16, sy - 52, 32, 20, 3, body ?? '#1d1b26', INK, 1.8);
         if (!body) {
           ctx.fillStyle = lit ? this.def.palette.accent : '#3a3546';
-          ctx.font = '800 8px system-ui, sans-serif';
+          ctx.font = `800 8.5px ${FONT_DISPLAY}`;
           ctx.textAlign = 'center';
           ctx.fillText('X', sx, sy - 39);
         }
@@ -2950,7 +2958,7 @@ export class Level {
         x: v.x + rear,
         y: 30,
         z: v.z,
-        angle: -Math.PI / 2,
+        angle: Math.PI / 2,
         spread: 0.45,
         speed: [0.5, 1.2],
         life: [26, 54],
@@ -2967,7 +2975,7 @@ export class Level {
         x: v.x + v.facing * 4,
         y: 20,
         z: v.z,
-        angle: -Math.PI / 2,
+        angle: Math.PI / 2,
         spread: 0.7,
         speed: [0.8, 2],
         life: [8, 18],
@@ -3274,7 +3282,7 @@ export class Level {
     ctx.save();
     // Brighter for a moment right after a wave falls, then it settles down.
     ctx.globalAlpha = this.goTimer > 0 ? 1 : 0.7;
-    ctx.font = '900 20px Impact, "Arial Black", system-ui, sans-serif';
+    ctx.font = `italic 900 22px ${FONT_DISPLAY}`;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.lineWidth = 4;
@@ -3332,13 +3340,13 @@ export class Level {
       ctx.globalAlpha = a;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.font = '900 26px Impact, "Arial Black", system-ui, sans-serif';
+      ctx.font = `italic 900 28px ${FONT_DISPLAY}`;
       ctx.lineWidth = 5;
       ctx.strokeStyle = INK;
       ctx.strokeText(bd.name.toUpperCase(), VIEW_W * 0.5, cy - 10);
       ctx.fillStyle = '#ffffff';
       ctx.fillText(bd.name.toUpperCase(), VIEW_W * 0.5, cy - 10);
-      ctx.font = 'italic 800 10px "Arial Narrow", system-ui, sans-serif';
+      ctx.font = `800 10px ${FONT_DISPLAY}`;
       ctx.fillStyle = '#ff8fa6';
       ctx.fillText(`"${bd.quote}"`, VIEW_W * 0.5, cy + 14);
     }
@@ -3416,7 +3424,7 @@ function ramHit(speed: number, mul: number): HitProperties {
     meterGain: 0.04,
     meterGainVictim: 0.06,
     shake: 6,
-    sfx: 'bone_crack',
+    sfx: 'crash',
   };
 }
 

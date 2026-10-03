@@ -21,6 +21,7 @@ import type {
   Facing,
   FighterState,
   FighterView,
+  FxBus,
   HitProperties,
   HitReaction,
   HitWindow,
@@ -55,6 +56,8 @@ import {
   GROUND_Y,
   IMPACT_FLASH_FRAMES,
   INPUT_BUFFER_FRAMES,
+  JUMP_ATTACK_LENIENCY,
+  JUMP_GRAVITY,
   JUMP_VELOCITY,
   KNOCKDOWN_FRAMES,
   KO_HITSTOP,
@@ -86,6 +89,7 @@ import type { BossRigKind } from '@/render/rig/BossRigs';
 import { drawCharacter } from '@/render/rig/CharacterRig';
 import { getMove } from '@/game/combat/Moves';
 import { WEAPONS } from '@/content/weapons';
+import type { ActionFx } from '@/juice/Fx';
 
 type C2D = CanvasRenderingContext2D;
 
@@ -157,8 +161,16 @@ export interface RideSeat {
   spine: number;
 }
 
-/** Buffered action slots. These map to move ids through `moves`. */
-type Action = 'light' | 'heavy' | 'special' | 'grab' | 'super' | 'jump';
+/**
+ * Buffered action slots. These map to move ids through `moves`.
+ *
+ * Jump is not one of them. It used to be, at the bottom of the priority list,
+ * which meant pressing jump and an attack together was simply the attack: one
+ * slot, and the kick won it. A jump is not an alternative to an attack, it is
+ * somewhere to throw one from, so it has a buffer of its own (`jumpBuf`) and
+ * the two can be held at once.
+ */
+type Action = 'light' | 'heavy' | 'special' | 'grab' | 'super';
 
 export type GoreLevel = Settings['gore'];
 
@@ -202,7 +214,6 @@ const ACTION_PRIORITY: readonly [number, Action][] = [
   [Btn.Grab, 'grab'],
   [Btn.Heavy, 'heavy'],
   [Btn.Light, 'light'],
-  [Btn.Jump, 'jump'],
 ];
 
 /**
@@ -225,6 +236,26 @@ const ENTRY_FRAMES = 34;
 const BODY_HALF_W = 9;
 /** Air acceleration per frame while holding a direction. */
 const AIR_ACCEL = 0.34;
+/**
+ * How much of a run a jump keeps.
+ *
+ * It used to keep none: every take-off was reset to a walk, so a running jump
+ * landed exactly where a standing one did and there was no such thing as a
+ * jump-in. Nearly all of it now, because a flying kick that arrives from a
+ * third of the screen away is the reason the button exists.
+ */
+const RUN_JUMP_CARRY = 0.92;
+/**
+ * How much of a fighter's jump stat reaches the take-off.
+ *
+ * Height goes with the SQUARE of take-off speed, so applying the stat whole
+ * turned the roster's 0.8–1.26 into a spread of two and a half times: Dopey
+ * cleared three of his own heights and Sleepy barely left the floor. A fifth of
+ * it keeps the order — the quick ones still get higher and hang longer — and
+ * keeps every one of them inside the reach of their own aerials, which stop
+ * connecting with a standing body from about sixty units up.
+ */
+const JUMP_STAT_SPREAD = 0.2;
 /** Depth movement is slower than horizontal — belt-scroller convention. */
 const Z_SPEED_SCALE = 0.62;
 /** Extra pop given to a launch so a juggle always gets off the ground. */
@@ -262,9 +293,44 @@ const RIDE_SCREECH_SPEED = 3.6;
 const RIDE_SCREECH_FRAMES = 14;
 /** Frames between engine barks. Roughly the length of the cue itself. */
 const RIDE_ENGINE_INTERVAL = 56;
-/** Throttle blip: what an attack from the saddle is, physically. */
+/** Throttle blip: what the boot from the saddle is, physically. */
 const RIDE_LUNGE = 3.4;
 const RIDE_SWING_FRAMES = 13;
+/** Frames a strike takes to leave the bars, and to find them again. */
+const SADDLE_BLEND_IN = 2;
+const SADDLE_BLEND_OUT = 5;
+/**
+ * How far the rider comes up out of the crouch to throw it.
+ *
+ * Most of the way. A punch thrown from flat over the bars goes into the front
+ * mudguard; sitting up into it is what makes the arm visible at all, and it is
+ * also simply what somebody hitting a man from a motorbike does.
+ */
+const SADDLE_TRUNK = 0.7;
+/** A round fired from a saddle leaves no higher than this, or it clears every head. */
+const SADDLE_MUZZLE_MAX = 44;
+
+/**
+ * The half of a body that is free to hit somebody while the other half is
+ * busy sitting down.
+ *
+ * A strike thrown from a vehicle is the fighter's own move — same frames, same
+ * box, same damage — played on these bones only. The arms are replaced
+ * outright, because a punch is where the hands are; the trunk is brought most
+ * of the way up to meet them, and lets itself back down over the bars after.
+ */
+const SADDLE_ARMS: readonly BoneName[] = [
+  'armL_upper',
+  'armL_lower',
+  'handL',
+  'armR_upper',
+  'armR_lower',
+  'handR',
+];
+const SADDLE_TRUNK_BONES: readonly BoneName[] = ['torso', 'chest', 'neck', 'head'];
+const SADDLE_LEG: readonly BoneName[] = ['legR_upper', 'legR_lower', 'footR'];
+/** Clips whose whole point is a leg. Played from a saddle, the near one comes off the peg. */
+const LEG_CLIPS = new Set(['kick', 'sweep']);
 /** Frames the front wheel stays up. Purely so the player can show off. */
 const RIDE_WHEELIE_FRAMES = 30;
 /** Speed the wheelie itself adds, because of course it does. */
@@ -396,6 +462,14 @@ function bend(pose: Pose, name: BoneName, d: number): void {
   else pose[name] = { rot: d };
 }
 
+/** Turns a bone toward another pose's. Safe on a bone either side never set. */
+function mixBone(pose: Pose, toward: Pose, name: BoneName, w: number): void {
+  const to = toward[name]?.rot ?? 0;
+  const cur = pose[name];
+  if (cur) cur.rot = lerp(cur.rot ?? 0, to, w);
+  else pose[name] = { rot: to * w };
+}
+
 /**
  * Bends the one `ride` clip to fit the machine it is being played on.
  *
@@ -420,6 +494,33 @@ function seatPose(pose: Pose, s: RideSeat): void {
   // or a rider on a peg points his toes at the floor for no reason.
   bend(pose, 'footL', s.knee - s.thigh);
   bend(pose, 'footR', s.knee - s.thigh);
+}
+
+/**
+ * What the game says when a combo has gone on long enough to be worth saying
+ * something about. It is a performance review, because of course it is.
+ *
+ * Players only, and only on a hit that actually landed: a guard stringing
+ * three jabs together is not being considered for anything.
+ */
+const COMBO_CALLOUTS: readonly (readonly [number, string])[] = [
+  [5, 'ON TARGET'],
+  [10, 'EXCEEDS EXPECTATIONS'],
+  [15, 'TOP PERFORMER'],
+  [20, 'PROMOTED'],
+  [30, 'EMPLOYEE OF THE MONTH'],
+];
+/** From here up a callout is drawn in the big red-rimmed cut. */
+const COMBO_CALLOUT_BIG = 15;
+
+/** A body has to be travelling at least this fast to leave a trail behind it. */
+const FLIGHT_TRAIL_SPEED = 4.2;
+/** Fraction of a vehicle's top speed at which the screen starts to streak. */
+const RIDE_STREAK_FROM = 0.6;
+
+/** The action lines, where this bus has them. See `ActionFx`. */
+function actionFx(ctx: SimContext): FxBus & ActionFx {
+  return ctx.fx as FxBus & ActionFx;
 }
 
 /** Moves are authored by other modules; a bad id must not take the game down. */
@@ -497,7 +598,8 @@ export class Fighter implements FighterView {
   /** Non-humanoid boss body, when this fighter has one. */
   readonly bossRig: BossRigKind | null;
 
-  private readonly prevPos: Vec3;
+  /** Last step's position, for interpolation. Read-only outside the sim. */
+  readonly prevPos: Vec3;
   private age = 0;
 
   private currentMove: MoveDef | null = null;
@@ -518,6 +620,23 @@ export class Fighter implements FighterView {
 
   private bufAction: Action | null = null;
   private bufFrames = 0;
+  /** Frames a jump press is still waiting. Its own buffer; see `Action`. */
+  private jumpBuf = 0;
+  /**
+   * The button behind the move in progress, so a jump that arrives a hair late
+   * knows what to throw again once it is off the floor.
+   */
+  private moveAction: Action | null = null;
+  /**
+   * True from take-off to touchdown of a jump this fighter CHOSE to make.
+   *
+   * It is what separates a jump from a launch for `physics`: the first falls
+   * under JUMP_GRAVITY, the second under the world's, and a jumper who is hit
+   * out of the air stops being the first the moment their state says so.
+   */
+  private jumpArc = false;
+  /** Horizontal speed limit for the jump in progress, fixed at take-off. */
+  private airCap = 0;
   private wantDash = 0;
   private coyote = COYOTE_FRAMES;
   private dashTimer = 0;
@@ -728,6 +847,7 @@ export class Fighter implements FighterView {
       case 'launched':
       case 'thrown':
         this.stateFrame++;
+        this.flightTrail(ctx);
         break;
       case 'knockdown':
         this.updateKnockdown();
@@ -811,6 +931,16 @@ export class Fighter implements FighterView {
     const barrel = art && art.shape === 'gun' ? art.length * 0.8 : 0;
     this._muzzle.x = (11 + barrel) * s;
     this._muzzle.y = 26 * s;
+    // From a saddle the hand is up where the seat put it — but never so far up
+    // that the round sails over the people it was fired at.
+    const seat = this.state === 'riding' ? this.seat : null;
+    if (seat) {
+      this._muzzle.x += seat.x;
+      this._muzzle.y = Math.min(
+        this._muzzle.y + seat.y,
+        Math.max(this._muzzle.y, SADDLE_MUZZLE_MAX),
+      );
+    }
     return this._muzzle;
   }
 
@@ -885,6 +1015,7 @@ export class Fighter implements FighterView {
       this.bufFrames--;
       if (this.bufFrames === 0) this.bufAction = null;
     }
+    if (this.jumpBuf > 0) this.jumpBuf--;
     if (this.invulnFrames > 0) this.invulnFrames--;
     if (this.parryTimer > 0) this.parryTimer--;
     if (this.comboTimer > 0) {
@@ -948,6 +1079,10 @@ export class Fighter implements FighterView {
     // Latched, never held: one press is one exchange. The Level clears it the
     // moment it acts on it; otherwise it simply expires.
     if (input.pressed & Btn.Interact) this.interactFrames = INTERACT_BUFFER_FRAMES;
+
+    // Beside the attack buffer, never in it: both may be waiting at once, and
+    // that pair is exactly what a jumping attack is.
+    if (input.pressed & Btn.Jump) this.jumpBuf = INPUT_BUFFER_FRAMES;
 
     for (const [mask, act] of ACTION_PRIORITY) {
       if (input.pressed & mask) {
@@ -1019,7 +1154,9 @@ export class Fighter implements FighterView {
     const wasGrounded = this.grounded;
 
     if (!this.grounded) {
-      v.y -= GRAVITY;
+      // A jump is flown under its own gravity; a body that was put in the air
+      // by somebody else falls under the world's. See JUMP_GRAVITY.
+      v.y -= this.jumping ? JUMP_GRAVITY : GRAVITY;
       if (v.y < -MAX_FALL_SPEED) v.y = -MAX_FALL_SPEED;
     }
 
@@ -1061,6 +1198,35 @@ export class Fighter implements FighterView {
     if (Math.abs(v.z) < 0.012) v.z = 0;
   }
 
+  /**
+   * Dust off the heels of a body that has been sent somewhere.
+   *
+   * A launch covers a third of the screen in a quarter of a second, and without
+   * something left hanging in the air behind it the eye gets the start and the
+   * landing and none of the trip. Every third frame is plenty.
+   */
+  private flightTrail(ctx: SimContext): void {
+    if (this.stateFrame % 3 !== 0) return;
+    const speed = Math.abs(this.vel.x);
+    if (speed < FLIGHT_TRAIL_SPEED) return;
+    ctx.fx.particles({
+      count: 2,
+      x: this.pos.x,
+      y: this.pos.y + 14,
+      z: this.pos.z,
+      angle: this.vel.x > 0 ? Math.PI : 0,
+      spread: 0.5,
+      speed: [0.3, 1.2],
+      life: [10, 20],
+      size: [1.6, 3 + speed * 0.2],
+      colors: ['#f4f0e6', '#cfc6b8', '#a89e90'],
+      gravity: -0.01,
+      drag: 0.9,
+      shape: 'smoke',
+      fade: 'ease',
+    });
+  }
+
   private hitWall(ctx: SimContext, into: Facing): void {
     const v = this.vel;
     if (this.wallBounce && !this.grounded && Math.abs(v.x) > 2.2) {
@@ -1084,16 +1250,41 @@ export class Fighter implements FighterView {
         drag: 0.94,
         shape: 'shard',
       });
-      ctx.audio.play('hit_metal', { pitch: 0.8 });
+      if (this.mechanical) ctx.audio.play('hit_metal', { pitch: 0.8 });
+      else ctx.audio.play('slam', { pitch: 1.1, gain: 0.8 });
       ctx.audio.voice(this.voice, 'hit');
     } else if ((into > 0 && v.x < 0) || (into < 0 && v.x > 0)) {
       v.x = 0;
     }
   }
 
+  /**
+   * In the air on purpose, and still in charge of it.
+   *
+   * `jumpArc` alone is not enough: a jumper swatted out of the sky is in a
+   * launch from that frame on, and a launch has to fall like every other
+   * launch or the juggle that follows it is tuned against the wrong arc.
+   */
+  private get jumping(): boolean {
+    if (!this.jumpArc) return false;
+    switch (this.state) {
+      case 'jump':
+      case 'fall':
+      case 'attack':
+      case 'super':
+      case 'grabbing':
+        return true;
+      default:
+        return false;
+    }
+  }
+
   private onLand(ctx: SimContext, impact: number): void {
     this.juggleCount = 0;
     this.wallBounce = false;
+    this.jumpArc = false;
+    // A jump comes down at just under seven, so coming off one is a tap of dust;
+    // it takes a body that was thrown at the floor to rattle the camera.
     const heavy = impact > 7;
 
     ctx.fx.particles({
@@ -1270,7 +1461,10 @@ export class Fighter implements FighterView {
     this.stateFrame++;
     if (this.consumeBuffer(ctx)) return;
 
-    const cap = WALK_SPEED * this.moveSpeed * 1.15;
+    // Whatever the take-off was carrying is the limit, so steering a running
+    // jump does not brake it down to a walk. A fall that never was a jump has
+    // no take-off, and gets the walking limit it always had.
+    const cap = Math.max(WALK_SPEED * this.moveSpeed * 1.15, this.jumpArc ? this.airCap : 0);
     if (this.inX !== 0) {
       this.vel.x = clamp(this.vel.x + this.inX * AIR_ACCEL, -cap, cap);
     }
@@ -1354,10 +1548,9 @@ export class Fighter implements FighterView {
     this.vel.z = 0;
 
     // Mashing shortens the hold, exactly as it should.
-    if (this.bufAction) {
+    if (this.bufAction || this.jumpBuf > 0) {
       this.grabTimer -= 4;
-      this.bufAction = null;
-      this.bufFrames = 0;
+      this.clearBuffer();
     }
     if (--this.grabTimer <= 0) {
       this.releaseGrab();
@@ -1369,10 +1562,9 @@ export class Fighter implements FighterView {
     this.stateFrame++;
     if (this.dizzyTimer > 0) this.dizzyTimer--;
     // Mash out of the dizzy.
-    if (this.bufAction || this.inX !== 0) {
+    if (this.bufAction || this.jumpBuf > 0 || this.inX !== 0) {
       this.dizzyTimer -= 2;
-      this.bufAction = null;
-      this.bufFrames = 0;
+      this.clearBuffer();
     }
     if (this.dizzyTimer <= 0) {
       this.dizzyTimer = 0;
@@ -1384,15 +1576,18 @@ export class Fighter implements FighterView {
   /**
    * On a vehicle.
    *
-   * The whole state is a throttle, a brake and a wheelie. Speed lives in
-   * `rideVel` and is written into `vel.x` every frame, so ground friction —
-   * which is a fact about boots, not about tyres — never gets to eat it.
+   * A throttle, a brake, a wheelie — and both hands, which are free to hit
+   * people with. Speed lives in `rideVel` and is written into `vel.x` every
+   * frame, so ground friction — which is a fact about boots, not about tyres —
+   * never gets to eat it.
    *
    * Deterministic throughout: the only non-sim things here are the engine note
    * and the smoke, both of which go through ctx and are dropped on rollback.
    */
   private updateRiding(ctx: SimContext): void {
-    this.stateFrame++;
+    // While a move is being thrown from the saddle `stateFrame` is THAT move's
+    // clock, exactly as it is on foot — see `startSaddleMove`.
+    if (!this.currentMove) this.stateFrame++;
 
     // Held off the floor by the vehicle, not by the ground. `physics` clears
     // this again at the end of the step; re-asserting it here each frame is
@@ -1426,9 +1621,24 @@ export class Fighter implements FighterView {
     if (Math.abs(this.rideVel) > 0.5) this.facing = this.rideVel > 0 ? 1 : -1;
     else if (this.inX !== 0) this.facing = this.inX > 0 ? 1 : -1;
 
+    // Flat out, the screen itself says so. One player's bike, not every guard's.
+    if (this.team === 'player') {
+      const load = Math.abs(this.rideVel) / Math.max(1, top);
+      if (load > RIDE_STREAK_FROM) {
+        actionFx(ctx).speedLines?.(
+          ((load - RIDE_STREAK_FROM) / (1 - RIDE_STREAK_FROM)) * 0.9,
+          5,
+          this.rideVel,
+        );
+      }
+    }
+
     this.rideEngineNote(ctx, top);
     this.tickRideSwing(ctx);
     this.rideAction(ctx);
+    // After the buttons, so a move started this frame runs its first frame
+    // this frame — the same promise `consumeBuffer` makes on foot.
+    this.tickSaddleMove(ctx);
   }
 
   /** Re-barks the engine every so often, pitched by how hard it is working. */
@@ -1483,30 +1693,58 @@ export class Fighter implements FighterView {
   }
 
   /**
-   * What the attack buttons mean in the saddle.
+   * What the buttons mean in the saddle.
    *
-   * Light/heavy/special are all the same gesture at this speed: crack the
-   * throttle and put a boot out. Jump is a wheelie, because a vehicle section
-   * that cannot be shown off on is just a corridor with a longer stride.
+   * Light and heavy are the fighter's OWN light and heavy — the jab, the bat,
+   * the pistol — thrown off the bars without getting off (`startSaddleMove`).
+   * They used to be one anonymous boot with no animation behind it, which is
+   * why riding felt like having both hands tied: the hit was real, and nothing
+   * on screen said so. Special is that boot, kept, with the crack of throttle
+   * that always came with it. Jump is a wheelie, because a vehicle section that
+   * cannot be shown off on is just a corridor with a longer stride.
+   *
+   * A press that cannot start yet stays in the buffer rather than being thrown
+   * away, so mashing through the tail of one swing still buys the next.
    */
   private rideAction(ctx: SimContext): void {
+    if (this.jumpBuf > 0) {
+      this.jumpBuf = 0;
+      this.rideWheelie = RIDE_WHEELIE_FRAMES;
+      ctx.audio.play('engine_rev', { gain: 0.6 });
+      ctx.audio.voice(this.voice, 'taunt');
+    }
+
     const act = this.bufAction;
     if (!act || this.bufFrames <= 0) return;
-    this.clearBuffer();
 
-    if (act === 'jump') {
-      this.rideWheelie = RIDE_WHEELIE_FRAMES;
-      ctx.audio.play('engine', { pitch: 1.45, gain: 0.4 });
-      ctx.audio.voice(this.voice, 'taunt');
+    if (act === 'light' || act === 'heavy') {
+      if (this.rideSwing > 0) return;
+      const id = this.moves[act];
+      const m = id ? lookupMove(id) : null;
+      if (!m) {
+        this.spendAction();
+        return;
+      }
+      // Same grammar as on foot: a move in progress only gives way to something
+      // it is allowed to cancel into, and only once it has touched somebody.
+      if (this.currentMove && !this.hasCancelInto(m.id)) return;
+      this.spendAction();
+      this.startSaddleMove(m, ctx);
       return;
     }
-    if (this.rideSwing > 0) return;
+
+    // Nothing to grab from up here, and a super wants both feet on the floor.
+    if (act !== 'special') {
+      this.spendAction();
+      return;
+    }
+    if (this.rideSwing > 0 || this.currentMove) return;
+    this.spendAction();
 
     this.rideSwing = RIDE_SWING_FRAMES;
     this.rideWindow = this.makeRideWindow();
     this.rideVel += this.facing * RIDE_LUNGE;
-    const wd = this.weaponDef;
-    ctx.audio.play(wd ? wd.sfx.swing : 'whiff', { gain: 0.8 });
+    ctx.audio.play('kick', { gain: 0.8, pitch: 0.9 });
     ctx.audio.voice(this.voice, 'attack');
   }
 
@@ -1519,7 +1757,44 @@ export class Fighter implements FighterView {
   }
 
   /**
-   * A boot from the saddle. Modest damage on purpose — the vehicle itself is
+   * Throws one of the fighter's own moves without getting off.
+   *
+   * It is the real move: its windows, its damage, its sound, the round it
+   * fires and the durability it costs. Three things about it belong to the
+   * vehicle instead — it does not lunge (`motion` is a statement about feet),
+   * it buys no invulnerability, and it does not change state, because the
+   * rider is still riding.
+   *
+   * `stateFrame` is reset and then handed to the move, the way it is on foot.
+   * That is not tidiness. The combat registry reads a DROP in it as "a fresh
+   * attack" and forgets who that fighter has already hit; a riding state that
+   * only ever counted upward would let each move connect with each guard
+   * exactly once per ride.
+   */
+  private startSaddleMove(m: MoveDef, ctx: SimContext): boolean {
+    if (!this.payFor(m, ctx)) return false;
+    this.currentMove = m;
+    this.moveAction = null;
+    this.moveConnected = false;
+    this.whiffed = false;
+    this.stateFrame = 0;
+    if (m.sfx) ctx.audio.play(m.sfx);
+    ctx.audio.voice(this.voice, 'attack');
+    return true;
+  }
+
+  private tickSaddleMove(ctx: SimContext): void {
+    const m = this.currentMove;
+    if (!m) return;
+    const f = this.stateFrame;
+    this.strikeFrame(m, f, ctx);
+    this.stateFrame = f + 1;
+    // `endMove` also lets go of a gun that has just fired its last round.
+    if (this.stateFrame >= m.duration) this.endMove(ctx);
+  }
+
+  /**
+   * The boot from the saddle. Modest damage on purpose — the vehicle itself is
    * the weapon, and this is only the answer to somebody standing right there.
    */
   private makeRideWindow(): HitWindow {
@@ -1564,6 +1839,7 @@ export class Fighter implements FighterView {
     this.setState('dash', true);
     // A dash is spent effort, and it should read that way a moment later.
     this.breathSpike = Math.min(BREATH_SPIKE_MAX, this.breathSpike + BREATH_DASH_SPIKE);
+    if (this.team === 'player') actionFx(ctx).speedLines?.(0.5, DASH_FRAMES, dir);
     ctx.audio.play('dash', { pan: 0 });
     ctx.fx.particles({
       count: 6,
@@ -1585,22 +1861,51 @@ export class Fighter implements FighterView {
 
   private tryJump(ctx: SimContext): boolean {
     if (!this.grounded && this.coyote <= 0) return false;
-    this.vel.y = JUMP_VELOCITY * this.jumpStat;
+    // Read before the state changes: a jump out of a run is a running jump.
+    const running = this.state === 'run' || this.state === 'dash';
+    this.vel.y = JUMP_VELOCITY * (1 + (this.jumpStat - 1) * JUMP_STAT_SPREAD);
     this.grounded = false;
     this.coyote = 0;
+    this.jumpArc = true;
     this.setState('jump', true);
     if (this.inX !== 0) {
       this.facing = this.inX > 0 ? 1 : -1;
-      this.vel.x = this.inX * WALK_SPEED * this.moveSpeed * 1.1;
+      const pace = running ? RUN_SPEED * RUN_JUMP_CARRY : WALK_SPEED * 1.1;
+      this.vel.x = this.inX * pace * this.moveSpeed;
     }
+    this.airCap = Math.abs(this.vel.x);
     ctx.audio.play('jump');
     ctx.audio.voice(this.voice, 'jump');
+    ctx.fx.particles({
+      count: 4,
+      x: this.pos.x,
+      y: 1,
+      z: this.pos.z,
+      angle: 0,
+      spread: Math.PI,
+      speed: [0.4, 1.4],
+      life: [8, 18],
+      size: [1.1, 2.2],
+      colors: ['#cfc6b8', '#a89e90'],
+      gravity: 0.03,
+      drag: 0.9,
+      shape: 'smoke',
+      fade: 'ease',
+    });
     return true;
   }
 
   // ── input buffer ───────────────────────────────────────────────────────────
 
+  /** Drops everything waiting: the attack, and the jump beside it. */
   private clearBuffer(): void {
+    this.bufAction = null;
+    this.bufFrames = 0;
+    this.jumpBuf = 0;
+  }
+
+  /** The attack has been used. A jump waiting beside it has not. */
+  private spendAction(): void {
     this.bufAction = null;
     this.bufFrames = 0;
   }
@@ -1621,23 +1926,25 @@ export class Fighter implements FighterView {
         return this.moves.grab ?? null;
       case 'super':
         return this.moves.super ?? null;
-      case 'jump':
-        return null;
     }
   }
 
-  /** Fires the buffered action if it is legal right now. */
+  /**
+   * Fires whatever is buffered, if it is legal right now.
+   *
+   * The jump goes first, and it does NOT take the attack with it. Pressed
+   * together, the jump clears the floor this frame and the attack — still
+   * waiting — comes out on the next one as the aerial, which is the whole of
+   * what "jump and kick at once" means. An attack on its own is untouched.
+   */
   private consumeBuffer(ctx: SimContext): boolean {
+    if (this.jumpBuf > 0 && this.tryJump(ctx)) {
+      this.jumpBuf = 0;
+      return true;
+    }
+
     if (!this.bufAction || this.bufFrames <= 0) return false;
     const act = this.bufAction;
-
-    if (act === 'jump') {
-      if (this.tryJump(ctx)) {
-        this.clearBuffer();
-        return true;
-      }
-      return false;
-    }
 
     const id = this.moveIdForAction(act);
     if (!id) {
@@ -1645,11 +1952,47 @@ export class Fighter implements FighterView {
       return false;
     }
     if (this.startMove(id, ctx)) {
-      this.clearBuffer();
+      this.moveAction = act;
+      // Only the attack is spent. A jump pressed a frame behind it is still
+      // owed, and `jumpOutOfMove` is what collects.
+      this.spendAction();
       this.tickMove(ctx);
       return true;
     }
     return false;
+  }
+
+  /**
+   * The other half of pressing two buttons "at once": the attack landed first.
+   *
+   * It has already started on the floor, so the ordinary buffer would give the
+   * player a jab and swallow the jump. Inside JUMP_ATTACK_LENIENCY — before
+   * anything has been thrown — the move is taken back, the jump happens, and
+   * the same button is put back in the buffer to come out as the aerial.
+   *
+   * Narrow on purpose. A move that cost something to start (meter, a round out
+   * of a taser) is not refunded, so it is not eligible; and nothing that has
+   * connected can be un-thrown.
+   */
+  private jumpOutOfMove(ctx: SimContext): boolean {
+    if (this.jumpBuf <= 0 || this.state !== 'attack' || !this.grounded) return false;
+    if (this.stateFrame > JUMP_ATTACK_LENIENCY || this.moveConnected) return false;
+    const act = this.moveAction;
+    if (act !== 'light' && act !== 'heavy') return false;
+    const m = this.currentMove;
+    if (!m || (m.meterCost ?? 0) > 0) return false;
+    const wd = this.weaponDef;
+    if (wd !== null && wd.ammo !== undefined && m.weapon === this.weapon) return false;
+
+    // A lunge the move had already begun is not carried into the air.
+    this.vel.x = clamp(this.vel.x, -RUN_SPEED, RUN_SPEED);
+    if (!this.tryJump(ctx)) return false;
+    this.currentMove = null;
+    this.whiffed = false;
+    this.jumpBuf = 0;
+    this.bufAction = act;
+    this.bufFrames = INPUT_BUFFER_FRAMES;
+    return true;
   }
 
   // ── move execution ─────────────────────────────────────────────────────────
@@ -1662,7 +2005,38 @@ export class Fighter implements FighterView {
     if (m.airOnly && this.grounded) return false;
     if (!m.airOk && !m.airOnly && !this.grounded) return false;
     if (!this.canStart(m)) return false;
+    if (!this.payFor(m, ctx)) return false;
+    const cost = m.meterCost ?? 0;
 
+    this.currentMove = m;
+    // Whoever called knows which button this was; nobody else gets to guess.
+    this.moveAction = null;
+    this.moveConnected = false;
+    this.whiffed = false;
+    this.stateFrame = 0;
+    this.state = cost >= 1 ? 'super' : m.isGrab ? 'grabbing' : 'attack';
+    if (this.inX !== 0 && this.grounded) this.facing = this.inX > 0 ? 1 : -1;
+
+    if (m.sfx) ctx.audio.play(m.sfx);
+    ctx.audio.voice(this.voice, 'attack');
+    if (cost >= 1) {
+      // No stock charge-up here: a super's own cue (`m.sfx`, just played) is
+      // the sound of that super, and a shared one over the top of all seven
+      // only makes them harder to tell apart.
+      ctx.fx.flash('#ffffff', 4, 0.35);
+      ctx.fx.slowmo(0.35, 12);
+    }
+    return true;
+  }
+
+  /**
+   * Takes what a move costs, or refuses it. Meter and ammunition both.
+   *
+   * One routine because there are two places a move starts — on foot, and from
+   * a saddle — and a gun that is free to fire from a motorbike is the kind of
+   * bug that only turns up in the one place nobody tests.
+   */
+  private payFor(m: MoveDef, ctx: SimContext): boolean {
     // Validate every resource before spending any of them.
     const cost = m.meterCost ?? 0;
     const wd = this.weaponDef;
@@ -1679,21 +2053,6 @@ export class Fighter implements FighterView {
       // for want of ammo, and since a weapon replaces the unarmed light and
       // heavy, the fighter was left with no attacks at all. Spent means gone.
       if (this.weaponAmmo <= 0) this.weaponSpent = true;
-    }
-
-    this.currentMove = m;
-    this.moveConnected = false;
-    this.whiffed = false;
-    this.stateFrame = 0;
-    this.state = cost >= 1 ? 'super' : m.isGrab ? 'grabbing' : 'attack';
-    if (this.inX !== 0 && this.grounded) this.facing = this.inX > 0 ? 1 : -1;
-
-    if (m.sfx) ctx.audio.play(m.sfx);
-    ctx.audio.voice(this.voice, 'attack');
-    if (cost >= 1) {
-      ctx.audio.play('super_charge');
-      ctx.fx.flash('#ffffff', 4, 0.35);
-      ctx.fx.slowmo(0.35, 12);
     }
     return true;
   }
@@ -1732,10 +2091,14 @@ export class Fighter implements FighterView {
   }
 
   private updateMove(ctx: SimContext): void {
+    if (this.jumpOutOfMove(ctx)) return;
+
     // A cancel replaces the move and runs its first frame immediately.
-    if (this.bufAction && this.bufFrames > 0 && this.bufAction !== 'jump') {
-      const id = this.moveIdForAction(this.bufAction);
+    if (this.bufAction && this.bufFrames > 0) {
+      const act = this.bufAction;
+      const id = this.moveIdForAction(act);
       if (id && this.hasCancelInto(id) && this.startMove(id, ctx)) {
+        this.moveAction = act;
         this.clearBuffer();
         this.tickMove(ctx);
         return;
@@ -1771,6 +2134,24 @@ export class Fighter implements FighterView {
       m.invuln && f >= m.invuln.start && f <= m.invuln.end ? 1 : 0,
     );
 
+    this.strikeFrame(m, f, ctx);
+
+    this.stateFrame = f + 1;
+    if (this.stateFrame >= m.duration) {
+      this.endMove(ctx);
+      this.setState(this.grounded ? 'idle' : 'fall');
+    }
+  }
+
+  /**
+   * The part of a move's frame that is about hitting somebody: its live boxes,
+   * its bespoke callback, and the sound of it finding nothing.
+   *
+   * Shared by the floor and the saddle. What differs between them — whether
+   * the move is allowed to move the body, and what happens when it ends — stays
+   * with the caller.
+   */
+  private strikeFrame(m: MoveDef, f: number, ctx: SimContext): void {
     let lastWindowEnd = -1;
     for (const w of m.windows) {
       if (f >= w.start && f <= w.end) ctx.spawnHit(this.id, w);
@@ -1782,12 +2163,6 @@ export class Fighter implements FighterView {
     if (!this.whiffed && !this.moveConnected && lastWindowEnd >= 0 && f === lastWindowEnd + 1) {
       this.whiffed = true;
       ctx.audio.play('whiff', { gain: 0.5 });
-    }
-
-    this.stateFrame = f + 1;
-    if (this.stateFrame >= m.duration) {
-      this.endMove(ctx);
-      this.setState(this.grounded ? 'idle' : 'fall');
     }
   }
 
@@ -1869,6 +2244,8 @@ export class Fighter implements FighterView {
     } else if (this.dizzyMeter >= STUN_THRESHOLD && this.grounded) {
       this.dizzyMeter = 0;
       this.dizzyTimer = STUN_DURATION;
+      // The opening is the whole point of dizzying somebody, and it was silent.
+      ctx.audio.play('dizzy');
       ctx.fx.text({
         text: 'DIZZY',
         x: this.pos.x,
@@ -2117,9 +2494,34 @@ export class Fighter implements FighterView {
     this.moveConnected = true;
     this.comboCount++;
     this.comboTimer = COMBO_RESET_FRAMES;
+    if (!blocked && this.team === 'player') this.comboCallout(ctx);
     this.addMeter(props.meterGain * (blocked ? 0.4 : 1), ctx);
     if (props.pushback > 0) this.vel.x -= dir * props.pushback;
     this.spendDurability(ctx);
+  }
+
+  /** Says so, once, on the hit that takes a combo over one of the lines. */
+  private comboCallout(ctx: SimContext): void {
+    for (const [at, words] of COMBO_CALLOUTS) {
+      if (this.comboCount !== at) continue;
+      const big = at >= COMBO_CALLOUT_BIG;
+      ctx.fx.text({
+        text: words,
+        x: this.pos.x,
+        y: 76,
+        z: this.pos.z,
+        color: big ? '#ffcf5c' : '#7fe0ff',
+        size: big ? 8 : 10,
+        life: 66,
+        rise: 0.3,
+        style: big ? 'critical' : 'bonus',
+      });
+      ctx.fx.flash('#ffe9a0', 3, big ? 0.24 : 0.12);
+      ctx.fx.shake({ magnitude: 2 + at * 0.12, duration: 10 });
+      // Higher at every rung, so the ladder can be heard as well as read.
+      ctx.audio.play('combo_up', { pitch: 1 + at * 0.02, gain: 0.9 });
+      return;
+    }
   }
 
   private toKnockdown(ctx: SimContext): void {
@@ -2136,6 +2538,25 @@ export class Fighter implements FighterView {
     if (this.weapon) this.dropWeapon(ctx);
 
     ctx.fx.shake({ magnitude: 4.5, duration: 10, dirY: 1 });
+    // One ring off the floor where the back landed: the dust says something
+    // fell, the ring says how hard.
+    ctx.fx.particles({
+      count: 1,
+      x: this.pos.x,
+      y: 3,
+      z: this.pos.z,
+      angle: 0,
+      spread: 0,
+      speed: [0, 0],
+      life: [8, 12],
+      size: [12, 20],
+      colors: ['#f4f0e6'],
+      gravity: 0,
+      drag: 1,
+      shape: 'ring',
+      additive: true,
+      fade: 'ease',
+    });
     ctx.fx.particles({
       count: 10,
       x: this.pos.x,
@@ -2152,7 +2573,7 @@ export class Fighter implements FighterView {
       shape: 'smoke',
       fade: 'ease',
     });
-    ctx.audio.play('bone_crack', { pitch: 0.9 });
+    ctx.audio.play('slam', { pitch: 1.1, gain: 0.7 });
   }
 
   private die(ctx: SimContext): void {
@@ -2173,7 +2594,7 @@ export class Fighter implements FighterView {
       x: this.pos.x,
       y: this.pos.y + 20,
       z: this.pos.z,
-      angle: -Math.PI / 2,
+      angle: Math.PI / 2,
       spread: Math.PI,
       speed: [1.5, 5],
       life: [16, 40],
@@ -2292,7 +2713,7 @@ export class Fighter implements FighterView {
       x: this.pos.x + this.facing * 12,
       y: this.pos.y + 22,
       z: this.pos.z,
-      angle: -Math.PI / 2,
+      angle: Math.PI / 2,
       spread: Math.PI,
       speed: [1.6, 5.4],
       life: [14, 34],
@@ -2353,7 +2774,7 @@ export class Fighter implements FighterView {
       f.wallBounce = true;
       f.hitstunTimer = 30;
       f.setState('thrown', true);
-      ctx.audio.play('hit_flesh', { pitch: 0.8 });
+      ctx.audio.play('whoosh_big', { pitch: 1.4, gain: 0.7 });
     }
   }
 
@@ -2428,6 +2849,10 @@ export class Fighter implements FighterView {
     // you do not. Either way nothing ride-shaped survives the dismount.
     if (this.state === 'riding') {
       this.vel.x = this.rideVel * 0.35;
+      // Whatever was being thrown from the saddle stays in the saddle.
+      this.currentMove = null;
+      this.moveConnected = false;
+      this.whiffed = false;
       this.setState('idle', true);
     }
     this.rideVel = 0;
@@ -2539,6 +2964,51 @@ export class Fighter implements FighterView {
 
   // ── rendering ──────────────────────────────────────────────────────────────
 
+  /**
+   * Lays whatever is being thrown from the saddle over the riding pose.
+   *
+   * Presentation only, and like the rest of `render` a pure function of sim
+   * state. The seat has already bent the clip to fit the machine; this takes
+   * the hands off the bars for as long as the strike lasts and puts them back,
+   * eased both ways so the grip is let go of rather than cut.
+   *
+   * A kick is the exception: nobody lets go of a motorbike to kick somebody.
+   * The hands stay where they are and the near leg comes off the peg instead.
+   */
+  private saddleStrike(pose: Pose, alpha: number): void {
+    const m = this.currentMove;
+    let name: string;
+    let total: number;
+    let frame: number;
+    if (m) {
+      name = m.anim;
+      total = m.duration;
+      // The move ticks then advances, so the frame just simulated is one back.
+      frame = lerp(Math.max(0, this.stateFrame - 2), Math.max(0, this.stateFrame - 1), alpha);
+    } else if (this.rideSwing > 0) {
+      name = 'kick';
+      total = RIDE_SWING_FRAMES;
+      const done = RIDE_SWING_FRAMES - this.rideSwing;
+      frame = lerp(Math.max(0, done - 1), done, alpha);
+    } else {
+      return;
+    }
+
+    const clip = CLIPS[name];
+    if (!clip || total <= 0) return;
+    const w = clamp(
+      Math.min((frame + 1) / SADDLE_BLEND_IN, (total - frame) / SADDLE_BLEND_OUT),
+      0,
+      1,
+    );
+    if (w <= 0) return;
+
+    const strike = sampleClip(clip, (frame * Math.max(1, clip.duration)) / total);
+    const kicking = !m || LEG_CLIPS.has(name);
+    for (const n of kicking ? SADDLE_LEG : SADDLE_ARMS) mixBone(pose, strike, n, w);
+    for (const n of SADDLE_TRUNK_BONES) mixBone(pose, strike, n, SADDLE_TRUNK * w);
+  }
+
   render(ctx: C2D, cam: Camera, alpha: number): void {
     const a = clamp(alpha, 0, 1);
     const x = lerp(this.prevPos.x, this.pos.x, a);
@@ -2571,6 +3041,7 @@ export class Fighter implements FighterView {
     if (!clip) return;
     const pose = sampleClip(clip, lerp(this.prevAnimFrame, this.animFrame, a));
     if (seat) seatPose(pose, seat);
+    if (this.state === 'riding') this.saddleStrike(pose, a);
 
     // Invulnerability reads as a strobe; a solid ghost would look like a bug.
     const strobe = this.invulnFrames > 0 && (this.age & 2) !== 0 ? 0.45 : 1;

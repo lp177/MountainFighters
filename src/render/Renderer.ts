@@ -13,7 +13,7 @@ import { clamp } from '@/core/math';
 import { GROUND_Y, VIEW_H, VIEW_W, Z_SCALE } from '@/core/constants';
 
 /** Maximum channel displacement of the aberration pass, in virtual pixels. */
-const ABERRATION_MAX = 4;
+const ABERRATION_MAX = 2.25;
 /** Beyond 3x the extra pixels cost more than they show. */
 const MAX_DPR = 3;
 
@@ -62,8 +62,9 @@ export class Renderer {
     const style = this.canvas.style;
     style.width = `${bw / dpr}px`;
     style.height = `${bh / dpr}px`;
+    // Placement is the stylesheet's job (#app centres it, or pins it to the top
+    // of a portrait screen); an inline auto margin here would override both.
     style.display = 'block';
-    style.margin = 'auto';
 
     this.sx = bw / VIEW_W;
     this.sy = bh / VIEW_H;
@@ -95,7 +96,7 @@ export class Renderer {
     if (cam.rotation !== 0) ctx.rotate(cam.rotation);
     if (cam.zoom !== 1) ctx.scale(cam.zoom, cam.zoom);
     ctx.translate(-VIEW_W * 0.5, -VIEW_H * 0.5);
-    ctx.translate(-cam.x + cam.shakeX, cam.shakeY);
+    ctx.translate(-cam.x + cam.shakeX, -cam.y + cam.shakeY);
     try {
       fn();
     } finally {

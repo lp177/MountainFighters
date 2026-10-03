@@ -772,7 +772,26 @@ export type SfxCue =
   | 'laugh'
   | 'grunt'
   | 'engine'
-  | 'tyres';
+  | 'tyres'
+  | 'knee'
+  | 'jump_kick'
+  | 'slam'
+  | 'impact_heavy'
+  | 'slice'
+  | 'tear'
+  | 'whoosh_big'
+  | 'riser'
+  | 'sub_drop'
+  | 'fatality_sting'
+  | 'heartbeat'
+  | 'engine_rev'
+  | 'crash'
+  | 'combo_up'
+  | 'squelch'
+  | 'bone_snap'
+  | 'gulp'
+  | 'dizzy'
+  | 'alert';
 
 export type MusicMood =
   | 'menu'

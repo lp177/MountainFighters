@@ -79,9 +79,11 @@ export class AudioSystem implements AudioBus {
   private ensureDeck(): Music | null {
     if (this.deck) return this.deck;
     const ctx = this.synth.context;
-    const master = this.synth.master;
-    if (!ctx || !master) return null;
-    this.deck = new Music(ctx, master);
+    // The duck, not the mix bus: the soundtrack has to be somewhere a
+    // killing blow can push it out of the way.
+    const bus = this.synth.musicIn;
+    if (!ctx || !bus) return null;
+    this.deck = new Music(ctx, bus);
     this.appliedMusic = -1;
     return this.deck;
   }

@@ -45,6 +45,7 @@ import type { SelectParams } from '@/scenes/SelectScene';
 import type { HomeParams } from '@/scenes/HomeScene';
 import { nav } from '@/scenes/PauseScene';
 
+import { FONT_DISPLAY, FONT_TEXT, PALETTE, hintRow } from '@/ui/theme';
 type C2D = CanvasRenderingContext2D;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -91,19 +92,19 @@ const MAX_SCROLL = Math.max(0, CONTENT_H - VIEW.h);
 /** Slack kept above and below the cursor so it never sits on the very edge. */
 const SCROLL_PAD = 6;
 
-const ACCENT = '#ff2e6e';
-const ACCENT_DEEP = '#b8004a';
-const GOLD = '#ffd23f';
-const DIM = '#a2aabb';
-const FAINT = '#6d768a';
-const PAPER = '#eceff6';
-const SURFACE = '#0d1018';
-const SURFACE_DEEP = '#080a10';
-const OUTLINE = '#2c3242';
+const ACCENT = PALETTE.lamp;
+const ACCENT_DEEP = PALETTE.lampDeep;
+const GOLD = PALETTE.lampHot;
+const DIM = PALETTE.boneDim;
+const FAINT = PALETTE.boneFaint;
+const PAPER = PALETTE.bone;
+const SURFACE = PALETTE.coal1;
+const SURFACE_DEEP = '#0e0b0a';
+const OUTLINE = PALETTE.line;
 const INK = '#141019';
 
-const DISPLAY = '"Arial Black", "Helvetica Neue", Impact, system-ui, sans-serif';
-const SANS = 'ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif';
+const DISPLAY = FONT_DISPLAY;
+const SANS = FONT_TEXT;
 
 /** Frames the highlighted cover's nudge runs for. */
 const BUMP_FRAMES = 12;
@@ -154,9 +155,6 @@ const VEHICLE_LABEL: Record<VehicleSection['kind'], string> = {
   // Never appears on a cover: scooters come from props, not from map sections.
   scooter: 'SCOOTER',
 };
-
-const HINTS =
-  '◄ ▲ ▼ ►  BROWSE     LIGHT / JUMP  PLAY IT     HEAVY  BACK     L1 / R1  PAGE';
 
 /** What a locked square is allowed to tell you, which is very little. */
 const LOCKED_BODY = 'Nobody has been down here yet. Get there and it fills in.';
@@ -286,6 +284,9 @@ export class GalleryScene implements Scene {
     focus: 0,
   };
 
+  /** The stage, for pointer input. */
+  private canvas: HTMLElement | null = null;
+
   /** Scratch quad for the backdrop chevrons, so the draw path allocates none. */
   private readonly quad = [0, 0, 0, 0, 0, 0, 0, 0];
 
@@ -327,6 +328,9 @@ export class GalleryScene implements Scene {
 
     this.buildDevices();
     this.keepCursorInView();
+    this.canvas = document.getElementById('game');
+    this.canvas?.addEventListener('pointerdown', this.onPointer);
+    this.canvas?.addEventListener('wheel', this.onWheel, { passive: false });
     // The wall does not slide in from wherever it was left; it opens on you.
     this.scroll = this.scrollTarget;
 
@@ -334,6 +338,9 @@ export class GalleryScene implements Scene {
   }
 
   exit(): void {
+    this.canvas?.removeEventListener('pointerdown', this.onPointer);
+    this.canvas?.removeEventListener('wheel', this.onWheel);
+    this.canvas = null;
     for (const k of this.keys) k.dispose();
     this.keys = [];
     for (const p of this.pads.values()) p.dispose();
@@ -354,7 +361,7 @@ export class GalleryScene implements Scene {
     const ctx = r.ctx;
 
     r.begin();
-    r.clear('#06070a');
+    r.clear(PALETTE.coal);
     this.drawBackdrop(ctx, this.frame + alpha);
     this.drawHeader(ctx);
     this.drawPreview(ctx);
@@ -612,6 +619,40 @@ export class GalleryScene implements Scene {
     this.keepCursorInView();
   }
 
+  // ── Pointer ────────────────────────────────────────────────────────────────
+
+  /**
+   * Mouse and touch. The wall was pad-and-keyboard only, which left a phone —
+   * and anybody who reached for the mouse — looking at seventy squares they
+   * could not press. Click a square to look at it, click it again to play it;
+   * the wheel walks the rows.
+   */
+  private readonly onPointer = (e: PointerEvent): void => {
+    if (this.leaving || e.button !== 0 || !this.canvas) return;
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) return;
+    const vx = ((e.clientX - rect.left) / rect.width) * VIEW_W;
+    const vy = ((e.clientY - rect.top) / rect.height) * VIEW_H;
+    if (vx < VIEW.x || vx > VIEW.x + VIEW.w || vy < VIEW.y || vy > VIEW.y + VIEW.h) return;
+    const col = Math.floor((vx - VIEW.x) / (CELL_W + GAP_X));
+    const row = Math.floor((vy - VIEW.y + this.scroll) / PITCH);
+    if (col < 0 || col >= COLS) return;
+    // The gaps between squares are not squares.
+    if (vx - VIEW.x - col * (CELL_W + GAP_X) > CELL_W) return;
+    if (vy - VIEW.y + this.scroll - row * PITCH > CELL_H) return;
+    const index = row * COLS + col;
+    if (index < 0 || index >= TOTAL_MAPS) return;
+    e.preventDefault();
+    if (index === this.cursor) this.choose();
+    else this.setCursor(index);
+  };
+
+  private readonly onWheel = (e: WheelEvent): void => {
+    if (this.leaving || Math.abs(e.deltaY) < 1) return;
+    e.preventDefault();
+    this.moveV(e.deltaY > 0 ? 1 : -1);
+  };
+
   // ── Transitions ────────────────────────────────────────────────────────────
 
   /**
@@ -723,9 +764,9 @@ export class GalleryScene implements Scene {
   private drawBackdrop(ctx: C2D, t: number): void {
     if (!this.bgGrad) {
       const g = ctx.createLinearGradient(0, 0, 0, VIEW_H);
-      g.addColorStop(0, '#0a0b14');
-      g.addColorStop(0.55, '#12101f');
-      g.addColorStop(1, '#07070c');
+      g.addColorStop(0, '#120e0c');
+      g.addColorStop(0.55, '#0e0b0a');
+      g.addColorStop(1, '#090706');
       this.bgGrad = g;
     }
     ctx.fillStyle = this.bgGrad;
@@ -867,14 +908,14 @@ export class GalleryScene implements Scene {
   private chip(ctx: C2D, text: string, x: number, y: number, color: string): number {
     setFont(ctx, 7, 700, false);
     const w = ctx.measureText(text).width + 14;
-    roundRect(ctx, x, y, w, 14, 7, '#171c28', OUTLINE, 1);
+    roundRect(ctx, x, y, w, 14, 7, PALETTE.coal3, OUTLINE, 1);
     label(ctx, text, x + 7, y + 9.5, color);
     return w;
   }
 
   /** Blocks where the name would be. Whatever it says, you have not earned it. */
   private drawRedaction(ctx: C2D, x: number, y: number): void {
-    ctx.fillStyle = '#1a1f2c';
+    ctx.fillStyle = PALETTE.coal3;
     ctx.fillRect(x, y, 96, 7);
     ctx.fillRect(x + 102, y, 54, 7);
     ctx.fillRect(x, y + 11, 72, 7);
@@ -920,7 +961,7 @@ export class GalleryScene implements Scene {
       // Boss maps wear a star. Which map has one is public knowledge — every
       // fifth — so it costs nothing and gives the wall a rhythm.
       if (def.boss) {
-        star(ctx, cx + CELL_W - 7, cy + 7, 4, 5, open ? GOLD : '#2a3040', INK);
+        star(ctx, cx + CELL_W - 7, cy + 7, 4, 5, open ? GOLD : PALETTE.coal4, INK);
       }
 
       // The cursor sits OUTSIDE the card. The cover already lights its own rim
@@ -962,7 +1003,7 @@ export class GalleryScene implements Scene {
     if (MAX_SCROLL <= 0) return;
     const x = GRID.x + GRID.w - 5;
     const h = VIEW.h;
-    ctx.fillStyle = '#161a24';
+    ctx.fillStyle = PALETTE.coal2;
     ctx.fillRect(x, VIEW.y, 2, h);
 
     const thumb = Math.max(18, (h * h) / CONTENT_H);
@@ -1002,8 +1043,18 @@ export class GalleryScene implements Scene {
     ctx.fillStyle = SURFACE_DEEP;
     ctx.fillRect(0, 342, VIEW_W, VIEW_H - 342);
 
-    setFont(ctx, 7.5, 700, false);
-    label(ctx, HINTS, 12, 354, FAINT);
+    hintRow(
+      ctx,
+      [
+        { keys: ['◀', '▲', '▼', '▶'], verb: 'BROWSE' },
+        { keys: ['Enter'], verb: 'PLAY IT' },
+        { keys: ['Esc'], verb: 'BACK' },
+        { keys: ['L1', 'R1'], verb: 'PAGE' },
+      ],
+      12,
+      351,
+      6.5,
+    );
 
     const index = this.cursor + 1;
     const open = this.unlocked(index);

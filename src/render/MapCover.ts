@@ -53,6 +53,7 @@ import { TAU, clamp, lerp } from '@/core/math';
 import { BOSSES } from '@/content/bosses';
 import { capsule, ellipse, roundRect, star } from '@/render/Shapes';
 
+import { PALETTE } from '@/ui/theme';
 type C2D = CanvasRenderingContext2D;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -61,13 +62,13 @@ type C2D = CanvasRenderingContext2D;
 // an unplayed map may not leak so much as its hue.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const N_SURFACE = '#0d1018';
+const N_SURFACE = PALETTE.coal1;
 const N_DEEP = '#080a0f';
 const N_PLATE = '#11151f';
 const N_HATCH = '#151a26';
-const N_OUTLINE = '#2c3242';
-const N_FAINT = '#6d768a';
-const N_DIM = '#a2aabb';
+const N_OUTLINE = PALETTE.line;
+const N_FAINT = PALETTE.boneFaint;
+const N_DIM = PALETTE.boneDim;
 
 /** Bosses by id, built once. `MapDef.boss` is a string reference into this. */
 const BOSS_BY_ID = new Map<string, BossDef>();

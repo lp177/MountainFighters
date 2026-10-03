@@ -29,6 +29,7 @@ import type { Renderer } from '@/render/Renderer';
 import type { GameLoop } from '@/engine/Loop';
 import type { EmitSpec, ParticleSystem } from '@/juice/Particles';
 import { clamp, easeIn, easeOut, easeOutBack, lerp, TAU } from '@/core/math';
+import { PALETTE, displayFont, strokeFor } from '@/ui/theme';
 import {
   CAMERA_PUNCH,
   GROUND_Y,
@@ -60,6 +61,12 @@ const ST_CRITICAL = 4;
 const MAX_TEXTS = 32;
 const MAX_SHOCKWAVES = 10;
 const MAX_IMPACTS = 24;
+/** Impact bursts alive at once. A crowd hit by one swing asks for several. */
+const MAX_BURSTS = 8;
+/** Frames an impact burst lasts. Short: it is a flash of ink, not an explosion. */
+const BURST_LIFE = 8;
+/** Streaks across the frame while something is moving fast enough to earn them. */
+const SPEED_STREAKS = 18;
 
 /** Blobs of blood the camera lens can carry at once. */
 const MAX_LENS = 26;
@@ -141,7 +148,33 @@ class Shockwave {
   maxLife = 1;
 }
 
-export class Fx implements FxBus {
+class ImpactBurst {
+  active = false;
+  x = 0;
+  y = 0;
+  z = 0;
+  /** World angle the blow was travelling, so the spikes lean that way. */
+  angle = 0;
+  power = 1;
+  life = 0;
+  seed = 0;
+}
+
+/**
+ * The parts of the juice layer that are not in the `FxBus` contract.
+ *
+ * `core/types.ts` is the shared contract and feature work does not edit it, so
+ * sim code that wants one of these asks for it by this shape and probes —
+ * `(ctx.fx as FxBus & ActionFx).impactLines?.(…)` — exactly the way the combat
+ * resolver already reaches the gore emitters. A stub bus in a test simply has
+ * none of them, and nothing about the fight changes.
+ */
+export interface ActionFx {
+  impactLines?(x: number, y: number, z: number, dir: number, power: number): void;
+  speedLines?(strength: number, frames: number, dir: number): void;
+}
+
+export class Fx implements FxBus, ActionFx {
   muted = false;
 
   private readonly cam: Camera;
@@ -168,8 +201,17 @@ export class Fx implements FxBus {
 
   private readonly texts: FloatingText[] = [];
   private readonly waves: Shockwave[] = [];
+  private readonly bursts: ImpactBurst[] = [];
   private textCursor = 0;
   private waveCursor = 0;
+  private burstCursor = 0;
+
+  private speedStrength = 0;
+  private speedLife = 0;
+  private speedMax = 1;
+  private speedDir = 1;
+  /** Free-running, so the streaks keep travelling while the sim is held. */
+  private speedClock = 0;
 
   private readonly lens: LensBlob[] = [];
   private lensCursor = 0;
@@ -230,6 +272,7 @@ export class Fx implements FxBus {
     this.settings = settings;
     for (let i = 0; i < MAX_TEXTS; i++) this.texts.push(new FloatingText());
     for (let i = 0; i < MAX_SHOCKWAVES; i++) this.waves.push(new Shockwave());
+    for (let i = 0; i < MAX_BURSTS; i++) this.bursts.push(new ImpactBurst());
     for (let i = 0; i < MAX_LENS; i++) this.lens.push(new LensBlob());
     this.impId.fill(-1);
   }
@@ -306,6 +349,30 @@ export class Fx implements FxBus {
     if (style === ST_CRITICAL) size *= 1.6;
     else if (style === ST_COMBO) size *= 1 + clamp(digits(spec.text), 0, 40) * 0.028;
     t.size = Math.max(5, size);
+
+    // Stack rather than overprint. Two labels born on the same spot within a few
+    // frames of each other — a pickup name over a damage number, three hits of a
+    // flurry — used to land on top of one another and read as neither. A fresh
+    // one starts a line above whatever young text is already standing there.
+    let lift = 0;
+    for (let pass = 0; pass < 4; pass++) {
+      let moved = false;
+      for (let i = 0; i < MAX_TEXTS; i++) {
+        const o = this.texts[i];
+        if (o === t || !o.active) continue;
+        if (o.maxLife - o.life > 24) continue;
+        if (Math.abs(o.x - t.x) > 46 || Math.abs(o.z - t.z) > 30) continue;
+        // Heights above the floor, which is the axis the two would collide on.
+        const other = o.y + o.oy;
+        const mine = t.y + lift;
+        if (Math.abs(other - mine) < Math.max(o.size, t.size) * 1.05) {
+          lift = other + Math.max(o.size, t.size) * 1.08 - t.y;
+          moved = true;
+        }
+      }
+      if (!moved) break;
+    }
+    t.oy = Math.max(0, lift);
   }
 
   flash(color: string, frames: number, alpha?: number): void {
@@ -403,6 +470,61 @@ export class Fx implements FxBus {
       this.abLife = frames;
       this.abMax = Math.max(this.abMax, frames);
     }
+  }
+
+  // ── action lines ───────────────────────────────────────────────────────────
+
+  /**
+   * The comic-book star at the point of a hard hit: a ring of ink spikes that
+   * snaps out and is gone in eight frames.
+   *
+   * A particle burst says something was knocked loose; this says something was
+   * HIT, and it says it on the frame the hitstop is holding, which is the frame
+   * the eye is actually looking at. `dir` is a facing or a world angle, read the
+   * same way `blood` reads one; the spikes are longest along it, so the star
+   * leans the way the blow went. `power` is roughly 0.5 for a heavy normal and
+   * 2 for something that ends a life.
+   */
+  impactLines(x: number, y: number, z: number, dir: number, power: number): void {
+    if (this.muted) return;
+    if (this.settings.reducedMotion) return;
+    if (!(power > 0)) return;
+    const b = this.bursts[this.burstCursor];
+    this.burstCursor = (this.burstCursor + 1) % MAX_BURSTS;
+    b.active = true;
+    b.x = x;
+    b.y = y;
+    b.z = z;
+    b.angle = sprayAngle(dir, 0);
+    b.power = clamp(power, 0.3, 3);
+    b.life = BURST_LIFE;
+    b.seed = (Math.random() * 65536) | 0;
+  }
+
+  /**
+   * Streaks across the frame: the screen itself saying "fast".
+   *
+   * Meant to be called every frame by whatever is doing the moving — a vehicle
+   * at full throttle, a dash — with a short `frames`, so it lives exactly as
+   * long as the speed does and dies a few frames after it. `dir` is the way the
+   * mover is going; the streaks travel the other way, past it.
+   */
+  speedLines(strength: number, frames: number, dir: number): void {
+    if (this.muted) return;
+    if (this.settings.reducedMotion) return;
+    if (frames <= 0) return;
+    const s = clamp(strength, 0, 1);
+    if (s <= 0.02) return;
+    const current = this.speedLife > 0 ? this.speedStrength * (this.speedLife / this.speedMax) : 0;
+    if (s >= current) {
+      this.speedStrength = s;
+      this.speedLife = frames;
+      this.speedMax = frames;
+    } else if (frames > this.speedLife) {
+      this.speedLife = frames;
+      this.speedMax = Math.max(this.speedMax, frames);
+    }
+    this.speedDir = dir >= 0 ? 1 : -1;
   }
 
   // ── gore ───────────────────────────────────────────────────────────────────
@@ -782,6 +904,17 @@ export class Fx implements FxBus {
       if (w.life <= 0) w.active = false;
     }
 
+    for (let i = 0; i < MAX_BURSTS; i++) {
+      const b = this.bursts[i];
+      if (b.active && --b.life <= 0) b.active = false;
+    }
+
+    this.speedClock++;
+    if (this.speedLife > 0) {
+      this.speedLife--;
+      if (this.speedLife <= 0) this.speedStrength = 0;
+    }
+
     for (let i = 0; i < MAX_TEXTS; i++) {
       const t = this.texts[i];
       if (!t.active) continue;
@@ -805,6 +938,10 @@ export class Fx implements FxBus {
       const w = this.waves[i];
       if (w.active) this.drawShockwave(ctx, w, cam);
     }
+    for (let i = 0; i < MAX_BURSTS; i++) {
+      const b = this.bursts[i];
+      if (b.active) this.drawBurst(ctx, b, cam);
+    }
     let any = false;
     for (let i = 0; i < MAX_TEXTS; i++) {
       const t = this.texts[i];
@@ -827,6 +964,11 @@ export class Fx implements FxBus {
    * the lens, and chromatic aberration last so it fringes all of it.
    */
   renderOverlay(r: Renderer): void {
+    if (this.speedLife > 0) {
+      this.overlayCtx = r.ctx;
+      r.withScreen(this.drawSpeedLines);
+      this.overlayCtx = null;
+    }
     if (this.flashLife > 0) {
       const t = this.flashLife / this.flashMax;
       const a = this.flashAlpha * t * t * (0.6 + 0.4 * t);
@@ -868,6 +1010,81 @@ export class Fx implements FxBus {
     }
     if (this.lensLive > 0) this.drawLens(ctx);
   };
+
+  /**
+   * Horizontal streaks, in two bands above and below the fight.
+   *
+   * Kept out of the middle on purpose: that is where the people are, and a
+   * speed effect that draws over the thing going fast has hidden it. Positions
+   * are hashed off the streak's own index, so each one keeps its lane and only
+   * its phase moves — random placement every frame reads as static, not speed.
+   */
+  private readonly drawSpeedLines = (): void => {
+    const ctx = this.overlayCtx;
+    if (!ctx) return;
+    const k = this.speedStrength * clamp(this.speedLife / this.speedMax, 0, 1);
+    if (k <= 0.02) return;
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineCap = 'round';
+    for (let i = 0; i < SPEED_STREAKS; i++) {
+      const h = hash01(i * 7 + 3);
+      const h2 = hash01(i * 13 + 11);
+      const y = VIEW_H * (i & 1 ? 0.05 + h * 0.28 : 0.84 + h * 0.14);
+      const len = (40 + h2 * 110) * (0.5 + k);
+      const span = VIEW_W + len;
+      const u = (i * 97.3 + this.speedClock * (16 + h2 * 22)) % span;
+      // Against the mover: going right, the world comes past from the right.
+      const x = this.speedDir > 0 ? VIEW_W - u : u - len;
+      ctx.globalAlpha = k * (0.16 + h * 0.3);
+      ctx.lineWidth = 0.8 + h2 * 1.2;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + len, y);
+      ctx.stroke();
+    }
+    ctx.restore();
+  };
+
+  /**
+   * One impact star. Tapered spikes round the contact point, pushed outward as
+   * they thin, so the whole thing reads as one frame of ink snapping open.
+   */
+  private drawBurst(ctx: C2D, b: ImpactBurst, cam: Camera): void {
+    const onScreen = b.x - cam.x;
+    if (onScreen < -90 || onScreen > VIEW_W + 90) return;
+    const t = 1 - b.life / BURST_LIFE;
+    const reach = 10 + b.power * 13;
+    const n = 9 + Math.round(b.power * 3);
+    const a = (1 - t) * (1 - t);
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.translate(b.x, GROUND_Y + b.z * Z_SCALE - b.y);
+    for (let i = 0; i < n; i++) {
+      const h = hash01(b.seed + i * 31);
+      const ang = (i / n) * TAU + (h - 0.5) * 0.5;
+      // Longest along the blow, shortest against it.
+      const lean = 0.55 + 0.45 * Math.max(0, Math.cos(ang - b.angle));
+      const r0 = reach * (0.3 + t * 0.75);
+      const r1 = r0 + reach * (0.55 + h * 0.7) * lean * (1 - t * 0.4);
+      const w = (0.9 + b.power * 0.7) * (1 - t) * (0.6 + h * 0.6);
+      // World angles turn anticlockwise; the canvas's y runs down.
+      const cx = Math.cos(ang);
+      const cy = -Math.sin(ang);
+      ctx.globalAlpha = a * (0.55 + h * 0.45);
+      ctx.fillStyle = i & 1 ? '#ffffff' : '#ffe9a0';
+      ctx.beginPath();
+      ctx.moveTo(cx * r0 - cy * w, cy * r0 + cx * w);
+      ctx.lineTo(cx * r1, cy * r1);
+      ctx.lineTo(cx * r0 + cy * w, cy * r0 - cx * w);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+  }
 
   /**
    * Pull the colour out of the frame, then bruise it.
@@ -991,28 +1208,28 @@ export class Fx implements FxBus {
 
     const alpha = clamp(life > TEXT_FADE ? 1 : life / TEXT_FADE, 0, 1);
     ctx.globalAlpha = alpha;
-    ctx.font =
-      (t.style === ST_TAUNT ? 'italic 900 ' : '900 ') +
-      size.toFixed(1) +
-      'px Impact, "Arial Black", "Helvetica Neue", system-ui, sans-serif';
+    // Numbers and shouts in the italic black cut; pickup names and words in the
+    // upright heavy one, which stays legible at the small sizes they come in.
+    const numeric = t.style === ST_DAMAGE || t.style === ST_CRITICAL || t.style === ST_COMBO;
+    ctx.font = displayFont(size, numeric || t.style === ST_TAUNT ? 900 : 800, numeric || t.style === ST_TAUNT);
 
-    const fill = t.style === ST_CRITICAL ? '#ffe14a' : t.color;
+    const fill = t.style === ST_CRITICAL ? PALETTE.lampHot : t.color;
 
     if (t.style === ST_CRITICAL) {
-      ctx.globalAlpha = alpha * 0.55;
-      ctx.strokeStyle = '#ff3b12';
-      ctx.lineWidth = size * 0.46;
+      ctx.globalAlpha = alpha * 0.5;
+      ctx.strokeStyle = PALETTE.blood;
+      ctx.lineWidth = Math.min(7, size * 0.36);
       ctx.strokeText(t.text, sx, sy);
       ctx.globalAlpha = alpha;
     }
 
-    ctx.globalAlpha = alpha * 0.45;
-    ctx.fillStyle = '#000000';
-    ctx.fillText(t.text, sx + 1.2, sy + 1.6);
+    ctx.globalAlpha = alpha * 0.5;
+    ctx.fillStyle = PALETTE.ink;
+    ctx.fillText(t.text, sx + 0.8, sy + 1.6);
 
     ctx.globalAlpha = alpha;
-    ctx.strokeStyle = t.style === ST_CRITICAL ? '#3a0800' : '#15121c';
-    ctx.lineWidth = Math.max(1.4, size * 0.2);
+    ctx.strokeStyle = t.style === ST_CRITICAL ? '#3a0800' : PALETTE.ink;
+    ctx.lineWidth = strokeFor(size);
     ctx.strokeText(t.text, sx, sy);
     ctx.fillStyle = fill;
     ctx.fillText(t.text, sx, sy);

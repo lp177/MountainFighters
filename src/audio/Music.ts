@@ -5,6 +5,11 @@
  *
  * Mood changes crossfade: the outgoing deck keeps playing its pattern while it
  * fades, so the score never hard-cuts.
+ *
+ * The mix is deliberately SFX-forward: even the final boss deck averages some
+ * fifteen decibels under a heavy hit, and the synth ducks this whole bus under
+ * the events the screen stops for (see `DUCK` in Synth.ts). Nothing in here
+ * needs to know.
  */
 
 import { clamp } from '@/core/math';
@@ -44,6 +49,13 @@ interface MoodDef {
   bassLen: number;
   bassOct: number;
   bassGain: number;
+  /**
+   * Level of a square an octave over the bass, ahead of its filter. A bass
+   * line rooted on A1 is 55Hz of fundamental that a laptop cannot play; this
+   * is the part of it that survives, and the fight moods get more of it the
+   * worse things are going. Zero keeps a mood round.
+   */
+  bassGrit: number;
 
   lead: readonly Note[];
   leadWave: OscillatorType;
@@ -83,6 +95,7 @@ const MOODS: Record<MusicMood, MoodDef> = {
     bassLen: 6,
     bassOct: 0,
     bassGain: 0.5,
+    bassGrit: 0,
     lead: [null, null, 7, null, null, null, null, null, null, null, 9, null, null, null, null, 11],
     leadWave: 'triangle',
     leadOct: 2,
@@ -114,6 +127,7 @@ const MOODS: Record<MusicMood, MoodDef> = {
     bassLen: 1.6,
     bassOct: 0,
     bassGain: 0.42,
+    bassGrit: 0,
     lead: [7, null, 9, null, null, 7, null, null, 11, null, 9, null, null, 7, null, null],
     leadWave: 'square',
     leadOct: 1,
@@ -145,6 +159,7 @@ const MOODS: Record<MusicMood, MoodDef> = {
     bassLen: 1.1,
     bassOct: 0,
     bassGain: 0.5,
+    bassGrit: 0.18,
     lead: [null, null, null, null, 5, null, 4, null, null, null, 3, null, 4, null, null, null],
     leadWave: 'square',
     leadOct: 1,
@@ -169,13 +184,14 @@ const MOODS: Record<MusicMood, MoodDef> = {
     steps: 16,
     root: 33,
     scale: PENTA_MIN,
-    gain: 0.55,
+    gain: 0.57,
     bass: [0, 0, 3, 0, 5, 0, 3, 0, 0, 0, 4, 0, 7, 5, 4, 3],
     bassWave: 'sawtooth',
     bassCut: 820,
     bassLen: 0.95,
     bassOct: 0,
     bassGain: 0.46,
+    bassGrit: 0.32,
     lead: [7, null, 8, 7, null, 5, null, 7, 10, null, 8, 7, null, 5, 4, null],
     leadWave: 'square',
     leadOct: 1,
@@ -187,7 +203,7 @@ const MOODS: Record<MusicMood, MoodDef> = {
     snare: '----x---x---x-x-',
     hat: 'xxxxxxxxxxxxxxxx',
     open: '------------x---',
-    drumGain: 0.62,
+    drumGain: 0.64,
     swing: 0,
     delayBeats: 0.375,
     feedback: 0.26,
@@ -207,6 +223,7 @@ const MOODS: Record<MusicMood, MoodDef> = {
     bassLen: 1.05,
     bassOct: 0,
     bassGain: 0.55,
+    bassGrit: 0.36,
     lead: [null, null, 7, 6, 7, null, null, 9, null, 8, 7, null, 6, null, null, null],
     leadWave: 'sawtooth',
     leadOct: 1,
@@ -238,6 +255,7 @@ const MOODS: Record<MusicMood, MoodDef> = {
     bassLen: 0.9,
     bassOct: 0,
     bassGain: 0.55,
+    bassGrit: 0.45,
     lead: [7, 8, 7, 11, null, 10, 8, 7, 14, 13, 11, 8, 7, null, 1, 0],
     leadWave: 'sawtooth',
     leadOct: 1,
@@ -269,6 +287,7 @@ const MOODS: Record<MusicMood, MoodDef> = {
     bassLen: 1.6,
     bassOct: 0,
     bassGain: 0.45,
+    bassGrit: 0,
     lead: [4, null, 4, 4, null, 2, null, 4, 7, null, null, 6, 4, null, null, null],
     leadWave: 'square',
     leadOct: 1,
@@ -300,9 +319,13 @@ const MOODS: Record<MusicMood, MoodDef> = {
     bassLen: 7,
     bassOct: 0,
     bassGain: 0.5,
+    bassGrit: 0,
     lead: [4, null, null, null, 3, null, null, null, 2, null, null, null, null, null, 1, null],
     leadWave: 'triangle',
-    leadOct: 1,
+    // An octave up from where it was written. At 1 the whole lament sat
+    // between 100 and 130Hz, under the floor of any speaker smaller than a
+    // fist, and the game-over screen played in near silence on a laptop.
+    leadOct: 2,
     leadLen: 3.5,
     leadGain: 0.18,
     leadDetune: 4,
@@ -331,6 +354,7 @@ const MOODS: Record<MusicMood, MoodDef> = {
     bassLen: 7,
     bassOct: 0,
     bassGain: 0.45,
+    bassGrit: 0,
     lead: [null, null, null, null, 7, null, null, null, null, null, null, null, 9, null, null, null],
     leadWave: 'sine',
     leadOct: 2,
@@ -539,8 +563,11 @@ export class Music {
 
     if (def.kick[step] === 'x') this.kick(deck, t);
     if (def.snare[step] === 'x') this.snare(deck, t);
-    if (def.open[step] === 'x') this.hat(deck, t, true);
-    else if (def.hat[step] === 'x') this.hat(deck, t, false);
+    // Hats lean on the beat. Sixteen identical sixteenths is a machine gun;
+    // the off ones ghosted is a drummer.
+    const vel = step % 4 === 0 ? 1 : step % 2 === 0 ? 0.94 : 0.58;
+    if (def.open[step] === 'x') this.hat(deck, t, true, 1);
+    else if (def.hat[step] === 'x') this.hat(deck, t, false, vel);
 
     const b = def.bass[step];
     if (typeof b === 'number') {
@@ -571,12 +598,28 @@ export class Music {
     o.frequency.exponentialRampToValueAtTime(44, t + 0.1);
     const g = ctx.createGain();
     g.gain.setValueAtTime(0, t);
-    g.gain.linearRampToValueAtTime(0.95, t + 0.004);
+    g.gain.linearRampToValueAtTime(0.88, t + 0.004);
     g.gain.exponentialRampToValueAtTime(0.001, t + 0.24);
     o.connect(g);
     g.connect(deck.drums);
     o.start(t);
     o.stop(t + 0.28);
+
+    // The beater. A sine that lands on 44Hz is a kick on a subwoofer and a
+    // rumour on a laptop; thirty milliseconds of triangle through the low
+    // mids is the part of the drum a small speaker gets to play.
+    const b = ctx.createOscillator();
+    b.type = 'triangle';
+    b.frequency.setValueAtTime(330, t);
+    b.frequency.exponentialRampToValueAtTime(110, t + 0.03);
+    const bg = ctx.createGain();
+    bg.gain.setValueAtTime(0, t);
+    bg.gain.linearRampToValueAtTime(0.36, t + 0.002);
+    bg.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
+    b.connect(bg);
+    bg.connect(deck.drums);
+    b.start(t);
+    b.stop(t + 0.08);
 
     const n = this.noiseSource(t, 0.02);
     const hp = ctx.createBiquadFilter();
@@ -605,13 +648,26 @@ export class Music {
     bp.connect(g);
     g.connect(deck.drums);
 
+    // The wires. The band above is the body of the drum and sits exactly
+    // where the punches do; this is the crack that gets it over them.
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.setValueAtTime(3600, t);
+    const cg = ctx.createGain();
+    cg.gain.setValueAtTime(0, t);
+    cg.gain.linearRampToValueAtTime(0.26, t + 0.001);
+    cg.gain.exponentialRampToValueAtTime(0.001, t + 0.09);
+    n.connect(hp);
+    hp.connect(cg);
+    cg.connect(deck.drums);
+
     const o = ctx.createOscillator();
     o.type = 'triangle';
     o.frequency.setValueAtTime(195, t);
     o.frequency.exponentialRampToValueAtTime(140, t + 0.09);
     const og = ctx.createGain();
     og.gain.setValueAtTime(0, t);
-    og.gain.linearRampToValueAtTime(0.3, t + 0.003);
+    og.gain.linearRampToValueAtTime(0.36, t + 0.003);
     og.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
     o.connect(og);
     og.connect(deck.drums);
@@ -619,7 +675,7 @@ export class Music {
     o.stop(t + 0.12);
   }
 
-  private hat(deck: Deck, t: number, open: boolean): void {
+  private hat(deck: Deck, t: number, open: boolean, vel: number): void {
     const ctx = this.ctx;
     const dur = open ? 0.24 : 0.05;
     const n = this.noiseSource(t, dur, 1.6);
@@ -628,7 +684,7 @@ export class Music {
     hp.frequency.setValueAtTime(open ? 6200 : 7600, t);
     const g = ctx.createGain();
     g.gain.setValueAtTime(0, t);
-    g.gain.linearRampToValueAtTime(open ? 0.22 : 0.16, t + 0.001);
+    g.gain.linearRampToValueAtTime((open ? 0.22 : 0.17) * vel, t + 0.001);
     g.gain.exponentialRampToValueAtTime(0.001, t + dur);
     n.connect(hp);
     hp.connect(g);
@@ -661,6 +717,21 @@ export class Music {
     g.connect(deck.dry);
     o.start(t);
     o.stop(t + dur + 0.02);
+
+    if (def.bassGrit > 0) {
+      // Into the same filter and the same envelope, so it is still one bass
+      // and not a second instrument doubling it.
+      const hi = ctx.createOscillator();
+      hi.type = 'square';
+      hi.frequency.setValueAtTime(hz * 2, t);
+      hi.detune.setValueAtTime(detune + 6, t);
+      const hg = ctx.createGain();
+      hg.gain.value = def.bassGrit;
+      hi.connect(hg);
+      hg.connect(lp);
+      hi.start(t);
+      hi.stop(t + dur + 0.02);
+    }
   }
 
   private lead(deck: Deck, t: number, hz: number, dur: number, detune: number): void {

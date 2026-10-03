@@ -91,6 +91,7 @@ import type { BossRigKind } from '@/render/rig/BossRigs';
 import { drawBossRig, hasBossRig } from '@/render/rig/BossRigs';
 import { capsule, ellipse, poly, roundRect, star, zigzag } from '@/render/Shapes';
 
+import { FONT_DISPLAY, FONT_TEXT, PALETTE } from '@/ui/theme';
 type C2D = CanvasRenderingContext2D;
 
 /**
@@ -127,12 +128,12 @@ const INK = '#141019';
 const NO = 'none';
 const VOID = '#05060c';
 const PAPER = '#e8ecf6';
-const GOLD = '#ffd23f';
+const GOLD = PALETTE.lamp;
 const DIM = '#98a2b6';
 const FAINT = '#5c6474';
 
-const DISPLAY = '"Arial Black", "Helvetica Neue", Impact, system-ui, sans-serif';
-const SANS = 'ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif';
+const DISPLAY = FONT_DISPLAY;
+const SANS = FONT_TEXT;
 
 /**
  * Font strings, built once.

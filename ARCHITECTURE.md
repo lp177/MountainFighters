@@ -6,12 +6,16 @@ dissected for parts.
 
 ## Shape of the thing
 
-- **TypeScript + Vite**, no framework, no runtime dependencies except `peerjs`.
-- **Canvas2D** rendering at a virtual 640×360, letterboxed to the window.
+- **TypeScript + Vite**, no framework. Runtime dependencies: `peerjs`, and two
+  OFL typefaces from `@fontsource` (Barlow, Barlow Condensed).
+- **Canvas2D** rendering at a virtual 640×360, letterboxed to the window (pinned
+  to the top of the screen in portrait).
 - **All art is procedural vector geometry** drawn from skeletal rigs. There are
   no image files in this repository.
 - **All audio is synthesised at runtime** with WebAudio. There are no audio
   files in this repository.
+- **One design system**, shared by canvas and DOM: `src/ui/theme.ts` and
+  `src/ui/styles.css`. See [DESIGN.md](DESIGN.md).
 - Build output goes to `docs/` for GitHub Pages.
 
 ### Genre
@@ -187,6 +191,25 @@ export function labelForBindings(bindings: Record<string, number>, slot: number)
 export function bindingLabel(slot: number): string;
 ```
 
+### `src/engine/input/TouchControls.ts`
+
+A floating stick and an on-screen pad, shown while touch is the live input (a
+coarse pointer at boot, or the first touch; the first key press or pad hides
+it). Its mask is OR-ed into keyboard half zero, so nothing downstream — select,
+the fight, lockstep — knows it was glass.
+
+```ts
+export type TouchMode = 'off' | 'fight' | 'back';
+/** Installed once by Game. */
+export function installTouchControls(): void;
+/** Called by Game every frame: the whole pad in a fight, a back button on select. */
+export function syncTouchMode(scene: string, hasDomView: boolean): void;
+/** Held mask from the glass. Read by KeyboardSource half 0. */
+export function touchMask(): BtnMask;
+/** True while touch is the live input; the HUD prints USE / SUPER instead of keys. */
+export function touchActive(): boolean;
+```
+
 ### `src/engine/input/KeyboardSource.ts`
 
 ```ts
@@ -267,6 +290,8 @@ export class Renderer {
 
 ```ts
 export class Camera {
+  // `y` (lift) and `rotation` (roll) are zero outside a finisher: the fatality
+  // director borrows both to frame its performers and hands them back.
   x: number; y: number; zoom: number; rotation: number;
   /** Follow the midpoint of these world x positions, clamped to map bounds. */
   follow(targets: { x: number }[], mapWidth: number): void;
@@ -364,12 +389,23 @@ export class ParticleSystem {
 Concrete `FxBus`, owning shake/flash/slowmo/floating text/shockwaves.
 
 ```ts
-export class Fx implements FxBus {
+export class Fx implements FxBus, ActionFx {
   constructor(cam: Camera, particles: ParticleSystem, loop: GameLoop, settings: Settings);
   update(): void;
-  render(ctx: C2D, cam: Camera): void;      // world-space layer (shockwaves, text)
-  renderOverlay(r: Renderer): void;          // screen-space layer (flash, aberration)
+  render(ctx: C2D, cam: Camera): void;      // world-space layer (shockwaves, impact stars, text)
+  renderOverlay(r: Renderer): void;          // screen-space layer (speed streaks, flash, aberration)
   muted: boolean;
+}
+/**
+ * The action lines, which are not in the `FxBus` contract. Sim code probes for
+ * them — `(ctx.fx as FxBus & ActionFx).impactLines?.(…)` — so a stub bus that
+ * has neither still runs the fight.
+ */
+export interface ActionFx {
+  /** Ink star at the point of a hard hit. `dir` is a facing or a world angle. */
+  impactLines?(x: number, y: number, z: number, dir: number, power: number): void;
+  /** Streaks across the frame while something is moving fast. Call per frame. */
+  speedLines?(strength: number, frames: number, dir: number): void;
 }
 ```
 
@@ -384,8 +420,19 @@ export class Synth {
   voice(profile: VoiceProfile, kind: 'hit'|'attack'|'ko'|'taunt'|'jump'): void;
   setVolume(master: number, sfx: number): void;
   readonly ready: boolean;
+  /**
+   * Where the soundtrack plugs in: the mix bus by way of the duck, so the few
+   * cues the whole screen stops for (a killing blow, a title card, a super)
+   * can push the music out of the way. `AudioSystem` hands this to `Music`.
+   */
+  readonly musicIn: GainNode | null;
 }
 ```
+
+Signal path: voice → pan → sfx bus (+ a per-cue send to one shared early-
+reflection room) → mix; music → duck → mix; mix → rumble cut → limiter → soft
+ceiling → master volume. The volume sits AFTER the limiter, so the glue does
+not change with the slider.
 
 ### `src/audio/Music.ts`
 
@@ -500,6 +547,15 @@ export function drawBackdrop(ctx: C2D, def: MapDef, cam: Camera, frame: number):
 export function drawForeground(ctx: C2D, def: MapDef, cam: Camera, frame: number): void;
 ```
 
+Four parallax bands (sky, far, mid, near) and the ground say where a map is.
+Over them goes the set dressing, one row per theme in the module's `DRESSING`
+table: what the place is lit by (fixtures, the shaft under each, the pool it
+leaves on the floor), what the floor is made of, how much mist is in the air,
+what stands along the back wall and what hangs in front of the camera. Lamps,
+floor and back-wall props are 1:1 with the world, so fighters walk past them.
+Light shapes are painted once per colour into small off-screen canvases and
+blitted; with no DOM (validators, tests) the scenery simply goes unlit.
+
 ### `src/content/*`
 
 ```ts
@@ -556,10 +612,32 @@ export class Lockstep {
 
 ### `src/ui/*`
 
-Material-inspired dark UI, keyboard and pointer accessible, with a ripple on
-every control and a `prefers-reduced-motion` path.
+The "Coal and Lamp" design system (see DESIGN.md): warm coal surfaces, one
+lamp-gold accent, arcade menu lists, keyboard / pad / pointer / touch
+accessible, with a `prefers-reduced-motion` path and an in-game override.
 
 ```ts
+// theme.ts — the art direction as code. Canvas reads this; styles.css mirrors it.
+export const PALETTE: Readonly<{ coal: string; bone: string; lamp: string; blood: string; steel: string; /* … */ }>;
+export const PLAYER_COLORS: readonly string[];      // by SEAT, not input slot
+export function playerColor(seat: number): string;
+export const FONT_DISPLAY: string;                  // Barlow Condensed + fallbacks
+export const FONT_TEXT: string;                     // Barlow + fallbacks
+export function displayFont(size: number, weight?: number, italic?: boolean): string;
+export function textFont(size: number, weight?: number, italic?: boolean): string;
+/** Outline width for a glyph: 16% of the size, clamped to 1.2–3.4px. */
+export function strokeFor(size: number): number;
+/** Shadow + ink outline + fill, the way every banner and HUD label is drawn. */
+export function inkText(ctx, s, x, y, size, fill, opts?): number;
+export function trackedText(ctx, s, x, y, tracking, fill, align?): number;
+export function slab(ctx, x, y, w, h, lean, fill, outline?, ow?): void;  // the leaning plate
+export function band(ctx, width, cy, h, open, fill?, edge?): void;     // banner shutter
+export function keycap(ctx, label, x, cy, size, fill?, ink?): number;
+export function hintRow(ctx, items, x, cy, size?, verbColor?): number;
+// fonts.ts — registers the five woff2 faces; resolves when loaded or after a timeout.
+export function loadFonts(timeoutMs?: number): Promise<void>;
+// SettingsPanel.ts — THE settings page, mounted by the title and by pause.
+export function settingsBody(opts: SettingsPanelOpts): HTMLElement;
 // Ui.ts
 export class Ui {
   constructor(root: HTMLElement);
@@ -583,8 +661,8 @@ export interface KeyBindingEditorOpts {
 export function keyBindingEditor(opts: KeyBindingEditorOpts): HTMLElement;
 /** Only for a caller that drops the editor without detaching it; removal self-cleans. */
 export function disposeKeyBindingEditor(host: HTMLElement): void;
-// Hud.ts
-export function drawHud(ctx: C2D, players: Fighter[], level: Level, frame: number): void;
+// Hud.ts — opts.seats maps fighter id → player number for colours and labels.
+export function drawHud(ctx: C2D, players: Fighter[], level: Level, frame: number, opts?: HudOptions): void;
 ```
 
 ### `src/scenes/*`
@@ -612,6 +690,21 @@ and the active net session.
 | Grab | `R` | `Numpad 5` | LB / L1 |
 | Super | `T` | `Numpad +` | RT / R2 |
 | Pause | `Esc` | `Esc` | Start |
+
+Jump has a buffer of its own beside the attack buffer, so Jump + Light and
+Jump + Heavy pressed together — in either order, within
+`JUMP_ATTACK_LENIENCY` frames — come out as the aerial (`air_light`, the flying
+knee; `air_heavy`, the flying kick). A jump is flown under `JUMP_GRAVITY`, not
+the world's `GRAVITY`, which launches and juggles still fall under.
+
+On a vehicle, Light and Heavy run the fighter's own `moves.light` /
+`moves.heavy` from the saddle (`Fighter.startSaddleMove`): same windows, damage,
+ammunition and durability, minus the move's `motion` and `invuln`. Special is
+the boot with the throttle lunge; Jump is a wheelie.
+
+Touch (player one only): floating stick on the left; on the right a diamond in
+pad order — Light bottom, Heavy right, Jump left, Special top — with Block and
+Super above, Grab and Use below, and a pause button top right.
 
 Every keyboard action takes a primary key and an optional second one; only Move
 ships with a second by default. Alone at the keyboard — offline or online, on

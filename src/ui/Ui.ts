@@ -38,7 +38,9 @@ export class Ui {
     this.root.appendChild(view);
     this.root.classList.add('has-view');
     this.view = view;
-    focusFirst(view);
+    const first = focusFirst(view);
+    if (first) markCurrent(first);
+    view.addEventListener('focusin', onFocusIn);
   }
 
   /**
@@ -64,16 +66,37 @@ export function setReducedMotion(on: boolean): void {
 
 /**
  * Moves focus into the freshly-mounted view so a keyboard player never has to
- * find the first control by tabbing in from the address bar.
+ * find the first control by tabbing in from the address bar. Returns what it
+ * focused, or meant to.
  */
-function focusFirst(view: HTMLElement): void {
+function focusFirst(view: HTMLElement): HTMLElement | null {
   const marked = view.querySelector('[autofocus]');
   const target =
     marked instanceof HTMLElement ? marked : view.querySelector<HTMLElement>(FOCUSABLE);
-  if (!target) return;
+  if (!target) return null;
   try {
     target.focus({ preventScroll: true });
   } catch {
     target.focus();
   }
+  return target;
+}
+
+/**
+ * The menu item the player is "on", kept as an attribute as well as as focus.
+ *
+ * Focus alone is not enough to draw from: a page that has not been clicked yet
+ * (opened from a link, the tab behind another window) does not have focus at
+ * all, and an arcade menu with nothing lit looks dead. The stylesheet lights
+ * `[data-current]` whenever nothing in its menu has real focus.
+ */
+function markCurrent(el: HTMLElement): void {
+  const menu = el.closest('.menu');
+  if (!menu) return;
+  for (const other of menu.querySelectorAll('[data-current]')) other.removeAttribute('data-current');
+  el.setAttribute('data-current', '');
+}
+
+function onFocusIn(e: FocusEvent): void {
+  if (e.target instanceof HTMLElement) markCurrent(e.target);
 }

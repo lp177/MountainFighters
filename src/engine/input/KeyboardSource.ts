@@ -18,6 +18,7 @@
 
 import type { BtnMask, InputSource } from '@/core/types';
 import { DEFAULT_BINDINGS, labelForBindings } from '@/engine/input/Bindings';
+import { touchMask } from '@/engine/input/TouchControls';
 
 /** Shared across every KeyboardSource — one listener pair for the whole game. */
 const held = new Set<string>();
@@ -195,6 +196,9 @@ export class KeyboardSource implements InputSource {
     for (const [code, bit] of this.map) {
       if (held.has(code)) mask |= bit;
     }
+    // The touch pad is player one's other hand: same slot, same lockstep
+    // input, nothing downstream needs to know it was glass. See TouchControls.
+    if (this.slot === 0) mask |= touchMask();
     return mask;
   }
 

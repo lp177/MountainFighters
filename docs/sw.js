@@ -53,15 +53,20 @@
  *    than no ICE grant.
  */
 
-const BUILD = 'e6363db3d0fd';
+const BUILD = '149928e9fa0c';
 /** Namespaced by scope: two copies of the game on one origin must not reap each other's caches. */
 const PREFIX = `mountainfighters:${new URL(self.registration.scope).pathname}:`;
 const CACHE = `${PREFIX}${BUILD}`;
 
 const PRECACHE = [
   "./",
-  "./assets/index-CRCZkXvh.css",
-  "./assets/index-DGbLEHTS.js",
+  "./assets/barlow-condensed-latin-600-normal-DepVgxBB.woff2",
+  "./assets/barlow-condensed-latin-800-normal-BKzMuPgK.woff2",
+  "./assets/barlow-condensed-latin-900-italic-BRE8F-lA.woff2",
+  "./assets/barlow-latin-500-normal-BPAOfeC8.woff2",
+  "./assets/barlow-latin-700-normal-A9pxMQ4z.woff2",
+  "./assets/index-BK6wJKVZ.js",
+  "./assets/index-DnU-1Y8Y.css",
   "./assets/peer-BsvW7Dtp.js",
   "./icon-maskable.svg",
   "./icon.svg",
@@ -71,8 +76,13 @@ const PRECACHE = [
 ];
 /** Content-hashed output, named by the build rather than guessed from the shape of a filename. */
 const IMMUTABLE = new Set([
-  "./assets/index-CRCZkXvh.css",
-  "./assets/index-DGbLEHTS.js",
+  "./assets/barlow-condensed-latin-600-normal-DepVgxBB.woff2",
+  "./assets/barlow-condensed-latin-800-normal-BKzMuPgK.woff2",
+  "./assets/barlow-condensed-latin-900-italic-BRE8F-lA.woff2",
+  "./assets/barlow-latin-500-normal-BPAOfeC8.woff2",
+  "./assets/barlow-latin-700-normal-A9pxMQ4z.woff2",
+  "./assets/index-BK6wJKVZ.js",
+  "./assets/index-DnU-1Y8Y.css",
   "./assets/peer-BsvW7Dtp.js"
 ]);
 

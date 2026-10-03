@@ -1,90 +1,128 @@
 /*
- * Mountain Fighters — UI design system.
+ * Mountain Fighters — UI design system: "Coal and Lamp".
  *
- * Dark by default and only dark: this is a game about kicking a billionaire
- * through a server rack, it does not have a light mode. Material-inspired
- * (elevation, state layers, ripples, switch semantics) with the corners knocked
- * off and a hot punk accent.
+ * Seven miners in leather. The menus are the mine office: warm near-black
+ * plate, bone-coloured stencilled type, and one lamp-gold accent that always
+ * means the same thing — this is the control you are on, or the one to press.
+ * Blood red is for danger and nothing else.
  *
- * Everything here is hand-rolled: no fonts, no images, no CDN. The palette is
- * exposed as custom properties so scenes can tint themselves per map theme by
- * overriding --accent on a container.
+ * Shape language: hard, slightly cut corners (stamped steel, not app cards),
+ * and a forward lean borrowed from the italic display face. A menu item that
+ * has focus becomes a gold slab with a chevron, exactly like an arcade cabinet,
+ * because on a pad or a keyboard the focused item IS the interface.
+ *
+ * Tokens mirror src/ui/theme.ts, which the canvas draws from. DESIGN.md lists
+ * both. Change one, change the other.
  */
 
 /* ── Tokens ───────────────────────────────────────────────────────────────── */
 
 :root {
-  /* Surfaces: near-black base with a cool cast, lifted by elevation. */
-  --bg: #06070a;
-  --surface-0: #0b0d12;
-  --surface-1: #12151d;
-  --surface-2: #181c26;
-  --surface-3: #1f2430;
-  --surface-4: #272d3b;
-  --scrim: rgba(4, 5, 8, 0.72);
+  /* Coal: warm near-blacks, lowest to highest. */
+  --bg: #0c0a09;
+  --surface-0: #141110;
+  --surface-1: #1c1815;
+  --surface-2: #25201c;
+  --surface-3: #302924;
+  --surface-4: #3c332c;
+  --scrim: rgba(8, 6, 5, 0.78);
 
-  /* Ink. */
-  --on-surface: #eceff6;
-  --on-surface-dim: #a2aabb;
-  --on-surface-faint: #6d768a;
-  --outline: #2c3242;
-  --outline-strong: #414a60;
+  /* Bone ink. */
+  --on-surface: #f4ecdf;
+  --on-surface-dim: #c2b4a1;
+  --on-surface-faint: #8a7c6b;
+  --outline: #3d342d;
+  --outline-strong: #5a4d42;
 
-  /* Hot punk accent: a sprayed-on magenta with an acid secondary. */
-  --accent: #ff2e6e;
-  --accent-hot: #ff5c8d;
-  --accent-deep: #b8004a;
-  --on-accent: #14060c;
-  --accent-2: #ffd23f;
-  --on-accent-2: #1a1400;
-  --danger: #ff4b3e;
-  --warn: #ffb020;
-  --ok: #34d399;
+  /* Lamp: the one accent. */
+  --accent: #ffb524;
+  --accent-hot: #ffcb57;
+  --accent-deep: #b97800;
+  --on-accent: #1c1203;
 
-  /* Elevation. Material's idea, blacker. */
-  --elev-1: 0 1px 2px rgba(0, 0, 0, 0.6), 0 1px 3px rgba(0, 0, 0, 0.4);
-  --elev-2: 0 2px 6px rgba(0, 0, 0, 0.6), 0 1px 2px rgba(0, 0, 0, 0.5);
-  --elev-3: 0 6px 16px rgba(0, 0, 0, 0.65), 0 2px 4px rgba(0, 0, 0, 0.5);
-  --elev-4: 0 12px 32px rgba(0, 0, 0, 0.7), 0 4px 8px rgba(0, 0, 0, 0.5);
-  --glow: 0 0 0 1px rgba(255, 46, 110, 0.35), 0 6px 24px rgba(255, 46, 110, 0.22);
+  /* Steel for information, blood for danger. */
+  --accent-2: #58c4ef;
+  --on-accent-2: #04131b;
+  --danger: #e5322d;
+  --danger-hot: #ff5b4a;
+  --warn: #ff9a1f;
+  --ok: #74d68e;
 
-  /* Type scale. System stacks only. */
-  --font: ui-sans-serif, system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-display: "Arial Black", "Helvetica Neue", Impact, var(--font);
-  --font-mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
-  --fs-xs: 0.6875rem;
-  --fs-sm: 0.8125rem;
-  --fs-md: 0.9375rem;
-  --fs-lg: 1.125rem;
-  --fs-xl: 1.5rem;
-  --fs-2xl: 2.125rem;
+  /* Elevation: shadows, warm and short. */
+  --elev-1: 0 1px 0 rgba(0, 0, 0, 0.5);
+  --elev-2: 0 2px 0 rgba(0, 0, 0, 0.55), 0 4px 10px rgba(0, 0, 0, 0.35);
+  --elev-3: 0 3px 0 rgba(0, 0, 0, 0.55), 0 12px 28px rgba(0, 0, 0, 0.5);
+  --elev-4: 0 4px 0 rgba(0, 0, 0, 0.6), 0 20px 48px rgba(0, 0, 0, 0.6);
+
+  /* Type. Barlow Condensed shouts, Barlow talks. Registered in src/ui/fonts.ts. */
+  --font: Barlow, "Segoe UI", Roboto, "Helvetica Neue", system-ui, sans-serif;
+  --font-display: "Barlow Condensed", "Arial Narrow", "Roboto Condensed", "Helvetica Neue", sans-serif;
+  --font-mono: var(--font-display);
+  --fs-xs: 0.75rem;
+  --fs-sm: 0.875rem;
+  --fs-md: 1rem;
+  --fs-lg: 1.25rem;
+  --fs-xl: 1.625rem;
+  --fs-2xl: 2.75rem;
   --lh: 1.45;
+  --track-caps: 0.06em;
 
-  /* Shape. */
-  --r-xs: 3px;
-  --r-sm: 6px;
-  --r-md: 10px;
-  --r-lg: 16px;
+  /* Shape. Small radii: stamped plate, not a phone app. */
+  --r-xs: 2px;
+  --r-sm: 3px;
+  --r-md: 4px;
+  --r-lg: 6px;
   --r-pill: 999px;
+  /* The cut corner on panels, and the lean on menu slabs. */
+  --cut: 12px;
+  --lean: -8deg;
 
-  /* Motion. */
+  /* Motion: quick, decisive, no float. */
   --ease-std: cubic-bezier(0.2, 0, 0, 1);
-  --ease-out: cubic-bezier(0.05, 0.7, 0.1, 1);
-  --dur-1: 90ms;
-  --dur-2: 160ms;
-  --dur-3: 260ms;
-  --dur-ripple: 560ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-1: 80ms;
+  --dur-2: 140ms;
+  --dur-3: 220ms;
+  --dur-ripple: 420ms;
 
-  /* State layer opacities, straight out of Material. */
-  --state-hover: 0.08;
-  --state-focus: 0.12;
-  --state-press: 0.16;
+  --state-hover: 0.07;
+  --state-focus: 0.1;
+  --state-press: 0.14;
 
   --focus-ring: 2px solid var(--accent);
-  --focus-offset: 2px;
+  --focus-offset: 3px;
+
+  /*
+   * The letterboxed stage, in CSS. Renderer.resize fits 640x360 into the window
+   * the same way, so anything positioned against these lands on the same spot
+   * of the picture at every window shape.
+   */
+  --vh: 100vh;
+  --stage-w: min(100vw, calc(var(--vh) * 16 / 9));
+  --stage-h: min(var(--vh), calc(100vw * 9 / 16));
+  --stage-x: calc((100vw - var(--stage-w)) / 2);
+  --stage-y: calc((var(--vh) - var(--stage-h)) / 2);
 
   color-scheme: dark;
   accent-color: var(--accent);
+}
+
+@supports (height: 100dvh) {
+  :root {
+    --vh: 100dvh;
+  }
+}
+
+/*
+ * Portrait: pin the stage to the top instead of floating it in the middle of
+ * the screen. The free height then sits in ONE place under the picture, where
+ * the menus and the touch controls can use it, instead of being split into two
+ * useless black bars.
+ */
+@media (max-aspect-ratio: 5/4) {
+  :root {
+    --stage-y: env(safe-area-inset-top, 0px);
+  }
 }
 
 /* ── Reset & page frame ───────────────────────────────────────────────────── */
@@ -106,15 +144,23 @@ body {
   color: var(--on-surface);
   font-family: var(--font);
   font-size: var(--fs-md);
+  font-weight: 500;
   line-height: var(--lh);
   overflow: hidden;
   overscroll-behavior: none;
   -webkit-text-size-adjust: 100%;
   -webkit-font-smoothing: antialiased;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 [hidden] {
   display: none !important;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--on-accent);
 }
 
 #app {
@@ -122,13 +168,19 @@ body {
   inset: 0;
   display: grid;
   place-items: center;
-  background: #000;
+  background: var(--bg);
+}
+
+@media (max-aspect-ratio: 5/4) {
+  #app {
+    place-items: start center;
+    padding-top: env(safe-area-inset-top, 0px);
+  }
 }
 
 #game {
   display: block;
-  background: #000;
-  image-rendering: pixelated;
+  background: var(--bg);
   touch-action: none;
 }
 
@@ -140,6 +192,8 @@ body {
   display: grid;
   place-items: center;
   padding: clamp(8px, 3vmin, 32px);
+  padding-top: max(clamp(8px, 3vmin, 32px), env(safe-area-inset-top));
+  padding-bottom: max(clamp(8px, 3vmin, 32px), env(safe-area-inset-bottom));
   pointer-events: none;
 }
 
@@ -148,15 +202,25 @@ body {
 }
 
 .ui-view {
-  width: min(940px, 100%);
+  width: min(880px, 100%);
   max-height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
+  padding: 4px;
+  margin: -4px;
   scrollbar-width: thin;
   scrollbar-color: var(--outline-strong) transparent;
+  animation: view-in var(--dur-3) var(--ease-out) both;
+}
+
+@keyframes view-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
 }
 
 /*
@@ -164,15 +228,14 @@ body {
  *
  * Without this a flex column at max-height shrinks its children, and since
  * .panel clips its overflow the result is a panel sliced through the middle of
- * a row rather than a view that scrolls. The Controls page, being the tallest
- * thing in the game, showed about one and a half of its twelve rows.
+ * a row rather than a view that scrolls.
  */
 .ui-view > * {
   flex: 0 0 auto;
 }
 
 .ui-view::-webkit-scrollbar {
-  width: 10px;
+  width: 8px;
 }
 
 .ui-view::-webkit-scrollbar-thumb {
@@ -192,7 +255,7 @@ body {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 
 .row--end {
@@ -212,27 +275,38 @@ body {
   color: var(--on-surface-dim);
   font-size: var(--fs-sm);
   margin: 0;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
+/* A big stencilled heading: PAUSED, GAME OVER, YOU WON. */
 .title {
-  font-family: var(--font-display);
-  font-size: var(--fs-2xl);
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
   margin: 0;
+  font-family: var(--font-display);
+  font-style: italic;
+  font-weight: 900;
+  font-size: var(--fs-2xl);
+  line-height: 0.95;
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
   color: var(--on-surface);
-  text-shadow: 0 2px 0 var(--accent-deep);
+  text-shadow:
+    0 3px 0 var(--bg),
+    3px 3px 0 var(--danger);
 }
 
 .code {
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: var(--fs-md);
+  letter-spacing: 0.04em;
   background: var(--surface-0);
   border: 1px solid var(--outline);
   border-radius: var(--r-sm);
   padding: 8px 10px;
-  color: var(--accent-2);
+  color: var(--accent);
   overflow-wrap: anywhere;
+  -webkit-user-select: all;
   user-select: all;
 }
 
@@ -240,12 +314,14 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 10px;
-  border-radius: var(--r-pill);
+  padding: 2px 9px 1px;
+  border-radius: var(--r-sm);
   background: var(--surface-3);
   border: 1px solid var(--outline);
+  font-family: var(--font-display);
+  font-weight: 800;
   font-size: var(--fs-xs);
-  letter-spacing: 0.06em;
+  letter-spacing: var(--track-caps);
   text-transform: uppercase;
   color: var(--on-surface-dim);
 }
@@ -261,44 +337,62 @@ body {
 }
 
 .chip--bad {
-  color: var(--danger);
-  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  color: var(--danger-hot);
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
 }
 
-/* ── Panel ────────────────────────────────────────────────────────────────── */
+/* ── Panel: a stamped plate with one cut corner ───────────────────────────── */
 
 .panel {
-  background: linear-gradient(180deg, var(--surface-2), var(--surface-1));
+  position: relative;
+  background:
+    linear-gradient(180deg, rgba(255, 236, 210, 0.035), rgba(255, 236, 210, 0) 64px),
+    var(--surface-1);
   border: 1px solid var(--outline);
-  border-radius: var(--r-lg);
+  border-radius: var(--r-md);
   box-shadow: var(--elev-3);
   overflow: hidden;
+}
+
+/* A registration mark in the corner: the plate was stamped, not rendered. */
+.panel::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: var(--cut);
+  height: var(--cut);
+  background: var(--accent);
+  clip-path: polygon(0 0, 100% 0, 100% 100%);
+  pointer-events: none;
 }
 
 .panel__head {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 14px 18px;
-  background: var(--surface-3);
+  padding: 12px 18px 11px;
+  background: var(--surface-2);
   border-bottom: 1px solid var(--outline);
 }
 
-/* The angled slash of accent that ties the menus to the game's title card. */
+/* A slanted tab of lamp light: the same lean as every slab in the game. */
 .panel__head::before {
   content: "";
-  width: 6px;
-  align-self: stretch;
+  width: 8px;
+  height: 18px;
+  flex: 0 0 auto;
   background: var(--accent);
-  border-radius: var(--r-pill);
-  box-shadow: 0 0 12px var(--accent-deep);
+  transform: skewX(var(--lean));
 }
 
 .panel__title {
   margin: 0;
   font-family: var(--font-display);
+  font-weight: 800;
   font-size: var(--fs-lg);
-  letter-spacing: 0.08em;
+  line-height: 1.1;
+  letter-spacing: var(--track-caps);
   text-transform: uppercase;
 }
 
@@ -309,6 +403,21 @@ body {
   padding: 18px;
 }
 
+/* A sub-heading inside a panel body: AUDIO, DISPLAY, GAMEPLAY. */
+.section-label {
+  margin: 4px 0 -4px;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: var(--fs-xs);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.section-label:first-child {
+  margin-top: 0;
+}
+
 /* ── Buttons ──────────────────────────────────────────────────────────────── */
 
 .btn {
@@ -316,8 +425,8 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  min-height: 42px;
+  gap: 9px;
+  min-height: 44px;
   padding: 0 20px;
   border: 1px solid transparent;
   border-radius: var(--r-sm);
@@ -325,14 +434,17 @@ body {
   background: var(--surface-3);
   color: var(--on-surface);
   font-family: var(--font-display);
-  font-size: var(--fs-md);
-  letter-spacing: 0.06em;
+  font-weight: 800;
+  font-size: var(--fs-lg);
+  line-height: 1;
+  letter-spacing: var(--track-caps);
   text-transform: uppercase;
   cursor: pointer;
   user-select: none;
   -webkit-tap-highlight-color: transparent;
   transition:
     background-color var(--dur-2) var(--ease-std),
+    color var(--dur-2) var(--ease-std),
     box-shadow var(--dur-2) var(--ease-std),
     transform var(--dur-1) var(--ease-std),
     border-color var(--dur-2) var(--ease-std);
@@ -369,28 +481,41 @@ body {
 .btn__label {
   position: relative;
   z-index: 1;
+  padding-top: 0.08em;
 }
 
 .btn__icon {
   position: relative;
   z-index: 1;
-  font-size: 1.05em;
+  font-family: var(--font);
+  font-size: 0.9em;
   line-height: 1;
+  opacity: 0.85;
 }
 
 .btn--filled {
   background: var(--accent);
   color: var(--on-accent);
-  box-shadow: var(--elev-2), var(--glow);
+  box-shadow: 0 3px 0 var(--accent-deep);
 }
 
 .btn--filled:hover {
   background: var(--accent-hot);
 }
 
+.btn--filled:active {
+  box-shadow: 0 1px 0 var(--accent-deep);
+  transform: translateY(2px);
+}
+
 .btn--tonal {
-  background: color-mix(in srgb, var(--accent) 18%, var(--surface-3));
-  color: var(--accent-hot);
+  background: var(--surface-3);
+  color: var(--on-surface);
+  border-color: var(--outline);
+}
+
+.btn--tonal:hover {
+  border-color: var(--outline-strong);
 }
 
 .btn--outlined {
@@ -414,9 +539,15 @@ body {
 }
 
 .btn--danger {
+  background: transparent;
+  border-color: color-mix(in srgb, var(--danger) 60%, var(--outline));
+  color: var(--danger-hot);
+}
+
+.btn--danger:hover {
   background: var(--danger);
-  color: #180402;
-  box-shadow: var(--elev-2);
+  border-color: var(--danger);
+  color: var(--on-surface);
 }
 
 .btn--wide {
@@ -434,6 +565,14 @@ body {
 .btn[disabled]::before,
 .btn[aria-disabled="true"]::before {
   opacity: 0 !important;
+}
+
+/* A toggle-button that is on (difficulty, segmented choices). */
+.btn[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  box-shadow: 0 3px 0 var(--accent-deep);
 }
 
 /* Loading: the label stays put for layout, a spinner takes its place. */
@@ -475,11 +614,183 @@ body {
   }
 }
 
+/* ── Menu: an arcade list, one gold slab for whatever has focus ───────────── *
+ *
+ * Inside a .menu every button is a menu ITEM, whatever variant it was built
+ * with: no box, big stencilled label, left-aligned. Focus — from a mouse, a
+ * keyboard or a pad, all the same — turns the item into a leaning gold slab
+ * with a chevron. There is never more than one gold thing in a menu, so the eye
+ * always knows where it is. The item a screen wants you on is simply where
+ * focus starts.
+ */
+
+.menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.menu .btn {
+  justify-content: flex-start;
+  min-height: 2.35em;
+  padding: 0 0.9em 0 1.5em;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  color: var(--on-surface);
+  font-size: var(--menu-fs, 1.375rem);
+  letter-spacing: 0.05em;
+  overflow: visible;
+  isolation: isolate;
+  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.6);
+}
+
+/* The slab lives behind the label, leaning forward. */
+.menu .btn::before {
+  inset: 0;
+  z-index: -1;
+  background: var(--accent);
+  opacity: 0;
+  transform: skewX(var(--lean)) scaleX(0.96);
+  transform-origin: left center;
+  transition:
+    opacity var(--dur-2) var(--ease-std),
+    transform var(--dur-3) var(--ease-out);
+}
+
+/* The chevron. Present on every item, visible on the focused one. */
+.menu .btn::after {
+  content: "";
+  position: absolute;
+  left: 0.55em;
+  top: 50%;
+  width: 0.42em;
+  height: 0.5em;
+  margin-top: -0.25em;
+  background: var(--on-accent);
+  clip-path: polygon(0 0, 100% 50%, 0 100%);
+  opacity: 0;
+  transform: translateX(-4px);
+  transition:
+    opacity var(--dur-2) var(--ease-std),
+    transform var(--dur-2) var(--ease-out);
+}
+
+.menu .btn:hover::before,
+.menu .btn:focus-visible::before,
+.menu .btn:focus::before,
+.menu:not(:has(.btn:focus)):not(:hover) .btn[data-current]::before {
+  opacity: 1;
+  transform: skewX(var(--lean)) scaleX(1);
+}
+
+.menu .btn:hover,
+.menu .btn:focus-visible,
+.menu .btn:focus,
+.menu:not(:has(.btn:focus)):not(:hover) .btn[data-current] {
+  color: var(--on-accent);
+  outline: none;
+  text-shadow: none;
+}
+
+.menu .btn:hover::after,
+.menu .btn:focus-visible::after,
+.menu .btn:focus::after,
+.menu:not(:has(.btn:focus)):not(:hover) .btn[data-current]::after {
+  opacity: 1;
+  transform: none;
+}
+
+.menu .btn:active {
+  transform: translateX(3px);
+}
+
+.menu .btn .btn__icon {
+  display: none;
+}
+
+/* A dimmer secondary line under the list: Back, Cancel. */
+.menu .btn--text {
+  color: var(--on-surface-dim);
+  font-size: calc(var(--menu-fs, 1.375rem) * 0.8);
+}
+
+.menu .btn--danger {
+  color: var(--danger-hot);
+}
+
+.menu .btn--danger::before {
+  background: var(--danger);
+}
+
+.menu .btn--danger:hover,
+.menu .btn--danger:focus-visible,
+.menu .btn--danger:focus {
+  color: var(--on-surface);
+}
+
+.menu .btn--danger::after {
+  background: var(--on-surface);
+}
+
+.menu .btn[disabled] {
+  opacity: 0.32;
+}
+
+/* A rule between groups of items. */
+.menu__rule {
+  height: 1px;
+  margin: 6px 0 6px 1.5em;
+  background: linear-gradient(90deg, var(--outline-strong), transparent);
+}
+
+/* The tiny caption under a menu: which buttons do what. */
+.menu__keys {
+  margin: 10px 0 0 1.5em;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--on-surface-faint);
+}
+
+/* ── Keycaps in DOM text ──────────────────────────────────────────────────── */
+
+kbd,
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.6em;
+  height: 1.6em;
+  padding: 0 0.4em;
+  margin-right: 0.35em;
+  border-radius: var(--r-sm);
+  background: var(--on-surface);
+  color: var(--bg);
+  box-shadow: 0 2px 0 var(--on-surface-faint);
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 0.85em;
+  line-height: 1;
+  letter-spacing: 0;
+  text-transform: none;
+  vertical-align: 0.1em;
+}
+
 /* ── Ripple ───────────────────────────────────────────────────────────────── */
 
 .ripple-host {
   position: relative;
   overflow: hidden;
+}
+
+.menu .ripple-host {
+  overflow: visible;
 }
 
 .ripple {
@@ -489,13 +800,17 @@ body {
   pointer-events: none;
   background: radial-gradient(
     circle,
-    rgba(255, 255, 255, 0.42),
-    rgba(255, 255, 255, 0.16) 62%,
-    rgba(255, 255, 255, 0) 72%
+    rgba(255, 246, 228, 0.32),
+    rgba(255, 246, 228, 0.1) 62%,
+    rgba(255, 246, 228, 0) 72%
   );
   transform: scale(0);
-  opacity: 0.85;
+  opacity: 0.8;
   animation: ripple-out var(--dur-ripple) var(--ease-out) forwards;
+}
+
+.menu .ripple {
+  display: none;
 }
 
 @keyframes ripple-out {
@@ -521,42 +836,48 @@ body {
 }
 
 .field__label {
-  font-size: var(--fs-sm);
-  letter-spacing: 0.04em;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: var(--fs-md);
+  letter-spacing: var(--track-caps);
   text-transform: uppercase;
-  color: var(--on-surface-dim);
+  color: var(--on-surface);
 }
 
 .field__value {
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
-  color: var(--accent-2);
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: var(--fs-md);
+  color: var(--accent);
   font-variant-numeric: tabular-nums;
 }
 
 .field__help {
+  margin: 0;
   font-size: var(--fs-xs);
   color: var(--on-surface-faint);
 }
 
 .field.is-invalid .field__label {
-  color: var(--danger);
+  color: var(--danger-hot);
 }
 
 .field.is-invalid .field__help {
-  color: var(--danger);
+  color: var(--danger-hot);
 }
 
 /* Text input, kept for lobbies and rename fields. */
 .input {
   width: 100%;
-  min-height: 42px;
+  min-height: 44px;
   padding: 0 12px;
   background: var(--surface-0);
   border: 1px solid var(--outline-strong);
   border-radius: var(--r-sm);
   color: var(--on-surface);
   font: inherit;
+  -webkit-user-select: text;
+  user-select: text;
   transition:
     border-color var(--dur-2) var(--ease-std),
     box-shadow var(--dur-2) var(--ease-std);
@@ -573,7 +894,7 @@ body {
 .input:focus-visible {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent);
 }
 
 .input:disabled {
@@ -591,12 +912,12 @@ body {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 30%, transparent);
 }
 
-/* ── Slider ───────────────────────────────────────────────────────────────── */
+/* ── Slider: a notched gauge ──────────────────────────────────────────────── */
 
 .range {
   --range-fill: 50%;
   width: 100%;
-  height: 24px;
+  height: 26px;
   margin: 0;
   background: transparent;
   cursor: pointer;
@@ -607,7 +928,7 @@ body {
 .range:focus-visible {
   outline: var(--focus-ring);
   outline-offset: 4px;
-  border-radius: var(--r-pill);
+  border-radius: var(--r-sm);
 }
 
 .range:disabled {
@@ -616,64 +937,62 @@ body {
 }
 
 .range::-webkit-slider-runnable-track {
-  height: 6px;
-  border-radius: var(--r-pill);
-  background: linear-gradient(
-    to right,
-    var(--accent) 0 var(--range-fill),
-    var(--surface-4) var(--range-fill) 100%
-  );
+  height: 8px;
+  border-radius: var(--r-xs);
+  background:
+    repeating-linear-gradient(90deg, transparent 0 calc(10% - 2px), rgba(0, 0, 0, 0.45) calc(10% - 2px) 10%),
+    linear-gradient(to right, var(--accent) 0 var(--range-fill), var(--surface-4) var(--range-fill) 100%);
+  box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.5);
 }
 
 .range::-moz-range-track {
-  height: 6px;
-  border-radius: var(--r-pill);
+  height: 8px;
+  border-radius: var(--r-xs);
   background: var(--surface-4);
 }
 
 .range::-moz-range-progress {
-  height: 6px;
-  border-radius: var(--r-pill);
+  height: 8px;
+  border-radius: var(--r-xs);
   background: var(--accent);
 }
 
 .range::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 18px;
-  height: 18px;
-  margin-top: -6px;
-  border: 2px solid var(--surface-0);
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: var(--elev-2);
+  width: 12px;
+  height: 22px;
+  margin-top: -7px;
+  border: 2px solid var(--bg);
+  border-radius: var(--r-xs);
+  background: var(--on-surface);
+  box-shadow: 0 2px 0 rgba(0, 0, 0, 0.6);
   transition:
     transform var(--dur-2) var(--ease-std),
-    box-shadow var(--dur-2) var(--ease-std);
+    background-color var(--dur-2) var(--ease-std);
 }
 
 .range::-moz-range-thumb {
-  width: 18px;
-  height: 18px;
-  border: 2px solid var(--surface-0);
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: var(--elev-2);
+  width: 10px;
+  height: 20px;
+  border: 2px solid var(--bg);
+  border-radius: var(--r-xs);
+  background: var(--on-surface);
+  box-shadow: 0 2px 0 rgba(0, 0, 0, 0.6);
   transition:
     transform var(--dur-2) var(--ease-std),
-    box-shadow var(--dur-2) var(--ease-std);
+    background-color var(--dur-2) var(--ease-std);
 }
 
 .range:hover::-webkit-slider-thumb,
 .range:focus-visible::-webkit-slider-thumb {
-  transform: scale(1.15);
-  box-shadow: var(--elev-2), 0 0 0 8px color-mix(in srgb, var(--accent) 22%, transparent);
+  background: var(--accent-hot);
+  transform: scaleY(1.1);
 }
 
 .range:hover::-moz-range-thumb,
 .range:focus-visible::-moz-range-thumb {
-  transform: scale(1.15);
-  box-shadow: var(--elev-2), 0 0 0 8px color-mix(in srgb, var(--accent) 22%, transparent);
+  background: var(--accent-hot);
 }
 
 /* ── Switch (a real checkbox underneath) ──────────────────────────────────── */
@@ -705,11 +1024,12 @@ body {
 .switch__track {
   position: relative;
   flex: 0 0 auto;
-  width: 44px;
+  width: 46px;
   height: 24px;
-  border-radius: var(--r-pill);
+  border-radius: var(--r-sm);
   background: var(--surface-4);
   border: 1px solid var(--outline-strong);
+  box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.5);
   transition:
     background-color var(--dur-2) var(--ease-std),
     border-color var(--dur-2) var(--ease-std);
@@ -719,19 +1039,23 @@ body {
   position: absolute;
   top: 50%;
   left: 3px;
-  width: 16px;
+  width: 18px;
   height: 16px;
   margin-top: -8px;
-  border-radius: 50%;
+  border-radius: var(--r-xs);
   background: var(--on-surface-dim);
-  box-shadow: var(--elev-1);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.5);
   transition:
     transform var(--dur-3) var(--ease-out),
     background-color var(--dur-2) var(--ease-std);
 }
 
 .switch__text {
+  font-family: var(--font-display);
+  font-weight: 800;
   font-size: var(--fs-md);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
   color: var(--on-surface);
 }
 
@@ -740,7 +1064,7 @@ body {
 }
 
 .switch__input:checked ~ .switch__track {
-  background: color-mix(in srgb, var(--accent) 45%, var(--surface-4));
+  background: color-mix(in srgb, var(--accent) 30%, var(--surface-4));
   border-color: var(--accent);
 }
 
@@ -763,12 +1087,12 @@ body {
   cursor: not-allowed;
 }
 
-/* ── Lists (lobby rosters, character lists) ───────────────────────────────── */
+/* ── Lists (lobby rosters, results) ───────────────────────────────────────── */
 
 .list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -778,15 +1102,29 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 12px;
+  padding: 9px 12px;
   background: var(--surface-0);
   border: 1px solid var(--outline);
   border-left: 3px solid var(--outline-strong);
   border-radius: var(--r-sm);
 }
 
+.list__item strong {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: var(--fs-lg);
+  line-height: 1;
+  letter-spacing: 0.02em;
+  color: var(--on-surface);
+  font-variant-numeric: tabular-nums;
+}
+
 .list__item--self {
   border-left-color: var(--accent);
+}
+
+.list__item--self strong {
+  color: var(--accent);
 }
 
 .list__item--empty {
@@ -798,9 +1136,6 @@ body {
  * Bindings are stored by physical key POSITION, so every label printed in here
  * is whatever is actually engraved on the player's own keyboard — Z Q S D on an
  * AZERTY board, W A S D on a QWERTY one, same four keys either way.
- *
- * Rows are a grid rather than a table because they have to survive a phone-width
- * pause menu, where the action name wraps and everything else holds its ground.
  */
 
 .kbe {
@@ -817,26 +1152,27 @@ body {
   gap: 8px 12px;
 }
 
-/* Segmented control: one pill, one lit segment. */
+/* Segmented control: one plate, one lit segment. */
 .kbe__tabs {
   display: inline-flex;
-  gap: 4px;
-  padding: 4px;
+  gap: 2px;
+  padding: 3px;
   background: var(--surface-0);
   border: 1px solid var(--outline);
-  border-radius: var(--r-pill);
+  border-radius: var(--r-sm);
 }
 
 .kbe__tab {
-  min-height: 32px;
+  min-height: 34px;
   padding: 0 16px;
   border: 0;
-  border-radius: var(--r-pill);
+  border-radius: var(--r-xs);
   background: transparent;
   color: var(--on-surface-dim);
   font-family: var(--font-display);
-  font-size: var(--fs-sm);
-  letter-spacing: 0.06em;
+  font-weight: 800;
+  font-size: var(--fs-md);
+  letter-spacing: var(--track-caps);
   text-transform: uppercase;
   cursor: pointer;
   user-select: none;
@@ -853,7 +1189,6 @@ body {
 .kbe__tab[aria-selected="true"] {
   background: var(--accent);
   color: var(--on-accent);
-  box-shadow: var(--elev-1);
 }
 
 .kbe__tab:focus-visible {
@@ -863,14 +1198,16 @@ body {
 
 .kbe__layout {
   margin: 0;
-  font-size: var(--fs-xs);
-  letter-spacing: 0.08em;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  letter-spacing: var(--track-caps);
   text-transform: uppercase;
   color: var(--on-surface-faint);
 }
 
 .kbe__layout b {
-  font-family: var(--font-mono);
+  font-weight: 800;
   color: var(--on-surface-dim);
 }
 
@@ -889,7 +1226,7 @@ body {
 .kbe__rows {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -900,7 +1237,7 @@ body {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
-  padding: 4px 6px 6px 12px;
+  padding: 4px 6px 5px 12px;
   background: var(--surface-0);
   border: 1px solid var(--outline);
   border-left: 3px solid var(--outline-strong);
@@ -910,17 +1247,22 @@ body {
     border-color var(--dur-2) var(--ease-std);
 }
 
+.kbe__row:focus-within {
+  border-left-color: var(--accent);
+}
+
 .kbe__action {
   min-width: 0;
-  font-size: var(--fs-sm);
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: var(--fs-md);
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
   color: var(--on-surface);
   overflow-wrap: anywhere;
 }
 
-/* Two key boxes per action: the one the game names in its prompts, and a spare.
-   They sit side by side on a desktop and drop onto their own line under the
-   action name on a phone, which is the only way both survive a 360px pause
-   menu with a tap target still worth the name. */
+/* Two key boxes per action: the one the game names in its prompts, and a spare. */
 .kbe__keys {
   display: flex;
   align-items: flex-end;
@@ -934,14 +1276,13 @@ body {
   gap: 1px;
 }
 
-/* Which of the two this is. Tiny, quiet, and always there — an empty box that
-   is still labelled "2nd" reads as a box to fill rather than as a fault. */
 .kbe__slotlabel {
   padding-left: 3px;
   font-family: var(--font-display);
-  font-size: var(--fs-xs);
+  font-weight: 600;
+  font-size: 0.6875rem;
   line-height: 1.1;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--on-surface-faint);
 }
@@ -952,26 +1293,30 @@ body {
   gap: 2px;
 }
 
-/* The key button quotes the engraving, so it is monospaced and never shouted in
-   caps — "Num ." is not "NUM .". */
+/* The key button quotes the engraving: a keycap, never shouted in caps. */
 .kbe__key {
   min-width: 8ch;
   min-height: 34px;
   padding: 0 8px;
+  background: var(--surface-2);
+  border-color: var(--outline-strong);
 }
 
 .kbe__key .btn__label {
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
-  letter-spacing: 0;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: var(--fs-md);
+  letter-spacing: 0.02em;
   text-transform: none;
-  color: var(--accent-2);
+  color: var(--on-surface);
 }
 
 .kbe__clear {
-  min-width: 38px;
+  min-width: 34px;
   min-height: 34px;
-  padding: 0 8px;
+  padding: 0 6px;
+  background: transparent;
+  border-color: transparent;
   font-family: var(--font);
   color: var(--on-surface-faint);
 }
@@ -982,47 +1327,41 @@ body {
 }
 
 .kbe__clear:hover:not([disabled]) {
-  color: var(--danger);
+  color: var(--danger-hot);
 }
 
-/* An action nobody can reach at all is worth seeing from across the room. An
-   empty SECOND key is not that, and is left alone. */
 .kbe__row.is-unbound {
   border-left-color: var(--warn);
 }
 
-/* An empty box: a dash, dimmed, and still perfectly clickable. */
 .kbe__key.is-empty .btn__label {
   color: var(--on-surface-faint);
 }
 
-/* Awaiting a key. Colour is the least of it — the label changes to "press a
-   key", the border goes dashed and a caret blinks, so the state still reads on
-   a monochrome screen or through any flavour of colour blindness. */
+/* Awaiting a key. The label changes, the border goes dashed and a caret blinks,
+   so the state still reads on a monochrome screen or through colour blindness. */
 .kbe__row.is-capturing {
-  border-left-color: var(--accent-2);
-  background: color-mix(in srgb, var(--accent-2) 8%, var(--surface-0));
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-0));
 }
 
 .kbe__key.is-capturing {
   border-style: dashed;
-  border-color: var(--accent-2);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-2) 22%, transparent);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
 .kbe__key.is-capturing .btn__label {
-  color: var(--accent-2);
+  color: var(--accent);
 }
 
-/* Kept in the layout even when idle, so entering capture mode does not make the
-   row twitch sideways. */
 .kbe__cue {
   position: relative;
   z-index: 1;
   order: -1;
   width: 0.5em;
   height: 1.1em;
-  background: var(--accent-2);
+  background: var(--accent);
   border-radius: 1px;
   visibility: hidden;
 }
@@ -1045,8 +1384,7 @@ body {
   gap: 8px;
 }
 
-/* The line is reserved: a message arriving must not shove the rows upward under
-   the pointer that is about to click one. */
+/* Reserved height: a message arriving must not shove the rows under the pointer. */
 .kbe__status {
   min-height: calc(var(--fs-sm) * var(--lh));
   margin: 0;
@@ -1063,8 +1401,6 @@ body {
 }
 
 @media (max-width: 560px) {
-  /* Two key boxes and an action name will not share one line at this width, so
-     the boxes take a line of their own and spread across it. */
   .kbe__row {
     grid-template-columns: minmax(0, 1fr);
     gap: 4px;
@@ -1072,7 +1408,7 @@ body {
   }
 
   .kbe__action {
-    font-size: var(--fs-xs);
+    font-size: var(--fs-sm);
   }
 
   .kbe__keys {
@@ -1099,9 +1435,11 @@ body {
 .notice {
   display: flex;
   gap: 10px;
+  margin: 0;
   padding: 10px 12px;
   border-radius: var(--r-sm);
   border: 1px solid var(--outline);
+  border-left-width: 3px;
   background: var(--surface-0);
   font-size: var(--fs-sm);
   color: var(--on-surface-dim);
@@ -1109,14 +1447,16 @@ body {
 
 .notice--error {
   border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+  border-left-color: var(--danger);
   background: color-mix(in srgb, var(--danger) 12%, var(--surface-0));
-  color: #ffd9d5;
+  color: #ffd9d2;
 }
 
 .notice--warn {
-  border-color: color-mix(in srgb, var(--warn) 55%, transparent);
+  border-color: color-mix(in srgb, var(--warn) 50%, transparent);
+  border-left-color: var(--warn);
   background: color-mix(in srgb, var(--warn) 10%, var(--surface-0));
-  color: #ffe9c2;
+  color: #ffe6c4;
 }
 
 /* Waiting-for-player indicator, driven by Lockstep.stalledFrames. */
@@ -1125,13 +1465,17 @@ body {
   align-items: center;
   gap: 8px;
   color: var(--warn);
-  font-size: var(--fs-sm);
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: var(--fs-md);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
 }
 
 .waiting__dot {
   width: 8px;
   height: 8px;
-  border-radius: 50%;
+  border-radius: 1px;
   background: currentColor;
   animation: pulse 900ms var(--ease-std) infinite alternate;
 }
@@ -1139,12 +1483,475 @@ body {
 @keyframes pulse {
   from {
     opacity: 0.25;
-    transform: scale(0.8);
+    transform: scale(0.8) rotate(0deg);
   }
   to {
     opacity: 1;
-    transform: scale(1.15);
+    transform: scale(1.15) rotate(45deg);
   }
+}
+
+/* ── Title screen: the menu stands on the left of the stage ──────────────── *
+ *
+ * The title is a piece of key art — logo top-left, the seven of them on the
+ * ridge to the right — and the menu is a column on the left third of the
+ * picture, positioned against the letterboxed STAGE rather than the window so
+ * it lands on the same patch of night sky at every window shape. Below a
+ * landscape aspect there is no left third to speak of, and it drops under the
+ * picture instead.
+ */
+
+.ui-view--home {
+  --menu-fs: clamp(1rem, calc(var(--stage-h) * 0.034), 1.75rem);
+  position: absolute;
+  left: calc(var(--stage-x) + var(--stage-w) * 0.055);
+  top: calc(var(--stage-y) + var(--stage-h) * 0.47);
+  width: calc(var(--stage-w) * 0.34);
+  max-height: calc(var(--stage-h) * 0.5);
+  margin: 0;
+  padding: 4px 4px 4px 0;
+  gap: 10px;
+}
+
+.ui-view--home .notice {
+  margin-left: 1.5em;
+}
+
+.ui-view--home .hint {
+  margin-left: 1.5em;
+  max-width: 34ch;
+}
+
+/*
+ * Short landscape (a phone on its side): the same column, packed tighter so six
+ * items fit in half a 390px-tall screen without scrolling.
+ */
+@media (min-aspect-ratio: 5/4) and (max-height: 520px) {
+  .ui-view--home {
+    --menu-fs: 0.95rem;
+    gap: 4px;
+  }
+
+  .ui-view--home .menu .btn {
+    min-height: 1.95em;
+  }
+}
+
+/*
+ * Portrait: the picture goes to the top of the screen (see #app below) and the
+ * menu sits directly under it, centred, with the rest of the height to itself.
+ */
+@media (max-aspect-ratio: 5/4) {
+  .ui-view--home {
+    --menu-fs: 1.375rem;
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: calc(var(--stage-y) + var(--stage-h) + 12px);
+    bottom: max(12px, env(safe-area-inset-bottom));
+    width: min(400px, calc(100% - 32px));
+    max-height: none;
+    margin-inline: auto;
+    min-height: 0;
+    justify-content: center;
+  }
+}
+
+/* ── Pause: a column on the left, the frozen fight still showing on the right ─ */
+
+.ui-view--pause {
+  --menu-fs: clamp(1.05rem, calc(var(--stage-h) * 0.036), 1.75rem);
+  position: absolute;
+  left: calc(var(--stage-x) + var(--stage-w) * 0.06);
+  top: calc(var(--stage-y) + var(--stage-h) * 0.12);
+  width: min(calc(var(--stage-w) * 0.4), 460px);
+  max-height: calc(var(--stage-h) * 0.82);
+  margin: 0;
+  gap: 8px;
+}
+
+.ui-view--pause .hint {
+  margin-left: 1.5em;
+}
+
+@media (max-aspect-ratio: 5/4), (max-width: 620px) {
+  .ui-view--pause {
+    position: static;
+    width: min(420px, 100%);
+    max-height: 100%;
+  }
+}
+
+/* ── Update toast ──────────────────────────────────────────────────────────
+ *
+ * Lives outside #ui, which scenes empty on every view change, so it survives
+ * the player wandering through the menus while it waits to be acknowledged.
+ */
+.sw-toast {
+  position: fixed;
+  left: max(16px, env(safe-area-inset-left));
+  bottom: max(16px, env(safe-area-inset-bottom));
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(22rem, calc(100vw - 32px));
+  padding: 14px 16px;
+  border: 1px solid var(--outline);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  box-shadow: var(--elev-4);
+  opacity: 0;
+  transform: translateY(12px);
+  transition:
+    opacity 220ms ease,
+    transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.sw-toast.is-in {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.sw-toast__text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.sw-toast__text strong {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: var(--fs-md);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.sw-toast__text span {
+  font-size: var(--fs-sm);
+  color: var(--on-surface-dim);
+}
+
+.sw-toast__row {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+@media (max-width: 520px), (max-height: 460px) {
+  .sw-toast {
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    border-radius: 0;
+    border-left: 0;
+    border-top: 3px solid var(--accent);
+    padding: 10px 12px;
+  }
+
+  .sw-toast__text span {
+    display: none;
+  }
+}
+
+/* ── Select ────────────────────────────────────────────────────────────────
+ * Shares .input's box. The caret is drawn rather than shipped: no raster
+ * anywhere in this project, chrome included.
+ */
+select.input {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 34px;
+  cursor: pointer;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--on-surface-dim) 50%),
+    linear-gradient(135deg, var(--on-surface-dim) 50%, transparent 50%);
+  background-position:
+    calc(100% - 19px) calc(50% + 1px),
+    calc(100% - 13px) calc(50% + 1px);
+  background-size: 6px 6px, 6px 6px;
+  background-repeat: no-repeat;
+}
+
+select.input:hover,
+select.input:focus-visible {
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--accent) 50%),
+    linear-gradient(135deg, var(--accent) 50%, transparent 50%);
+}
+
+select.input option {
+  background: var(--surface-2);
+  color: var(--on-surface);
+}
+
+/* ── Lobby: keep the panel off the banner ──────────────────────────────────
+ *
+ * The lobby paints the room code and its status line straight onto the canvas,
+ * across the top 27% of the stage. Reserving 30% of the STAGE height keeps the
+ * clearance correct at every window shape instead of at one.
+ */
+.ui-view--lobby {
+  align-self: end;
+  max-height: calc(100% - var(--stage-h) * 0.3);
+}
+
+/* ── Lobby map strip ─────────────────────────────────────────────────────── */
+
+.mapstrip {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 4px 4px 10px;
+  scroll-snap-type: x proximity;
+  scrollbar-width: thin;
+  scrollbar-color: var(--outline-strong) transparent;
+}
+
+.mapstrip--single {
+  overflow: visible;
+  padding-bottom: 2px;
+}
+
+.mapcard {
+  flex: 0 0 auto;
+  width: 120px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--on-surface-dim);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  scroll-snap-align: center;
+  border-radius: var(--r-sm);
+  position: relative;
+  transition:
+    transform 140ms ease,
+    color 140ms ease;
+}
+
+.mapcard__art {
+  display: block;
+  width: 120px;
+  height: 68px;
+  border-radius: var(--r-sm);
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  transition: outline-color 140ms ease;
+}
+
+.mapcard__cap {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  line-height: 1.2;
+  letter-spacing: 0.02em;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+button.mapcard:hover {
+  transform: translateY(-2px);
+  color: var(--on-surface);
+}
+
+button.mapcard:focus-visible {
+  outline: none;
+}
+
+button.mapcard:focus-visible .mapcard__art {
+  outline-color: var(--on-surface);
+}
+
+.mapcard.is-chosen {
+  color: var(--accent);
+}
+
+.mapcard.is-chosen .mapcard__art {
+  outline-color: var(--accent);
+}
+
+/* ── Touch controls ──────────────────────────────────────────────────────── *
+ * Only ever mounted on a device whose primary pointer is coarse. See
+ * src/engine/input/TouchSource.ts for why each control is where it is.
+ */
+
+.touchpad {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.touchpad[hidden] {
+  display: none !important;
+}
+
+.touchpad__zone {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.touchpad__zone--move {
+  left: 0;
+  width: 45%;
+}
+
+.touchpad__stick {
+  position: absolute;
+  /* Resting place, until a thumb lands somewhere else in the zone. */
+  left: 30%;
+  top: 72%;
+  width: 116px;
+  height: 116px;
+  margin: -58px 0 0 -58px;
+  border-radius: 50%;
+  border: 2px solid rgba(244, 236, 223, 0.22);
+  background: rgba(12, 10, 9, 0.28);
+  opacity: 0.4;
+  transition: opacity var(--dur-2) var(--ease-std);
+}
+
+.touchpad__stick.is-active {
+  opacity: 1;
+}
+
+.touchpad__knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 52px;
+  height: 52px;
+  margin: -26px 0 0 -26px;
+  border-radius: 50%;
+  background: rgba(244, 236, 223, 0.85);
+  box-shadow: 0 3px 0 rgba(0, 0, 0, 0.5);
+}
+
+.touchpad__buttons {
+  position: absolute;
+  right: max(12px, env(safe-area-inset-right));
+  bottom: max(12px, env(safe-area-inset-bottom));
+  width: 184px;
+  height: 184px;
+  pointer-events: none;
+}
+
+.touchpad__btn {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  border: 2px solid rgba(244, 236, 223, 0.38);
+  background: rgba(12, 10, 9, 0.36);
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.7);
+  color: var(--on-surface);
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 0.8125rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  pointer-events: auto;
+  touch-action: none;
+  transition:
+    transform 60ms ease,
+    background-color 60ms ease;
+}
+
+.touchpad__btn.is-down {
+  transform: scale(0.92);
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+/* The diamond: A light, B heavy, X jump, Y special — the pad's own layout. */
+.touchpad__btn--light {
+  right: 56px;
+  bottom: 8px;
+  border-color: rgba(255, 181, 36, 0.7);
+}
+
+.touchpad__btn--heavy {
+  right: 8px;
+  bottom: 56px;
+}
+
+.touchpad__btn--jump {
+  right: 104px;
+  bottom: 56px;
+}
+
+.touchpad__btn--special {
+  right: 56px;
+  bottom: 104px;
+}
+
+/* Shoulders and triggers, smaller, in the corners round it. */
+.touchpad__btn--small {
+  width: 46px;
+  height: 46px;
+  font-size: 0.6875rem;
+}
+
+.touchpad__btn--block {
+  right: 6px;
+  bottom: 128px;
+}
+
+.touchpad__btn--super {
+  right: 128px;
+  bottom: 132px;
+  border-color: rgba(88, 196, 239, 0.6);
+}
+
+.touchpad__btn--grab {
+  right: 132px;
+  bottom: 4px;
+}
+
+.touchpad__btn--use {
+  right: 4px;
+  bottom: 4px;
+}
+
+.touchpad__pause {
+  position: absolute;
+  top: max(10px, env(safe-area-inset-top));
+  right: max(10px, env(safe-area-inset-right));
+  width: 46px;
+  height: 40px;
+  border-radius: var(--r-sm);
+  border: 1px solid rgba(244, 236, 223, 0.3);
+  background: rgba(12, 10, 9, 0.55);
+  color: var(--on-surface);
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 1rem;
+  pointer-events: auto;
+  touch-action: none;
 }
 
 /* ── Reduced motion ───────────────────────────────────────────────────────── *
@@ -1166,7 +1973,12 @@ body {
     display: none !important;
   }
 
-  .btn:active {
+  .btn:active,
+  .menu .btn:active {
+    transform: none;
+  }
+
+  button.mapcard:hover {
     transform: none;
   }
 
@@ -1175,8 +1987,6 @@ body {
     opacity: 1;
   }
 
-  /* The caret stops blinking but stays put: it is what marks the key button as
-     armed, so it is information, not decoration. */
   .kbe__key.is-capturing .kbe__cue {
     animation: none;
     opacity: 1;
@@ -1185,6 +1995,10 @@ body {
   .btn__spinner {
     animation-duration: 2.4s !important;
     animation-iteration-count: infinite !important;
+  }
+
+  .sw-toast {
+    transition: none;
   }
 }
 
@@ -1216,248 +2030,14 @@ html.reduced-motion .btn__spinner {
   animation-iteration-count: infinite !important;
 }
 
-/* ── Update toast ──────────────────────────────────────────────────────────
- *
- * Lives outside #ui, which scenes empty on every view change, so it survives
- * the player wandering through the menus while it waits to be acknowledged.
- * Bottom-left, clear of the pause button and of the letterboxed stage.
- */
-.sw-toast {
-  position: fixed;
-  left: max(16px, env(safe-area-inset-left));
-  bottom: max(16px, env(safe-area-inset-bottom));
-  z-index: 60;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  width: min(22rem, calc(100vw - 32px));
-  padding: 14px 16px;
-  border: 1px solid var(--outline);
-  border-left: 3px solid var(--accent-2);
-  border-radius: 10px;
-  background: var(--surface-3);
-  box-shadow: var(--elev-4);
-  /* Starts below and transparent; .is-in brings it up. */
-  opacity: 0;
-  transform: translateY(12px);
-  transition:
-    opacity 220ms ease,
-    transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-
-.sw-toast.is-in {
-  opacity: 1;
-  transform: translateY(0);
-}
-
-.sw-toast__text {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.sw-toast__text strong {
-  font-family: var(--font-display);
-  font-size: var(--fs-sm);
-  letter-spacing: 0.06em;
-  color: var(--accent-2);
-}
-
-.sw-toast__text span {
-  font-size: var(--fs-sm);
-  color: var(--on-surface-dim);
-}
-
-.sw-toast__row {
-  display: flex;
-  gap: 8px;
-  justify-content: flex-end;
-}
-
-/* Narrow or short: full width along the bottom edge, buttons inline, so it
- * never covers the letterboxed stage or the pause control. */
-@media (max-width: 520px), (max-height: 460px) {
-  .sw-toast {
-    left: 0;
-    right: 0;
-    bottom: 0;
-    width: auto;
-    flex-direction: row;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    border-radius: 0;
-    border-left: 0;
-    border-top: 3px solid var(--accent-2);
-    padding: 10px 12px;
-  }
-
-  .sw-toast__text span {
-    display: none;
-  }
-}
-
-html.reduced-motion .sw-toast {
-  transition: none;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .sw-toast {
-    transition: none;
-  }
-}
-
-/* ── Select ────────────────────────────────────────────────────────────────
- *
- * Shares .input's box so a dropdown sits in a form beside a text field without
- * looking like a different design. The caret is drawn rather than shipped: no
- * raster anywhere in this project, chrome included.
- */
-select.input {
-  -webkit-appearance: none;
-  appearance: none;
-  padding-right: 34px;
-  cursor: pointer;
-  background-image:
-    linear-gradient(45deg, transparent 50%, var(--on-surface-dim) 50%),
-    linear-gradient(135deg, var(--on-surface-dim) 50%, transparent 50%);
-  background-position:
-    calc(100% - 19px) calc(50% + 1px),
-    calc(100% - 13px) calc(50% + 1px);
-  background-size: 6px 6px, 6px 6px;
-  background-repeat: no-repeat;
-}
-
-select.input:hover,
-select.input:focus-visible {
-  background-image:
-    linear-gradient(45deg, transparent 50%, var(--on-surface) 50%),
-    linear-gradient(135deg, var(--on-surface) 50%, transparent 50%);
-}
-
-/* The popup itself is the platform's, so at least make it legible in the dark. */
-select.input option {
-  background: var(--surface-2);
-  color: var(--on-surface);
-}
-
-/* ── Lobby: keep the panel off the banner ──────────────────────────────────
- *
- * The lobby paints the room code and its status line straight onto the canvas,
- * across the top 27% of the 640x360 stage (the last line sits at y=96). The DOM
- * overlay is centred over the whole viewport, so on a short window the panel
- * rode straight over "LISTENING FOR A FRIEND" and cut it in half.
- *
- * The stage is letterboxed, so its on-screen height is `min(100vh, 100vw*9/16)`
- * — not the viewport's. Reserving 30% of THAT keeps the clearance correct at
- * every window shape instead of at one. Bottom-aligned and height-capped rather
- * than margined, so the panel still scrolls inside whatever is left.
- */
-.ui-view--lobby {
-  --stage-h: min(100vh, calc(100vw * 9 / 16));
-  align-self: end;
-  max-height: calc(100% - var(--stage-h) * 0.3);
-}
-
-/* ── Lobby map strip ───────────────────────────────────────────────────────
- *
- * The same covers the gallery draws, at thumbnail size, so the host picks where
- * to drop in by looking at the place rather than by reading a number. A cover is
- * a suggestion of a map, not a screenshot of it, so showing one for a map the
- * host has reached but the guest has not spoils nothing.
- *
- * Scrolls sideways: by map forty this is a long row, and it must not be allowed
- * to make the lobby taller.
- */
-.mapstrip {
-  display: flex;
-  gap: 10px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  padding: 2px 2px 10px;
-  scroll-snap-type: x proximity;
-  scrollbar-width: thin;
-  scrollbar-color: var(--outline-strong) transparent;
-}
-
-.mapstrip--single {
-  overflow: visible;
-  padding-bottom: 2px;
-}
-
-.mapcard {
-  flex: 0 0 auto;
-  width: 120px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--on-surface-dim);
-  text-align: left;
-  font: inherit;
-  cursor: pointer;
-  scroll-snap-align: center;
-  border-radius: 10px;
-  position: relative;
-  transition:
-    transform 140ms ease,
-    color 140ms ease;
-}
-
-.mapcard__art {
-  display: block;
-  width: 120px;
-  height: 68px;
-  border-radius: 9px;
-  outline: 2px solid transparent;
-  outline-offset: 2px;
-  transition: outline-color 140ms ease;
-}
-
-.mapcard__cap {
-  font-size: var(--fs-xs);
-  line-height: 1.25;
-  /* Two lines, then ellipsis, so one long map name cannot make the row taller. */
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-button.mapcard:hover {
-  transform: translateY(-2px);
-  color: var(--on-surface);
-}
-
-button.mapcard:focus-visible {
-  outline: none;
-}
-
-button.mapcard:focus-visible .mapcard__art {
-  outline-color: var(--accent-2);
-}
-
-.mapcard.is-chosen {
-  color: var(--on-surface);
-}
-
-.mapcard.is-chosen .mapcard__art {
-  outline-color: var(--accent);
-}
-
+html.reduced-motion .sw-toast,
 html.reduced-motion .mapcard,
 html.reduced-motion .mapcard__art {
   transition: none;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .mapcard,
-  .mapcard__art {
-    transition: none;
-  }
-  button.mapcard:hover {
-    transform: none;
-  }
+/* On the pad-driven screens the one button is BACK, and back lives top-left. */
+.touchpad[data-mode="back"] .touchpad__pause {
+  right: auto;
+  left: max(10px, env(safe-area-inset-left));
 }

@@ -48,6 +48,7 @@ import { PARRY_FRAMES, Z_HIT_TOLERANCE } from '@/core/constants';
 import { boxOverlap, clamp } from '@/core/math';
 import { MOVES } from '@/game/combat/Moves';
 import type { Fighter } from '@/game/Fighter';
+import type { ActionFx } from '@/juice/Fx';
 // One definition of who bleeds and how much of it the player asked for. Both
 // belong to the body, not to the hit that lands on it.
 import { goreLevel, isMechanicalArchetype } from '@/game/Fighter';
@@ -351,6 +352,8 @@ export class CombatResolver {
   private readonly fx: FxBus;
   /** The same bus, seen through the gore extensions it may or may not have. */
   private readonly gfx: FxBus & GoreFxExt;
+  /** ...and through the action lines, which a stub bus does not have either. */
+  private readonly afx: FxBus & ActionFx;
   private readonly audio: AudioBus;
   private readonly reg = new Map<number, AttackRecord>();
   private readonly pending: PendingHit[] = [];
@@ -358,6 +361,7 @@ export class CombatResolver {
   constructor(fx: FxBus, audio: AudioBus) {
     this.fx = fx;
     this.gfx = fx as FxBus & GoreFxExt;
+    this.afx = fx as FxBus & ActionFx;
     this.audio = audio;
   }
 
@@ -726,6 +730,9 @@ export class CombatResolver {
     });
     this.fx.aberration(clamp(d * 0.02, 0.1, 0.5), 8);
     if (d >= 18) this.fx.shockwave(cx, cy, cz, 26 + d, 12);
+    // The star goes up on the frame the hitstop holds, so it is what the eye
+    // is resting on for the whole freeze.
+    this.afx.impactLines?.(cx, cy, cz, dir, power * (brutal ? 1 : 0.7));
     // A heavy landing on meat has a wet crack under it, and at 'max' you hear
     // it. The victim already plays the hit itself, so this sits underneath.
     if (brutal && !metal && goreLevel() === 'max') {
@@ -894,6 +901,11 @@ export class CombatResolver {
     const marquee = b.isBoss === true || b.team === 'player';
     this.fx.shockwave(cx, cy, cz, marquee ? 110 : 46, marquee ? 30 : 14);
     this.fx.aberration(marquee ? 0.95 : 0.35, marquee ? 26 : 10);
+    this.afx.impactLines?.(cx, cy, cz, Math.PI * 0.5, marquee ? 3 : 1.7);
+    // Every kill gets a held breath. A guard's is six frames — long enough to
+    // register that it was the last hit, short enough that a wave of them does
+    // not turn the fight to treacle; the marquee deaths bring their own.
+    if (!marquee) this.fx.slowmo(0.45, 6);
 
     // A death with nobody to finish it still empties out. Straight up, because
     // there is no blow left to carry it sideways.

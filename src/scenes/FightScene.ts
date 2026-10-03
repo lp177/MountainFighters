@@ -57,6 +57,7 @@ import {
   VIEW_H,
   VIEW_W,
   Z_DEPTH,
+  Z_PERSPECTIVE,
   Z_SCALE,
 } from '@/core/constants';
 import { clamp, dist2, easeOut, easeOutBack, lerp } from '@/core/math';
@@ -72,7 +73,6 @@ import { saveSave } from '@/engine/Save';
 import type { Renderer } from '@/render/Renderer';
 import { Camera } from '@/render/Camera';
 import { DWARF_SKELETON } from '@/render/rig/Skeleton';
-import { roundRect } from '@/render/Shapes';
 
 import { ParticleSystem } from '@/juice/Particles';
 import { Fx } from '@/juice/Fx';
@@ -85,7 +85,7 @@ import { drawBackdrop } from '@/game/Backdrop';
 import { CombatResolver, setFatalityHook } from '@/game/combat/Combat';
 import { registerMove } from '@/game/combat/Moves';
 import { BossIntro } from '@/game/BossIntro';
-import { FatalityDirector } from '@/game/Fatality';
+import { FatalityDirector, HOLD_BUDGET } from '@/game/Fatality';
 
 import { DWARFS, getDwarf } from '@/content/dwarfs';
 import { getMap } from '@/content/maps';
@@ -96,7 +96,8 @@ import type { NetSession } from '@/net/NetSession';
 import type { Lockstep } from '@/net/Lockstep';
 
 import type { Ui } from '@/ui/Ui';
-import { drawHud, hudText, resetHud, setHudPadSlots } from '@/ui/Hud';
+import { drawHud, resetHud, setHudPadSlots } from '@/ui/Hud';
+import { PALETTE, band, displayFont, inkText, playerColor, slab, textFont } from '@/ui/theme';
 import { drawReadyMarks, readyCaption } from '@/ui/ReadyMarks';
 import type { ReadyMark } from '@/ui/ReadyMarks';
 import { PauseScene, nav, quitToMenu } from '@/scenes/PauseScene';
@@ -172,6 +173,12 @@ export interface FightPlayerPick {
    * from the old layout. The board knows; it should say so.
    */
   onPad?: boolean;
+  /**
+   * Player number, 0-based, as the select screen dealt it. Not the slot: a pad
+   * can sit on input slot 2 and still be player one. Drives the colour and the
+   * number the HUD shows for this fighter. Absent means "same as the slot".
+   */
+  seat?: number;
 }
 
 export interface FightParams {
@@ -239,8 +246,13 @@ const FATALITY_CHANCE = 0.35;
  * known way for it not to. This is here because "the fight never resumes" is
  * the single worst bug this feature could have, and a watchdog costs one
  * integer compare per frame.
+ *
+ * The grace has to cover everything the director may legitimately add to a
+ * finisher's own length: the follow-through, which it caps at 116 frames, and
+ * the frames it holds the picture on a blow, which it caps at HOLD_BUDGET.
+ * Short of that sum, the watchdog shoots a show that was running to time.
  */
-const FATALITY_GRACE = 120;
+const FATALITY_GRACE = 124 + HOLD_BUDGET;
 
 const DIFFICULTY_HEALTH: Record<Settings['difficulty'], number> = {
   easy: 1.35,
@@ -248,8 +260,6 @@ const DIFFICULTY_HEALTH: Record<Settings['difficulty'], number> = {
   hard: 0.86,
   musk: 0.7,
 };
-
-const INK = '#120e18';
 
 // ── Framing ──────────────────────────────────────────────────────────────────
 
@@ -275,6 +285,25 @@ const FIGHT_FRAME_Y = Math.min(
   0,
   (VIEW_H * 0.5 - BAND_CLEARANCE) / FIGHT_ZOOM + VIEW_H * 0.5 - BAND_BOTTOM,
 );
+
+/**
+ * The stage grade: how far the scenery is pushed back before anybody stands on
+ * it. See `gradeStage`.
+ *
+ * DESAT is the fraction of the backdrop's saturation removed; DIM multiplies its
+ * value (0xdc/0xff ≈ 86%); the vignette darkens the corners, where nothing is
+ * ever happening, toward the coal of the UI. Tuned on the mine, the server farm
+ * and the assembly line — the darkest, the flattest and the brightest maps.
+ *
+ * Lighter than it was. The grade was set when the scenery was flat fills and
+ * had nothing in it worth seeing; pushing that back hard cost nothing. The set
+ * is now lit — lamps, pools on the floor, a horizon — and a grade that heavy
+ * was taking the light back out of it. The fighters still out-read it, because
+ * the light is on the floor they stand on rather than on the wall behind them.
+ */
+const STAGE_DESAT = 0.2;
+const STAGE_DIM = '#dcd7d0';
+const STAGE_VIGNETTE = 'rgba(12,9,7,0.5)';
 
 // The roster is authored directly against the ids in `game/combat/Moves.ts`.
 // There used to be a MOVE_ALIAS table here remapping the roster's generic
@@ -326,6 +355,9 @@ class PlayerFighter extends Fighter {
     priv.comboTimer = 0;
     priv.bufAction = null;
     priv.bufFrames = 0;
+    priv.jumpBuf = 0;
+    priv.moveAction = null;
+    priv.jumpArc = false;
     priv.wantDash = 0;
     priv.dashTimer = 0;
     priv.flash = 0;
@@ -495,7 +527,7 @@ function runSuper(
         x: x + ctx.rng.range(-46, 46),
         y: 4 + ctx.rng.range(0, 40),
         z: z + ctx.rng.range(-18, 18),
-        angle: -Math.PI * 0.5,
+        angle: Math.PI * 0.5,
         spread: 0.5,
         speed: [1.6 + t * 3, 3.4 + t * 4],
         life: [8, 18],
@@ -522,7 +554,6 @@ function runSuper(
         style: 'taunt',
       });
     }
-    if (frame === strike - 6) ctx.audio.play('super_charge', { pitch: 1.35 });
     return;
   }
 
@@ -539,8 +570,10 @@ function runSuper(
     // super's animation finished and the player kept walking through syrup.
     ctx.fx.slowmo(0.24, 26);
     ctx.fx.shockwave(x, 24, z, sp.radius < 0 ? 240 : sp.radius, 30);
+    // The dwarf's own sound and nothing under it. A generic blast used to be
+    // stacked on every one of these, which buried the sneeze, the snore and
+    // the laugh under the same explosion.
     ctx.audio.play(sp.sfx);
-    ctx.audio.play('super_blast', { gain: 0.9 });
 
     ctx.fx.particles({
       count: 44,
@@ -620,7 +653,7 @@ function runSuper(
           x: x + ctx.rng.range(-120, 120),
           y: 1,
           z: z + ctx.rng.range(-30, 30),
-          angle: -Math.PI * 0.5,
+          angle: Math.PI * 0.5,
           spread: 0.9,
           speed: [1.5, 5],
           life: [14, 32],
@@ -668,7 +701,7 @@ function runSuper(
           x: x + ctx.rng.range(-150, 150),
           y: ctx.rng.range(0, 70),
           z: z + ctx.rng.range(-40, 40),
-          angle: -Math.PI * 0.5,
+          angle: Math.PI * 0.5,
           spread: Math.PI,
           speed: [1, 4],
           life: [16, 36],
@@ -782,6 +815,8 @@ export class FightScene implements Scene {
   private seed = 0;
   /** Frames this fight has actually simulated. The netcode's clock. */
   private simFrame = 0;
+  /** The loop frame on which the simulation last advanced. See `render`. */
+  private steppedOn = -1;
 
   /** True while a cinematic of ours is on screen and the peer must be patient. */
   private cinematicBusy = false;
@@ -802,7 +837,7 @@ export class FightScene implements Scene {
     return net.players.map((p) => {
       const d = p.dwarfId ? safeDwarf(p.dwarfId) : null;
       return {
-        color: d?.style.hatColor ?? '#ff2e6e',
+        color: d?.style.hatColor ?? PALETTE.blood,
         ready: this.introDone.has(p.slot) && !this.busyPeers.has(p.slot),
         label: `P${p.slot + 1}`,
       };
@@ -900,6 +935,8 @@ export class FightScene implements Scene {
       // the trophy through. Read lazily: the Level rebuilds its roster as waves
       // arrive and die, and a list captured once would sweep ghosts.
       crowd: () => (this.level ? this.level.fighters : []),
+      // So it can put the performers' floor where the letterbox leaves room.
+      frameY: FIGHT_FRAME_Y,
     });
   }
 
@@ -1169,6 +1206,7 @@ export class FightScene implements Scene {
 
     this.step();
     this.simFrame++;
+    this.steppedOn = this.host.loop.frame;
 
     if (!sampled && ls?.shouldChecksum(this.simFrame)) {
       ls.confirm(this.simFrame, this.checksum());
@@ -1425,6 +1463,7 @@ export class FightScene implements Scene {
         name: x.name,
         local: x.local,
         onPad: x.onPad,
+        seat: Number.isFinite(x.seat) ? x.seat : undefined,
       }));
     }
 
@@ -1909,6 +1948,21 @@ export class FightScene implements Scene {
     const level = this.level;
     if (!level) return;
 
+    /*
+     * A held fight is a still picture.
+     *
+     * `alpha` is how far the loop is between two fixed steps, and the loop
+     * keeps counting whether or not anything stepped: paused, behind a
+     * finisher, behind a boss introduction, waiting on a peer — it goes on
+     * sweeping 0..1 sixty times a second. Interpolating with it then slides
+     * every fighter from where it was to where it is, snaps it back, and does
+     * it again, which is the whole cast rocking on the spot behind the pause
+     * menu. Interpolation only means anything between two steps that both
+     * happened, so when the last loop tick did not advance the simulation the
+     * frame is drawn at the state it actually holds.
+     */
+    if (this.steppedOn !== this.host.loop.frame) alpha = 1;
+
     const r = this.host.renderer;
     const ctx = r.ctx;
     // A host that composites the frame itself has already begun and cleared it.
@@ -1920,6 +1974,7 @@ export class FightScene implements Scene {
     }
 
     this.renderScenery(ctx, r);
+    this.gradeStage(ctx, r);
 
     r.withCamera(this.cam, () => {
       // Vertical framing, applied inside the camera transform so every layer
@@ -1930,6 +1985,7 @@ export class FightScene implements Scene {
       // it. Drawn with the rest of the particles — which come after the actors
       // — blood on the ground was painted over the fighters' heads.
       this.particles.renderGround(ctx, this.cam);
+      this.drawPlayerRings(ctx, alpha);
       level.render(ctx, this.cam, alpha);
       // Between the map and the juice: the performance stands where the two
       // fighters stood — the Level has struck them from its own draw list — and
@@ -1952,6 +2008,8 @@ export class FightScene implements Scene {
         mapIndex: this.mapIndex,
         mapTotal: TOTAL_MAPS,
         names: this.nameMap(),
+        seats: this.seatMap(),
+        quiet: this.introTimer > INTRO_FIGHT_AT,
       });
       // Over the HUD on purpose: the letterbox and the title card are the frame
       // around the shot, and a health bar poking through the black is exactly
@@ -1989,14 +2047,117 @@ export class FightScene implements Scene {
    */
   private renderScenery(ctx: C2D, r: Renderer): void {
     const z = this.cam.zoom > 0.05 ? this.cam.zoom : 1;
+    // A finisher lifts and rolls the camera. The set has to go with it, or the
+    // performers tilt over a floor that stayed level and float off a wall that
+    // did not move. Both are zero for the whole of an ordinary fight.
+    const lift = this.cam.y;
+    const roll = this.cam.rotation;
     r.withScreen(() => {
-      if (z !== 1 || FIGHT_FRAME_Y !== 0) {
+      if (z !== 1 || FIGHT_FRAME_Y !== 0 || lift !== 0 || roll !== 0) {
         ctx.translate(VIEW_W * 0.5, VIEW_H * 0.5);
+        if (roll !== 0) ctx.rotate(roll);
         ctx.scale(z, z);
-        ctx.translate(-VIEW_W * 0.5, -VIEW_H * 0.5 + FIGHT_FRAME_Y);
+        ctx.translate(-VIEW_W * 0.5, -VIEW_H * 0.5 + FIGHT_FRAME_Y - lift);
       }
       drawBackdrop(ctx, getMap(this.mapIndex), this.cam, this.simFrame);
     });
+  }
+
+  /**
+   * Push the scenery back so the fighters come forward.
+   *
+   * The maps are procedural and bright in places — wooden posts lit orange, a
+   * pale factory floor — while every dwarf on the roster is wearing black
+   * leather. Left alone the backdrop out-contrasts the people fighting in front
+   * of it, which is the one thing a brawler's background must never do. So the
+   * whole painted set is graded once, before the actors are drawn: some
+   * saturation out, some value down, the corners into shadow. The fighters,
+   * the props and the effects are drawn after and keep their full range.
+   *
+   * Three full-frame fills. Cheap on any GPU-backed canvas, and the same cost on
+   * every map, which is what matters for a fixed-step game.
+   */
+  private gradeStage(ctx: C2D, r: Renderer): void {
+    r.withScreen(() => {
+      ctx.save();
+      ctx.globalCompositeOperation = 'saturation';
+      ctx.globalAlpha = STAGE_DESAT;
+      ctx.fillStyle = '#808080';
+      ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.fillStyle = STAGE_DIM;
+      ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+      ctx.globalCompositeOperation = 'source-over';
+      const g = ctx.createRadialGradient(
+        VIEW_W * 0.5,
+        VIEW_H * 0.58,
+        VIEW_H * 0.32,
+        VIEW_W * 0.5,
+        VIEW_H * 0.58,
+        VIEW_W * 0.66,
+      );
+      g.addColorStop(0, 'rgba(12,9,7,0)');
+      g.addColorStop(1, STAGE_VIGNETTE);
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+      ctx.restore();
+    });
+  }
+
+  /**
+   * A ring on the floor under each player, in their colour.
+   *
+   * The marker over the head answers "which one is me"; the ring answers
+   * "where exactly am I on the belt", which is the question a 2.5D brawler
+   * actually asks you on every swing — a dwarf in the air, in a crowd, or behind
+   * a riot shield has no other visible foot position. Floor layer: drawn with
+   * the stains, before anybody stands on it.
+   */
+  private drawPlayerRings(ctx: C2D, alpha: number): void {
+    const a = clamp(alpha, 0, 1);
+    const seats = this.seatMap();
+    ctx.save();
+    for (const f of this.players) {
+      if (!f.alive || f.riding) continue;
+      const x = lerp(f.prevPos.x, f.pos.x, a);
+      const z = lerp(f.prevPos.z, f.pos.z, a);
+      const air = lerp(f.prevPos.y, f.pos.y, a);
+      const u = clamp(1 - (Z_DEPTH - z) * Z_PERSPECTIVE, 0.75, 1);
+      const gy = GROUND_Y + z * Z_SCALE;
+      // Shrinks and fades as they leave the floor, so a jump reads as height.
+      const lift = clamp(air / 60, 0, 1);
+      const rx = 15 * u * (1 - lift * 0.35);
+      const ry = rx * 0.32;
+      const color = playerColor(seats[f.id] ?? f.id);
+      ctx.globalAlpha = 0.9 - lift * 0.5;
+      ctx.lineWidth = 1.6;
+      ctx.strokeStyle = PALETTE.ink;
+      ctx.beginPath();
+      ctx.ellipse(x, gy + 0.8, rx + 0.6, ry + 0.6, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.3;
+      ctx.beginPath();
+      ctx.ellipse(x, gy, rx, ry, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      // A notch on the side they face: which way the next swing goes.
+      ctx.fillStyle = color;
+      const nx = x + f.facing * (rx + 1.5);
+      ctx.beginPath();
+      ctx.moveTo(nx + f.facing * 3.2, gy);
+      ctx.lineTo(nx, gy - 2.2);
+      ctx.lineTo(nx, gy + 2.2);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  private seatMap(): Record<number, number> {
+    const out: Record<number, number> = {};
+    for (const pick of this.picks) out[pick.slot] = pick.seat ?? pick.slot;
+    return out;
   }
 
   private nameMap(): Record<number, string> {
@@ -2038,26 +2199,49 @@ export class FightScene implements Scene {
     ctx.restore();
   }
 
+  /**
+   * The title card, then FIGHT!.
+   *
+   * One band across the middle of the shot opens like a shutter, carries the
+   * map number and its name, and closes again; FIGHT! then lands on its own,
+   * big and red, with nothing behind it but the fight. Two beats, two jobs:
+   * where you are, then go.
+   */
   private drawIntro(ctx: C2D): void {
     if (this.introTimer <= 0) return;
     const map = getMap(this.mapIndex);
+    const W = VIEW_W;
 
     if (this.introTimer > INTRO_FIGHT_AT) {
-      const t = 1 - (this.introTimer - INTRO_FIGHT_AT) / (INTRO_FRAMES - INTRO_FIGHT_AT);
-      const slide = lerp(-160, 0, easeOutBack(clamp(t * 2.2, 0, 1)));
+      const span = INTRO_FRAMES - INTRO_FIGHT_AT;
+      const t = 1 - (this.introTimer - INTRO_FIGHT_AT) / span;
+      const open = easeOut(clamp(t * 5, 0, 1)) * clamp((1 - t) * 6, 0, 1);
+      const slide = lerp(-90, 0, easeOutBack(clamp(t * 2.6, 0, 1)));
       ctx.save();
-      ctx.globalAlpha = clamp((1 - t) * 4, 0, 1);
-      hudText(ctx, `ROUND ${this.mapIndex}`, VIEW_W * 0.5 + slide, 150, 34, '#ffe14a');
-      hudText(ctx, map.name.toUpperCase(), VIEW_W * 0.5 - slide, 176, 14, '#ffffff');
-      hudText(
+      band(ctx, W, 160, 70, open);
+      ctx.globalAlpha = clamp(open * 1.6, 0, 1);
+      inkText(ctx, `MAP ${String(this.mapIndex).padStart(2, '0')}`, W * 0.5 + slide * 0.4, 141, 11, PALETTE.lamp, {
+        align: 'center',
+        weight: 800,
+        tracking: 3,
+        shadow: 0,
+        strokeWidth: 0,
+      });
+      inkText(ctx, map.name.toUpperCase(), W * 0.5 - slide, 168, 26, PALETTE.bone, {
+        align: 'center',
+        weight: 900,
+        italic: true,
+      });
+      inkText(
         ctx,
         this.mapIndex === 1
           ? 'THE DOOR WAS OFF ITS HINGES'
           : `${TOTAL_MAPS - this.mapIndex} BETWEEN YOU AND HIM`,
-        VIEW_W * 0.5,
-        194,
+        W * 0.5,
+        185,
         8,
-        '#9aa2b8',
+        PALETTE.boneDim,
+        { align: 'center', weight: 600, shadow: 0, strokeWidth: 0, tracking: 1.4 },
       );
       ctx.restore();
       return;
@@ -2065,9 +2249,21 @@ export class FightScene implements Scene {
 
     const t = 1 - this.introTimer / INTRO_FIGHT_AT;
     const pop = easeOutBack(clamp(t * 3.4, 0, 1));
+    const fade = clamp((1 - t) * 2.6, 0, 1);
     ctx.save();
-    ctx.globalAlpha = clamp((1 - t) * 2.6, 0, 1);
-    hudText(ctx, 'FIGHT!', VIEW_W * 0.5, 168, 30 + 34 * pop, '#ff3b30');
+    ctx.globalAlpha = fade;
+    // A white slash under the word on the frame it lands, gone a few frames later.
+    if (t < 0.12) {
+      ctx.globalAlpha = fade * (1 - t / 0.12) * 0.8;
+      slab(ctx, W * 0.5 - 150, 152, 300, 22, 14, '#ffffff');
+      ctx.globalAlpha = fade;
+    }
+    inkText(ctx, 'FIGHT!', W * 0.5, 186, 30 + 34 * pop, PALETTE.bloodHot, {
+      align: 'center',
+      weight: 900,
+      italic: true,
+      shadow: 3,
+    });
     ctx.restore();
   }
 
@@ -2081,11 +2277,11 @@ export class FightScene implements Scene {
       const caption = readyCaption(this.introDone.size, net.players.length);
       if (!caption) return;
       ctx.save();
-      ctx.globalAlpha = 0.75;
+      ctx.globalAlpha = 0.85;
       ctx.textAlign = 'right';
-      ctx.font = '700 8px ui-sans-serif, system-ui, sans-serif';
-      ctx.fillStyle = '#a2aabb';
-      ctx.fillText(caption, VIEW_W - 14, VIEW_H - 50);
+      ctx.font = displayFont(8.5, 600);
+      ctx.fillStyle = PALETTE.boneDim;
+      ctx.fillText(caption.toUpperCase(), VIEW_W - 14, VIEW_H - 50);
       ctx.restore();
     }
   }
@@ -2102,15 +2298,17 @@ export class FightScene implements Scene {
     if (a <= 0.01) return;
 
     // Sits under the Level's own title card rather than fighting it for space.
-    const top = 186;
-    const h = lines.length * 11 + 10;
+    const top = 190;
+    const h = lines.length * 12 + 12;
 
     ctx.save();
-    ctx.globalAlpha = a * 0.85;
-    roundRect(ctx, 30, top, VIEW_W - 60, h, 3, 'rgba(9,7,13,0.9)', INK, 1.4);
     ctx.globalAlpha = a;
+    band(ctx, VIEW_W, top + h * 0.5, h, a, 'rgba(12,10,9,0.82)', PALETTE.blood);
     for (let i = 0; i < lines.length; i++) {
-      hudText(ctx, lines[i].toUpperCase(), VIEW_W * 0.5, top + 15 + i * 11, 8, '#d8c8ff');
+      ctx.font = textFont(9, 500, true);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = PALETTE.bone;
+      ctx.fillText(lines[i], VIEW_W * 0.5, top + 16 + i * 12);
     }
     ctx.restore();
   }
@@ -2119,23 +2317,32 @@ export class FightScene implements Scene {
     if (this.phase !== 'clear' || !this.level) return;
     const t = 1 - this.clearTimer / CLEAR_FRAMES;
     const pop = easeOutBack(clamp(t * 4, 0, 1));
-    const fade = clamp(Math.min(1, (1 - t) * 5), 0, 1);
+    const open = easeOut(clamp(t * 6, 0, 1)) * clamp((1 - t) * 5, 0, 1);
 
     ctx.save();
-    ctx.globalAlpha = fade * 0.55;
-    ctx.fillStyle = '#07060c';
-    ctx.fillRect(0, 128, VIEW_W, 96);
-    ctx.globalAlpha = fade;
-    hudText(ctx, 'MAP CLEAR', VIEW_W * 0.5, 168, 18 + 20 * pop, '#ffe14a');
-    hudText(
+    band(ctx, VIEW_W, 172, 84, open);
+    ctx.globalAlpha = clamp(open * 1.5, 0, 1);
+    inkText(ctx, 'MAP CLEAR', VIEW_W * 0.5, 172, 22 + 14 * pop, PALETTE.lamp, {
+      align: 'center',
+      weight: 900,
+      italic: true,
+    });
+    inkText(
       ctx,
       this.mapIndex >= TOTAL_MAPS ? 'THERE IS NOWHERE LEFT FOR HIM TO GO' : 'HI HO',
       VIEW_W * 0.5,
-      192,
+      190,
       10,
-      '#ffffff',
+      PALETTE.bone,
+      { align: 'center', weight: 800, tracking: 2 },
     );
-    hudText(ctx, `SCORE ${this.score + this.level.score}`, VIEW_W * 0.5, 210, 9, '#9aa2b8');
+    inkText(ctx, `SCORE  ${(this.score + this.level.score).toLocaleString('en-US')}`, VIEW_W * 0.5, 204, 8.5, PALETTE.boneDim, {
+      align: 'center',
+      weight: 600,
+      tracking: 1,
+      shadow: 0,
+      strokeWidth: 0,
+    });
     ctx.restore();
   }
 
@@ -2144,25 +2351,54 @@ export class FightScene implements Scene {
     const secs = Math.max(0, Math.ceil(this.continueTimer / 60));
     const beat = this.continueTimer % 60;
     const pop = easeOut(clamp((60 - beat) / 18, 0, 1));
+    const urgent = secs <= 3;
 
     ctx.save();
-    ctx.globalAlpha = 0.72;
-    ctx.fillStyle = '#05040a';
+    ctx.globalAlpha = 0.78;
+    ctx.fillStyle = PALETTE.coal;
     ctx.fillRect(0, 0, VIEW_W, VIEW_H);
     ctx.globalAlpha = 1;
 
-    hudText(ctx, 'CONTINUE?', VIEW_W * 0.5, 130, 30, '#ff3b30');
-    hudText(ctx, `${secs}`, VIEW_W * 0.5, 200, 52 - 10 * pop, secs <= 3 ? '#ff3b30' : '#ffe14a');
-    hudText(ctx, 'PRESS ANY ATTACK', VIEW_W * 0.5, 232, 11, '#ffffff');
-    hudText(
+    inkText(ctx, 'CONTINUE?', VIEW_W * 0.5, 122, 34, PALETTE.bone, {
+      align: 'center',
+      weight: 900,
+      italic: true,
+    });
+
+    // The count, in a ring that empties with the second.
+    const cx = VIEW_W * 0.5;
+    const cy = 178;
+    const frac = beat / 60;
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = PALETTE.coal4;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 34, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.strokeStyle = urgent ? PALETTE.bloodHot : PALETTE.lamp;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 34, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac);
+    ctx.stroke();
+    inkText(ctx, `${secs}`, cx, cy + 15, 46 - 10 * pop, urgent ? PALETTE.bloodHot : PALETTE.lamp, {
+      align: 'center',
+      weight: 900,
+      italic: true,
+    });
+
+    inkText(ctx, 'PRESS ANY ATTACK', VIEW_W * 0.5, 238, 12, PALETTE.bone, {
+      align: 'center',
+      weight: 800,
+      tracking: 1.5,
+    });
+    inkText(
       ctx,
       this.continues === 0
         ? 'SHE IS STILL IN THERE'
         : `${this.continues} CONTINUE${this.continues === 1 ? '' : 'S'} USED. NOBODY IS COUNTING.`,
       VIEW_W * 0.5,
-      250,
-      8,
-      '#9aa2b8',
+      254,
+      8.5,
+      PALETTE.boneDim,
+      { align: 'center', weight: 600, shadow: 0, strokeWidth: 0, tracking: 1 },
     );
     ctx.restore();
   }
@@ -2172,48 +2408,56 @@ export class FightScene implements Scene {
 
     if (ls?.desynced) {
       ctx.save();
-      ctx.globalAlpha = 0.88;
-      ctx.fillStyle = '#1a0409';
-      ctx.fillRect(0, 118, VIEW_W, 118);
+      ctx.globalAlpha = 0.9;
+      band(ctx, VIEW_W, 176, 118, 1, 'rgba(26,6,6,0.94)', PALETTE.blood);
       ctx.globalAlpha = 1;
-      ctx.fillStyle = '#ff2d55';
-      ctx.fillRect(0, 118, VIEW_W, 2);
-      ctx.fillRect(0, 234, VIEW_W, 2);
-      hudText(ctx, 'DESYNCED', VIEW_W * 0.5, 152, 26, '#ff5a4f');
-      hudText(ctx, 'THE TWO GAMES HAVE DRIFTED APART.', VIEW_W * 0.5, 176, 10, '#ffd6d6');
-      hudText(
+      inkText(ctx, 'DESYNCED', VIEW_W * 0.5, 156, 28, PALETTE.bloodHot, {
+        align: 'center',
+        weight: 900,
+        italic: true,
+      });
+      inkText(ctx, 'THE TWO GAMES HAVE DRIFTED APART.', VIEW_W * 0.5, 178, 10, PALETTE.bone, {
+        align: 'center',
+        weight: 800,
+      });
+      inkText(
         ctx,
         'NOTHING ON THIS SCREEN IS TRUE ANY MORE. THE MATCH IS OVER.',
         VIEW_W * 0.5,
-        192,
+        193,
         8,
-        '#ffb0b0',
+        PALETTE.boneDim,
+        { align: 'center', weight: 600, shadow: 0, strokeWidth: 0 },
       );
-      hudText(ctx, 'PRESS ESC TO QUIT', VIEW_W * 0.5, 216, 10, '#ffffff');
+      inkText(ctx, 'PRESS ESC TO QUIT', VIEW_W * 0.5, 218, 10, PALETTE.lamp, {
+        align: 'center',
+        weight: 800,
+        tracking: 1.5,
+      });
       ctx.restore();
       return;
     }
 
     if (this.remotePaused >= 0) {
       ctx.save();
-      ctx.globalAlpha = 0.6;
-      ctx.fillStyle = '#05040a';
+      ctx.globalAlpha = 0.66;
+      ctx.fillStyle = PALETTE.coal;
       ctx.fillRect(0, 0, VIEW_W, VIEW_H);
       ctx.globalAlpha = 1;
       // Deliberately not the word PAUSED. PauseScene owns the paused
-      // presentation and stamps it on the canvas itself; a second banner from
-      // here put it on screen twice over its own DOM heading. This state is the
-      // far side of the wire — no local menu is up — so it says who stopped the
-      // fight instead of restating what the overlay already says.
-      hudText(ctx, 'STANDBY', VIEW_W * 0.5, 168, 26, '#ffe14a');
-      hudText(
-        ctx,
-        `${this.peerName(this.remotePaused)} IS IN THE MENU`,
-        VIEW_W * 0.5,
-        190,
-        11,
-        '#ffffff',
-      );
+      // presentation; this state is the far side of the wire — no local menu is
+      // up — so it says who stopped the fight instead.
+      band(ctx, VIEW_W, 172, 56, 1);
+      inkText(ctx, 'STANDBY', VIEW_W * 0.5, 172, 26, PALETTE.lamp, {
+        align: 'center',
+        weight: 900,
+        italic: true,
+      });
+      inkText(ctx, `${this.peerName(this.remotePaused)} IS IN THE MENU`, VIEW_W * 0.5, 189, 10, PALETTE.bone, {
+        align: 'center',
+        weight: 800,
+        tracking: 1,
+      });
       ctx.restore();
       return;
     }
@@ -2223,21 +2467,30 @@ export class FightScene implements Scene {
       const who = waiting.length > 0 ? waiting.map((s) => this.peerName(s)).join(', ') : 'THE OTHER SIDE';
       const dots = '.'.repeat(1 + (((this.stalled / 18) | 0) % 3));
       ctx.save();
-      ctx.globalAlpha = 0.92;
-      roundRect(ctx, VIEW_W * 0.5 - 132, 150, 264, 42, 4, 'rgba(9,7,13,0.92)', INK, 1.6);
-      ctx.globalAlpha = 1;
-      hudText(ctx, `WAITING FOR ${who}${dots}`, VIEW_W * 0.5, 170, 11, '#ffb020');
-      hudText(ctx, `${(this.stalled / 60).toFixed(1)}s BEHIND`, VIEW_W * 0.5, 184, 8, '#9aa2b8');
+      slab(ctx, VIEW_W * 0.5 - 136, 150, 272, 42, 8, 'rgba(14,11,9,0.94)', PALETTE.ink, 1.6);
+      ctx.fillStyle = PALETTE.warn;
+      ctx.fillRect(VIEW_W * 0.5 - 128, 150, 256, 1.5);
+      inkText(ctx, `WAITING FOR ${who}${dots}`, VIEW_W * 0.5, 170, 12, PALETTE.warn, {
+        align: 'center',
+        weight: 800,
+      });
+      inkText(ctx, `${(this.stalled / 60).toFixed(1)}s BEHIND`, VIEW_W * 0.5, 184, 8, PALETTE.boneDim, {
+        align: 'center',
+        weight: 600,
+        shadow: 0,
+        strokeWidth: 0,
+      });
       ctx.restore();
       return;
     }
 
     if (this.netError && this.netError !== 'DESYNC') {
       ctx.save();
-      ctx.globalAlpha = 0.92;
-      roundRect(ctx, 8, VIEW_H - 62, VIEW_W - 16, 20, 3, 'rgba(40,6,12,0.92)', INK, 1.4);
-      ctx.globalAlpha = 1;
-      hudText(ctx, this.netError.toUpperCase(), VIEW_W * 0.5, VIEW_H - 48, 8, '#ff9c9c');
+      slab(ctx, 10, VIEW_H - 64, VIEW_W - 20, 20, 6, 'rgba(40,8,8,0.94)', PALETTE.ink, 1.4);
+      inkText(ctx, this.netError.toUpperCase(), VIEW_W * 0.5, VIEW_H - 50.5, 9, '#ffb4a8', {
+        align: 'center',
+        weight: 800,
+      });
       ctx.restore();
     }
   }

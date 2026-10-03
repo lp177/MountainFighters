@@ -1,24 +1,30 @@
 /**
  * The title screen.
  *
- * Canvas draws the show — a procedural logo, a night mountain, sweeping
- * searchlights and seven very unimpressed silhouettes. The DOM draws the menu,
- * because a real <button> is keyboard-operable, screen-reader legible and
- * focusable for free, and a hand-rolled canvas menu is none of those things.
+ * It is a piece of key art before it is a menu. Left: the logo, and under it the
+ * menu as an arcade list. Right: the seven of them on the plateau in a loose
+ * formation — the leader in front with his weapon out, the rest behind him —
+ * backlit by a searchlight and rim-lit by the moon. The old screen stood the
+ * seven in a dark row along the bottom and then parked four buttons on top of
+ * three of them; the one thing on the screen that said what the game is about
+ * was the thing the menu covered.
  *
- * The two halves are wired together so the menu is drivable three ways at once:
- * pointer, keyboard (Tab, arrows, Enter, Space, Escape) and gamepad — all of
- * them producing the same ui_move / ui_select / ui_back cues.
+ * Canvas draws the show; the DOM draws the menu, because a real <button> is
+ * keyboard-operable, screen-reader legible and focusable for free. The two are
+ * registered to each other through the stage-relative CSS in styles.css
+ * (.ui-view--home), so the menu lands on the same patch of sky at any window
+ * shape. On a tall narrow window there is no left third, so the art re-centres
+ * ("stacked") and the menu drops underneath it.
+ *
+ * The menu is drivable three ways at once — pointer, keyboard, gamepad — all
+ * producing the same ui_move / ui_select / ui_back cues.
  *
  * If the page was opened from an invite link, none of that happens: the scene
  * joins the room and goes straight to character select. A friend who clicks a
  * link should not have to press anything.
- *
- * Everything long-lived — renderer, audio, input, save, the net session — is
- * read off `Game`; this scene owns nothing but its own scenery.
  */
 
-import type { RigStyle, Scene, Settings } from '@/core/types';
+import type { DwarfDef, RigStyle, Scene } from '@/core/types';
 import { Btn } from '@/core/types';
 import type { Game } from '@/Game';
 import type { SelectParams } from '@/scenes/SelectScene';
@@ -31,13 +37,15 @@ import { keyLabel, movementKeysLabel, movementLabelForCodes, onLayoutChange } fr
 import { installKeyboard } from '@/engine/input/KeyboardSource';
 import { gamepadPanel, keyBindingEditor } from '@/ui/KeyBindingEditor';
 import { MenuInput } from '@/ui/MenuInput';
+import { settingsBody } from '@/ui/SettingsPanel';
 import { DWARFS } from '@/content/dwarfs';
+import { WEAPONS } from '@/content/weapons';
 import { CLIPS, sampleClip } from '@/render/rig/Anim';
 import { DWARF_SKELETON } from '@/render/rig/Skeleton';
 import { drawCharacter } from '@/render/rig/CharacterRig';
-import { poly, roundRect, spikeStrip } from '@/render/Shapes';
 import { clearRoomFromUrl, roomIdFromUrl } from '@/net/Room';
-import { button, panel, slider, toggle } from '@/ui/Widgets';
+import { button, panel } from '@/ui/Widgets';
+import { PALETTE, displayFont, trackedText } from '@/ui/theme';
 
 type C2D = CanvasRenderingContext2D;
 
@@ -51,15 +59,8 @@ export interface HomeParams {
   error?: string;
 }
 
-const ACCENT = '#ff2e6e';
-const ACCENT_DEEP = '#b8004a';
-const ACCENT_HOT = '#ff5c8d';
-const GOLD = '#ffd23f';
-const INK = '#141019';
-const DIM = '#a2aabb';
-
-const DISPLAY = '"Arial Black", "Helvetica Neue", Impact, system-ui, sans-serif';
-const SANS = 'ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif';
+/** Below this window aspect the art is re-centred and the menu goes underneath. */
+const SPLIT_ASPECT = 1.25;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Deterministic-looking noise for the scenery. Not sim code, but a title screen
@@ -97,50 +98,6 @@ function ridgeAt(x: number, seed: number, scale: number): number {
   return sum / norm;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Canvas text
-// ─────────────────────────────────────────────────────────────────────────────
-
-function setFont(ctx: C2D, size: number, weight: number, display: boolean): void {
-  ctx.font = `${weight} ${size}px ${display ? DISPLAY : SANS}`;
-}
-
-function trackedWidth(ctx: C2D, chars: string[], tracking: number): number {
-  if (chars.length === 0) return 0;
-  let w = -tracking;
-  for (const ch of chars) w += ctx.measureText(ch).width + tracking;
-  return w;
-}
-
-/** Letter-spaced text. Canvas has no tracking, and the logo lives or dies on it. */
-function drawTracked(
-  ctx: C2D,
-  s: string,
-  cx: number,
-  y: number,
-  tracking: number,
-  fill: string | CanvasGradient,
-  stroke?: string,
-  strokeW = 0,
-): number {
-  const chars = [...s];
-  const w = trackedWidth(ctx, chars, tracking);
-  let x = cx - w * 0.5;
-  ctx.textAlign = 'left';
-  ctx.lineJoin = 'round';
-  for (const ch of chars) {
-    if (stroke && strokeW > 0) {
-      ctx.lineWidth = strokeW;
-      ctx.strokeStyle = stroke;
-      ctx.strokeText(ch, x, y);
-    }
-    ctx.fillStyle = fill;
-    ctx.fillText(ch, x, y);
-    x += ctx.measureText(ch).width + tracking;
-  }
-  return w;
-}
-
 interface Ember {
   x: number;
   y: number;
@@ -151,12 +108,62 @@ interface Ember {
   hot: boolean;
 }
 
-interface Silhouette {
+/** One dwarf in the formation, for one composition. */
+interface Placement {
   x: number;
+  /** Feet. */
+  y: number;
+  scale: number;
   facing: 1 | -1;
-  phase: number;
-  style: RigStyle;
+  /** 0 = front, 1 = middle, 2 = back: decides tint and draw order. */
+  row: 0 | 1 | 2;
 }
+
+interface Member {
+  def: DwarfDef;
+  style: RigStyle;
+  phase: number;
+  split: Placement;
+  stacked: Placement;
+}
+
+/**
+ * The formation. MALICE leads — the angriest of them, front and centre — with
+ * the others in two ranks behind. Authored against 640x360 for both layouts.
+ */
+const FORMATION: Record<string, { split: Placement; stacked: Placement }> = {
+  grumpy: {
+    split: { x: 492, y: 314, scale: 2.3, facing: -1, row: 0 },
+    stacked: { x: 320, y: 330, scale: 1.75, facing: -1, row: 0 },
+  },
+  happy: {
+    split: { x: 412, y: 290, scale: 1.85, facing: 1, row: 1 },
+    stacked: { x: 238, y: 316, scale: 1.45, facing: 1, row: 1 },
+  },
+  bashful: {
+    split: { x: 578, y: 290, scale: 1.85, facing: -1, row: 1 },
+    stacked: { x: 402, y: 316, scale: 1.45, facing: -1, row: 1 },
+  },
+  doc: {
+    split: { x: 368, y: 266, scale: 1.5, facing: 1, row: 2 },
+    stacked: { x: 92, y: 300, scale: 1.2, facing: 1, row: 2 },
+  },
+  sleepy: {
+    split: { x: 444, y: 260, scale: 1.45, facing: 1, row: 2 },
+    stacked: { x: 162, y: 302, scale: 1.2, facing: 1, row: 2 },
+  },
+  sneezy: {
+    split: { x: 540, y: 260, scale: 1.45, facing: -1, row: 2 },
+    stacked: { x: 478, y: 302, scale: 1.2, facing: -1, row: 2 },
+  },
+  dopey: {
+    split: { x: 614, y: 266, scale: 1.5, facing: -1, row: 2 },
+    stacked: { x: 548, y: 300, scale: 1.2, facing: -1, row: 2 },
+  },
+};
+
+/** Atmospheric depth: the back rank sits in the night air, the leader does not. */
+const ROW_TINT: readonly (string | undefined)[] = [undefined, '#c9c3cc', '#8f8fa3'];
 
 export class HomeScene implements Scene {
   readonly name = 'home';
@@ -183,7 +190,14 @@ export class HomeScene implements Scene {
   private readonly menu: MenuInput;
 
   private readonly embers: Ember[] = [];
-  private readonly silhouettes: Silhouette[] = [];
+  private readonly members: Member[] = [];
+
+  /**
+   * How much of the art is covered by a page that needs the middle of the
+   * screen (Settings, Controls). Eased, so the scrim slides in rather than
+   * snapping, and the logo steps back out of the way.
+   */
+  private cover = 0;
 
   /** Room the auto-join path is dialling, so Cancel knows what to hang up on. */
   private joinRoom = '';
@@ -206,26 +220,30 @@ export class HomeScene implements Scene {
     });
 
     // The film dwarfs never turn up on this screen. They already changed.
-    const n = DWARFS.length;
-    for (let i = 0; i < n; i++) {
+    for (let i = 0; i < DWARFS.length; i++) {
       const d = DWARFS[i];
-      this.silhouettes.push({
-        x: 44 + (i * (VIEW_W - 88)) / (n - 1),
-        facing: i % 2 === 0 ? 1 : -1,
-        phase: i * 17,
+      const at = FORMATION[d.id];
+      if (!at) continue;
+      this.members.push({
+        def: d,
         style: { ...d.style, outfit: 1 },
+        phase: i * 17,
+        split: at.split,
+        stacked: at.stacked,
       });
     }
+    // Back rank first, the leader last: painter's order is the formation.
+    this.members.sort((a, b) => b.split.row - a.split.row || a.split.y - b.split.y);
 
-    for (let i = 0; i < 64; i++) {
+    for (let i = 0; i < 70; i++) {
       this.embers.push({
         x: Math.random() * VIEW_W,
-        y: 240 + Math.random() * 130,
+        y: 230 + Math.random() * 140,
         vx: (Math.random() - 0.5) * 0.16,
-        vy: -0.16 - Math.random() * 0.3,
-        r: 0.5 + Math.random() * 1.2,
-        a: 0.2 + Math.random() * 0.5,
-        hot: Math.random() < 0.35,
+        vy: -0.14 - Math.random() * 0.3,
+        r: 0.5 + Math.random() * 1.1,
+        a: 0.2 + Math.random() * 0.55,
+        hot: Math.random() < 0.3,
       });
     }
   }
@@ -273,6 +291,9 @@ export class HomeScene implements Scene {
   update(_dt: number): void {
     this.frame++;
     this.updateEmbers();
+    const want = this.view === 'settings' || this.view === 'controls' || this.view === 'joining' ? 1 : 0;
+    this.cover += (want - this.cover) * 0.2;
+    if (Math.abs(want - this.cover) < 0.002) this.cover = want;
     this.menu.poll();
   }
 
@@ -280,16 +301,25 @@ export class HomeScene implements Scene {
     const r = this.game.renderer;
     const ctx = r.ctx;
     const t = this.frame + alpha;
+    const split = this.isSplit();
 
     r.begin();
-    r.clear('#05060b');
-    this.drawSky(ctx, t);
-    this.drawSearchlights(ctx, t);
+    r.clear(PALETTE.coal);
+    this.drawSky(ctx, t, split);
+    this.drawSearchlights(ctx, t, split);
     this.drawRidges(ctx, t);
-    this.drawSilhouettes(ctx, t);
+    this.drawPlateau(ctx, split);
+    this.drawBacklight(ctx, t, split);
+    this.drawFormation(ctx, t, split);
     this.drawEmbers(ctx);
-    this.drawScrim(ctx);
-    this.drawLogo(ctx, t);
+    this.drawScrim(ctx, split);
+    this.drawLogo(ctx, t, split);
+    if (this.cover > 0.002) {
+      ctx.globalAlpha = 0.72 * this.cover;
+      ctx.fillStyle = PALETTE.coal;
+      ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+      ctx.globalAlpha = 1;
+    }
     r.end();
   }
 
@@ -300,53 +330,69 @@ export class HomeScene implements Scene {
     this.menu.onKey(e);
   }
 
+  /**
+   * Wide enough for the art and the menu to sit side by side. Matches the
+   * `max-aspect-ratio: 5/4` breakpoint in styles.css, so the canvas and the DOM
+   * always agree about which layout this is.
+   */
+  private isSplit(): boolean {
+    if (typeof window === 'undefined') return true;
+    const w = window.innerWidth || VIEW_W;
+    const h = window.innerHeight || VIEW_H;
+    return w / h > SPLIT_ASPECT;
+  }
+
   // ── Backdrop ───────────────────────────────────────────────────────────────
 
-  private drawSky(ctx: C2D, t: number): void {
+  private drawSky(ctx: C2D, t: number, split: boolean): void {
+    // Cold at the top, a banked ember glow along the horizon: night on the
+    // mountain, and something burning on the far side of it.
     const g = ctx.createLinearGradient(0, 0, 0, VIEW_H);
-    g.addColorStop(0, '#05060b');
-    g.addColorStop(0.42, '#141033');
-    g.addColorStop(0.72, '#3a1140');
-    g.addColorStop(1, '#0a0710');
+    g.addColorStop(0, '#07080d');
+    g.addColorStop(0.38, '#10131d');
+    g.addColorStop(0.6, '#231a1c');
+    g.addColorStop(0.72, '#3a2014');
+    g.addColorStop(1, '#120c0a');
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, VIEW_W, VIEW_H);
 
     // Stars. Fixed positions, twinkle only.
-    for (let i = 0; i < 110; i++) {
+    for (let i = 0; i < 120; i++) {
       const x = hash01(i * 3 + 1) * VIEW_W;
-      const y = hash01(i * 3 + 2) * 190;
+      const y = hash01(i * 3 + 2) * 180;
       const tw = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(t * 0.03 + i * 1.7));
       const s = hash01(i * 3 + 3);
-      ctx.globalAlpha = tw * (0.25 + s * 0.55);
-      ctx.fillStyle = s > 0.86 ? GOLD : '#dfe6ff';
-      const r = s > 0.86 ? 1.3 : 0.8;
+      ctx.globalAlpha = tw * (0.2 + s * 0.5) * (1 - y / 230);
+      ctx.fillStyle = s > 0.9 ? PALETTE.lampHot : '#e7e9f2';
+      const r = s > 0.9 ? 1.2 : 0.75;
       ctx.fillRect(x, y, r, r);
     }
     ctx.globalAlpha = 1;
 
-    // Moon, and the halo it wears in cold air.
-    const mx = 528;
-    const my = 56;
-    const halo = ctx.createRadialGradient(mx, my, 6, mx, my, 54);
-    halo.addColorStop(0, 'rgba(226,232,255,0.30)');
+    // Moon, and the halo it wears in cold air. Upper right, so it rims the
+    // formation from behind its right shoulder.
+    const mx = split ? 586 : 548;
+    const my = split ? 54 : 48;
+    const halo = ctx.createRadialGradient(mx, my, 6, mx, my, 70);
+    halo.addColorStop(0, 'rgba(226,232,255,0.26)');
     halo.addColorStop(1, 'rgba(226,232,255,0)');
     ctx.fillStyle = halo;
     ctx.beginPath();
-    ctx.arc(mx, my, 54, 0, TAU);
+    ctx.arc(mx, my, 70, 0, TAU);
     ctx.fill();
 
-    ctx.fillStyle = '#e6ebf7';
+    ctx.fillStyle = '#ece9e1';
     ctx.beginPath();
-    ctx.arc(mx, my, 17, 0, TAU);
+    ctx.arc(mx, my, 16, 0, TAU);
     ctx.fill();
-    ctx.fillStyle = 'rgba(150,160,190,0.5)';
+    ctx.fillStyle = 'rgba(160,160,175,0.45)';
     for (let i = 0; i < 5; i++) {
       const a = i * 1.9;
       ctx.beginPath();
       ctx.arc(
-        mx + Math.cos(a) * (4 + hash01(i + 41) * 8),
-        my + Math.sin(a) * (4 + hash01(i + 77) * 8),
-        1.2 + hash01(i + 13) * 2.4,
+        mx + Math.cos(a) * (4 + hash01(i + 41) * 7),
+        my + Math.sin(a) * (4 + hash01(i + 77) * 7),
+        1.1 + hash01(i + 13) * 2.2,
         0,
         TAU,
       );
@@ -354,24 +400,28 @@ export class HomeScene implements Scene {
     }
   }
 
-  private drawSearchlights(ctx: C2D, t: number): void {
+  private drawSearchlights(ctx: C2D, t: number, split: boolean): void {
     if (this.game.save.settings.reducedMotion) return;
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    const beams = [
-      { x: 84, phase: 0, speed: 0.0062, spread: 0.62, len: 330, tint: '255,210,120' },
-      { x: 322, phase: 2.1, speed: 0.0048, spread: 0.5, len: 300, tint: '255,120,170' },
-      { x: 566, phase: 4.4, speed: 0.0071, spread: 0.7, len: 350, tint: '150,210,255' },
-    ];
+    const beams = split
+      ? [
+          { x: 392, phase: 0, speed: 0.0058, spread: 0.42, len: 320, tint: '255,190,90' },
+          { x: 600, phase: 2.6, speed: 0.0049, spread: 0.38, len: 330, tint: '170,200,255' },
+        ]
+      : [
+          { x: 120, phase: 0, speed: 0.0058, spread: 0.5, len: 320, tint: '255,190,90' },
+          { x: 520, phase: 2.6, speed: 0.0049, spread: 0.5, len: 330, tint: '170,200,255' },
+        ];
     for (const b of beams) {
-      const base = 276;
+      const base = 250;
       const ang = -Math.PI / 2 + Math.sin(t * b.speed + b.phase) * b.spread;
-      const half = 0.052;
+      const half = 0.06;
       const ex = b.x + Math.cos(ang) * b.len;
       const ey = base + Math.sin(ang) * b.len;
       const gx = ctx.createLinearGradient(b.x, base, ex, ey);
-      gx.addColorStop(0, `rgba(${b.tint},0.20)`);
-      gx.addColorStop(0.45, `rgba(${b.tint},0.09)`);
+      gx.addColorStop(0, `rgba(${b.tint},0.18)`);
+      gx.addColorStop(0.5, `rgba(${b.tint},0.07)`);
       gx.addColorStop(1, `rgba(${b.tint},0)`);
       ctx.fillStyle = gx;
       ctx.beginPath();
@@ -386,9 +436,9 @@ export class HomeScene implements Scene {
 
   private drawRidges(ctx: C2D, t: number): void {
     const layers = [
-      { base: 196, amp: 62, scale: 0.0068, seed: 3, drift: 0.045, fill: '#1b2140' },
-      { base: 224, amp: 46, scale: 0.0104, seed: 11, drift: 0.085, fill: '#131734' },
-      { base: 252, amp: 32, scale: 0.0165, seed: 23, drift: 0.15, fill: '#0c0f22' },
+      { base: 200, amp: 72, scale: 0.0062, seed: 3, drift: 0.04, fill: '#1a1c26', rim: 'rgba(210,220,255,0.16)' },
+      { base: 226, amp: 50, scale: 0.0098, seed: 11, drift: 0.08, fill: '#14141b', rim: 'rgba(210,220,255,0.10)' },
+      { base: 248, amp: 30, scale: 0.016, seed: 23, drift: 0.14, fill: '#0f0e12', rim: 'rgba(255,190,110,0.10)' },
     ];
 
     for (const l of layers) {
@@ -402,33 +452,94 @@ export class HomeScene implements Scene {
       ctx.closePath();
       ctx.fillStyle = l.fill;
       ctx.fill();
-
-      // A cold rim on the moonward face of each ridge.
-      ctx.strokeStyle = 'rgba(180,200,255,0.10)';
+      ctx.strokeStyle = l.rim;
       ctx.lineWidth = 1;
       ctx.stroke();
     }
 
-    // The plateau the dwarfs are standing on.
-    ctx.fillStyle = '#07090f';
-    ctx.fillRect(0, 298, VIEW_W, VIEW_H - 298);
-    ctx.strokeStyle = 'rgba(255,46,110,0.22)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(0, 298.5);
-    ctx.lineTo(VIEW_W, 298.5);
-    ctx.stroke();
   }
 
-  private drawSilhouettes(ctx: C2D, t: number): void {
+  /** The ground the formation stands on: a wide, dark plateau with a lit lip. */
+  private drawPlateau(ctx: C2D, split: boolean): void {
+    const top = split ? 246 : 284;
+    const g = ctx.createLinearGradient(0, top, 0, VIEW_H);
+    g.addColorStop(0, '#1b1512');
+    g.addColorStop(0.35, '#120e0c');
+    g.addColorStop(1, '#0a0807');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(0, top + 8);
+    for (let x = 0; x <= VIEW_W; x += 16) {
+      ctx.lineTo(x, top + Math.sin(x * 0.045) * 2 + hash01(x) * 3);
+    }
+    ctx.lineTo(VIEW_W, VIEW_H);
+    ctx.lineTo(0, VIEW_H);
+    ctx.closePath();
+    ctx.fill();
+    // The lip catches the ember glow.
+    ctx.strokeStyle = 'rgba(255,170,80,0.22)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // A few stones and drifts so the plane has scale.
+    for (let i = 0; i < 22; i++) {
+      const x = hash01(i * 7 + 3) * VIEW_W;
+      const y = top + 10 + hash01(i * 7 + 5) * (VIEW_H - top - 14);
+      const w = 4 + hash01(i * 7 + 9) * 14 * (y / VIEW_H);
+      ctx.fillStyle = hash01(i * 11) > 0.6 ? 'rgba(220,226,240,0.06)' : 'rgba(0,0,0,0.35)';
+      ctx.beginPath();
+      ctx.ellipse(x, y, w, w * 0.22, 0, 0, TAU);
+      ctx.fill();
+    }
+  }
+
+  /** The searchlight behind the gang: a warm pool they stand in front of. */
+  private drawBacklight(ctx: C2D, t: number, split: boolean): void {
+    const cx = split ? 492 : 320;
+    const cy = split ? 238 : 270;
+    const breathe = this.game.save.settings.reducedMotion ? 1 : 1 + 0.04 * Math.sin(t * 0.02);
+    const r = (split ? 190 : 230) * breathe;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const g = ctx.createRadialGradient(cx, cy, 8, cx, cy, r);
+    g.addColorStop(0, 'rgba(255,170,60,0.30)');
+    g.addColorStop(0.4, 'rgba(255,120,40,0.10)');
+    g.addColorStop(1, 'rgba(255,120,40,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+    ctx.restore();
+  }
+
+  private drawFormation(ctx: C2D, t: number, split: boolean): void {
     const idle = CLIPS['idle'];
+    const pose = CLIPS['dress_pose'] ?? idle;
     if (!idle) return;
-    for (const s of this.silhouettes) {
-      const pose = sampleClip(idle, Math.floor(t * 0.72) + s.phase);
-      drawCharacter(ctx, s.style, pose, DWARF_SKELETON, s.x, 300, s.facing, {
-        tint: '#1b1630',
-        alpha: 0.96,
-        scale: 1.08,
+    const reduced = this.game.save.settings.reducedMotion;
+    const order = split
+      ? this.members
+      : this.members.slice().sort((a, b) => b.stacked.row - a.stacked.row || a.stacked.y - b.stacked.y);
+
+    for (const m of order) {
+      const at = split ? m.split : m.stacked;
+      const lead = at.row === 0;
+      const clip = lead && pose ? pose : idle;
+      // The leader holds the end of his transformation pose, breathing; the rest
+      // idle, each on their own beat so the gang never moves as one.
+      const f = lead ? 60 + (reduced ? 0 : Math.sin(t * 0.03) * 6) : Math.floor(t * 0.7) + m.phase;
+      const p = sampleClip(clip, f);
+      const weapon = WEAPONS[m.def.signatureWeapon] ?? null;
+
+      // Contact shadow first, so the plateau knows they are standing on it.
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      ctx.beginPath();
+      ctx.ellipse(at.x, at.y + 1, 15 * at.scale, 3.4 * at.scale, 0, 0, TAU);
+      ctx.fill();
+
+      // The rig brings its own cool rim light; the rank tint does the depth.
+      drawCharacter(ctx, m.style, p, DWARF_SKELETON, at.x, at.y, at.facing, {
+        weapon,
+        tint: ROW_TINT[at.row],
+        scale: at.scale,
       });
     }
   }
@@ -439,11 +550,11 @@ export class HomeScene implements Scene {
       e.y += e.vy;
       e.vx += (Math.random() - 0.5) * 0.02;
       e.vx = clamp(e.vx, -0.3, 0.3);
-      if (e.y < 150 || e.x < -6 || e.x > VIEW_W + 6) {
+      if (e.y < 140 || e.x < -6 || e.x > VIEW_W + 6) {
         e.x = Math.random() * VIEW_W;
         e.y = 300 + Math.random() * 60;
         e.vx = (Math.random() - 0.5) * 0.16;
-        e.vy = -0.16 - Math.random() * 0.3;
+        e.vy = -0.14 - Math.random() * 0.3;
       }
     }
   }
@@ -452,9 +563,9 @@ export class HomeScene implements Scene {
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
     for (const e of this.embers) {
-      const fade = clamp((e.y - 150) / 90, 0, 1);
+      const fade = clamp((e.y - 140) / 100, 0, 1);
       ctx.globalAlpha = e.a * fade;
-      ctx.fillStyle = e.hot ? ACCENT_HOT : GOLD;
+      ctx.fillStyle = e.hot ? PALETTE.bloodHot : PALETTE.lampHot;
       ctx.beginPath();
       ctx.arc(e.x, e.y, e.r, 0, TAU);
       ctx.fill();
@@ -462,70 +573,131 @@ export class HomeScene implements Scene {
     ctx.restore();
   }
 
-  private drawScrim(ctx: C2D): void {
-    const g = ctx.createLinearGradient(0, 214, 0, VIEW_H);
-    g.addColorStop(0, 'rgba(4,5,8,0)');
-    g.addColorStop(0.55, 'rgba(4,5,8,0.66)');
-    g.addColorStop(1, 'rgba(4,5,8,0.92)');
+  /**
+   * Shade under the menu. Split: a wash from the left edge, so the list reads
+   * over the sky without a box around it. Stacked: a wash along the bottom.
+   */
+  private drawScrim(ctx: C2D, split: boolean): void {
+    if (split) {
+      const g = ctx.createLinearGradient(0, 0, VIEW_W * 0.62, 0);
+      g.addColorStop(0, 'rgba(10,8,7,0.82)');
+      g.addColorStop(0.55, 'rgba(10,8,7,0.45)');
+      g.addColorStop(1, 'rgba(10,8,7,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+      return;
+    }
+    const g = ctx.createLinearGradient(0, 250, 0, VIEW_H);
+    g.addColorStop(0, 'rgba(10,8,7,0)');
+    g.addColorStop(1, 'rgba(10,8,7,0.6)');
     ctx.fillStyle = g;
-    ctx.fillRect(0, 214, VIEW_W, VIEW_H - 214);
+    ctx.fillRect(0, 250, VIEW_W, VIEW_H - 250);
   }
 
   // ── The logo ───────────────────────────────────────────────────────────────
 
-  private drawLogo(ctx: C2D, t: number): void {
+  /**
+   * MOUNTAIN, small and tracked out like a stencil on a crate; FIGHTERS, huge,
+   * italic and leaning into the fight, in lamp gold with a blood-red extrusion;
+   * a studded strap under it, the same studs as the jackets.
+   */
+  private drawLogo(ctx: C2D, t: number, split: boolean): void {
     const reduced = this.game.save.settings.reducedMotion;
-    const bob = reduced ? 0 : Math.sin(t * 0.024) * 2.2;
-    const cx = VIEW_W * 0.5;
-    const cy = 82 + bob;
+    const settle = reduced ? 1 : clamp(this.frame / 26, 0, 1);
+    const ease = 1 - Math.pow(1 - settle, 3);
+    const cover = this.cover;
 
     ctx.save();
+    ctx.globalAlpha = 1 - cover * 0.85;
     ctx.textBaseline = 'alphabetic';
 
-    // Mountain badge behind the type: three peaks, snow on the big one.
-    poly(
-      ctx,
-      [cx - 168, cy + 46, cx - 96, cy - 24, cx - 44, cy + 46],
-      '#1a2038',
-      'rgba(255,46,110,0.20)',
-      1.4,
-    );
-    poly(
-      ctx,
-      [cx + 44, cy + 46, cx + 104, cy - 30, cx + 172, cy + 46],
-      '#1a2038',
-      'rgba(255,46,110,0.20)',
-      1.4,
-    );
-    poly(ctx, [cx - 118, cy + 46, cx, cy - 62, cx + 118, cy + 46], '#232a48', ACCENT_DEEP, 1.6);
-    poly(ctx, [cx - 30, cy - 32, cx, cy - 62, cx + 30, cy - 32, cx + 12, cy - 26, cx - 8, cy - 34],
-      '#e8ecf8', 'none', 0);
+    const big = split ? 66 : 58;
+    ctx.font = displayFont(big, 900, true);
+    const fw = ctx.measureText('FIGHTERS').width;
+    const x0 = split ? 34 : VIEW_W * 0.5 - fw * 0.5;
+    const yTop = split ? 62 : 52;
+    const slide = (1 - ease) * -24;
 
     // MOUNTAIN
-    setFont(ctx, 21, 900, true);
-    drawTracked(ctx, 'MOUNTAIN', cx, cy - 8, 7, '#eceff6', INK, 5);
+    ctx.font = displayFont(split ? 19 : 17, 800);
+    trackedText(ctx, 'MOUNTAIN', x0 + 6 + slide * 0.5, yTop, split ? 9.4 : 8.6, PALETTE.bone);
 
-    // FIGHTERS — the loud half.
-    setFont(ctx, 47, 900, true);
-    drawTracked(ctx, 'FIGHTERS', cx + 3, cy + 38, 2.5, ACCENT_DEEP);
-    const grad = ctx.createLinearGradient(0, cy - 4, 0, cy + 38);
-    grad.addColorStop(0, '#ffe6ee');
-    grad.addColorStop(0.5, ACCENT_HOT);
-    grad.addColorStop(1, ACCENT);
-    drawTracked(ctx, 'FIGHTERS', cx, cy + 35, 2.5, grad, INK, 6);
+    // FIGHTERS: extrusion, outline, gradient fill.
+    const fy = yTop + big * 0.86;
+    const fx = x0 + slide;
+    ctx.font = displayFont(big, 900, true);
+    ctx.textAlign = 'left';
+    ctx.lineJoin = 'round';
+    for (let i = 6; i >= 1; i--) {
+      ctx.fillStyle = i > 3 ? PALETTE.ink : PALETTE.bloodDeep;
+      ctx.fillText('FIGHTERS', fx + i * 0.7, fy + i * 0.9);
+    }
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = PALETTE.ink;
+    ctx.strokeText('FIGHTERS', fx, fy);
+    const g = ctx.createLinearGradient(0, fy - big * 0.72, 0, fy);
+    g.addColorStop(0, '#ffe7a6');
+    g.addColorStop(0.45, PALETTE.lampHot);
+    g.addColorStop(0.55, PALETTE.lamp);
+    g.addColorStop(1, '#e8780f');
+    ctx.fillStyle = g;
+    ctx.fillText('FIGHTERS', fx, fy);
 
-    // Studded bar. The same studs that end up on the jackets.
-    spikeStrip(ctx, cx - 146, cy + 47, cx + 146, cy + 47, 16, 3.6, GOLD);
-    roundRect(ctx, cx - 150, cy + 44, 300, 3, 1.5, ACCENT_DEEP, 'none', 0);
+    // A glint that crosses the word every few seconds.
+    if (!reduced) {
+      const cycle = (t % 420) / 420;
+      if (cycle < 0.18) {
+        const gx = fx - 40 + (fw + 80) * (cycle / 0.18);
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(fx - 6, fy - big, fw + 16, big + 6);
+        ctx.clip();
+        ctx.globalCompositeOperation = 'source-atop';
+        const sh = ctx.createLinearGradient(gx - 18, 0, gx + 18, 0);
+        sh.addColorStop(0, 'rgba(255,255,255,0)');
+        sh.addColorStop(0.5, 'rgba(255,255,255,0.55)');
+        sh.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.fillStyle = sh;
+        ctx.font = displayFont(big, 900, true);
+        ctx.fillText('FIGHTERS', fx, fy);
+        ctx.restore();
+      }
+    }
 
-    setFont(ctx, 9, 700, false);
-    drawTracked(
+    // The studded strap.
+    const sy = fy + 9;
+    ctx.fillStyle = PALETTE.ink;
+    ctx.beginPath();
+    ctx.moveTo(fx + 4, sy - 3.5);
+    ctx.lineTo(fx + fw - 2, sy - 3.5);
+    ctx.lineTo(fx + fw - 6, sy + 3.5);
+    ctx.lineTo(fx, sy + 3.5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = PALETTE.blood;
+    ctx.fillRect(fx + 3, sy - 1.2, fw - 8, 2.4);
+    for (let x = fx + 9; x < fx + fw - 8; x += 13) {
+      ctx.fillStyle = PALETTE.ink;
+      ctx.beginPath();
+      ctx.arc(x, sy, 2.6, 0, TAU);
+      ctx.fill();
+      ctx.fillStyle = PALETTE.lampHot;
+      ctx.beginPath();
+      ctx.arc(x, sy, 1.8, 0, TAU);
+      ctx.fill();
+    }
+
+    // Tagline.
+    ctx.font = displayFont(split ? 9 : 8.5, 600);
+    const tag = 'SEVEN DWARFS  ·  ONE BILLIONAIRE  ·  ONE VERY BAD IDEA';
+    trackedText(
       ctx,
-      'SEVEN DWARFS  ·  ONE BILLIONAIRE  ·  ONE VERY BAD IDEA',
-      cx,
-      cy + 66,
-      2.4,
-      DIM,
+      tag,
+      split ? fx + 2 : VIEW_W * 0.5,
+      sy + 18,
+      1.9,
+      PALETTE.boneDim,
+      split ? 'left' : 'center',
     );
 
     ctx.restore();
@@ -568,179 +740,145 @@ export class HomeScene implements Scene {
     this.root = null;
   }
 
-  /** The menu pages hug the bottom so the logo keeps the top of the screen. */
-  private lowColumn(): HTMLElement {
-    const el = document.createElement('div');
-    el.className = 'stack';
-    el.style.alignSelf = 'end';
-    el.style.width = 'min(360px, 100%)';
-    el.style.gap = '9px';
-    return el;
+  /** The left-hand column the title's menus live in. See .ui-view--home. */
+  private column(): { view: HTMLElement; list: HTMLElement } {
+    const view = document.createElement('nav');
+    view.className = 'ui-view--home';
+    view.setAttribute('aria-label', 'Main menu');
+    if (this.notice) view.appendChild(this.noticeEl(this.notice));
+    const list = document.createElement('div');
+    list.className = 'menu';
+    view.appendChild(list);
+    return { view, list };
+  }
+
+  /**
+   * The keys that drive this menu, as keycaps. Shown only when a keyboard is a
+   * plausible thing to be holding — on a phone it is noise.
+   */
+  private keysLine(items: readonly [string[], string][]): HTMLElement {
+    const line = document.createElement('p');
+    line.className = 'menu__keys';
+    line.setAttribute('aria-hidden', 'true');
+    if (coarsePointer()) line.hidden = true;
+    for (const [keys, verb] of items) {
+      const span = document.createElement('span');
+      for (const k of keys) {
+        const kbd = document.createElement('kbd');
+        kbd.textContent = k;
+        span.appendChild(kbd);
+      }
+      span.appendChild(document.createTextNode(verb));
+      line.appendChild(span);
+    }
+    return line;
   }
 
   private buildMenu(): HTMLElement {
-    const col = this.lowColumn();
-    if (this.notice) col.appendChild(this.noticeEl(this.notice));
-
+    const { view, list } = this.column();
     const save = this.game.save;
-    col.appendChild(
-      button('New Game', () => this.startGame(1), {
-        variant: 'filled',
-        wide: true,
-        autofocus: true,
-        icon: '⛏',
-      }),
-    );
+    const resumable = save.progress > 1;
 
-    if (save.progress > 1) {
-      col.appendChild(
-        button(`Continue — Map ${save.progress}`, () => this.startGame(save.progress), {
-          variant: 'tonal',
+    // With a run in progress, carrying on is the likeliest thing anybody came
+    // back to do, so it is first and it is where focus lands.
+    if (resumable) {
+      list.appendChild(
+        button(`Continue · Map ${save.progress}`, () => this.startGame(save.progress), {
+          variant: 'filled',
           wide: true,
-          icon: '▶',
-        }),
-      );
-      // The wall of places you have been. Only worth offering once there is
-      // something on it, which is why it appears with the Continue button.
-      col.appendChild(
-        button('Map Gallery', () => this.game.setScene('gallery', { mapIndex: save.progress }), {
-          variant: 'outlined',
-          wide: true,
-          icon: '▦',
+          autofocus: true,
         }),
       );
     }
-
-    col.appendChild(
-      button('Multiplayer', () => this.go('multiplayer'), {
-        variant: 'outlined',
+    list.appendChild(
+      button('New game', () => this.startGame(1), {
+        variant: resumable ? 'tonal' : 'filled',
         wide: true,
-        icon: '⚔',
+        autofocus: !resumable,
       }),
     );
-    col.appendChild(
-      button('Settings', () => this.go('settings'), { variant: 'outlined', wide: true, icon: '⚙' }),
+    list.appendChild(
+      button('Multiplayer', () => this.go('multiplayer'), { variant: 'outlined', wide: true }),
     );
-    col.appendChild(
-      button('Controls', () => this.go('controls'), { variant: 'outlined', wide: true, icon: '⌨' }),
-    );
+    if (resumable) {
+      // The wall of places you have been. Only worth offering once there is
+      // something on it.
+      list.appendChild(
+        button('Map gallery', () => this.game.setScene('gallery', { mapIndex: save.progress }), {
+          variant: 'outlined',
+          wide: true,
+        }),
+      );
+    }
+    const rule = document.createElement('div');
+    rule.className = 'menu__rule';
+    list.appendChild(rule);
+    list.appendChild(button('Settings', () => this.go('settings'), { variant: 'outlined', wide: true }));
+    list.appendChild(button('Controls', () => this.go('controls'), { variant: 'outlined', wide: true }));
 
-    const hint = document.createElement('p');
-    hint.className = 'hint';
-    hint.style.textAlign = 'center';
-    hint.textContent = 'Arrows or stick to move · Enter or A to choose';
-    col.appendChild(hint);
-    return col;
+    view.appendChild(
+      this.keysLine([
+        [['↑', '↓'], 'Move'],
+        [['Enter'], 'Select'],
+      ]),
+    );
+    return view;
   }
 
   private buildMultiplayer(): HTMLElement {
-    const col = this.lowColumn();
-    if (this.notice) col.appendChild(this.noticeEl(this.notice));
+    const { view, list } = this.column();
 
-    col.appendChild(
-      button('Invite a Friend', () => this.hostRoom(), {
+    list.appendChild(
+      button('Invite a friend', () => this.hostRoom(), {
         variant: 'filled',
         wide: true,
         autofocus: true,
-        icon: '🔗',
         title: 'Opens a room and gives you a link to send. They click it and they are in.',
       }),
     );
-
-    const label = document.createElement('p');
-    label.className = 'hint';
-    label.style.textAlign = 'center';
-    label.style.margin = '4px 0 0';
-    // Whatever is bound right now, named the way this keyboard names it. A
-    // French player is told ZQSD because that is what is under their fingers.
-    label.textContent =
-      `Or share this keyboard and a few gamepads — player one on ${this.moveKeys(0)} ` +
-      `and ${this.keyFor(0, Btn.Light)}/${this.keyFor(0, Btn.Heavy)}, player two on ` +
-      `${this.moveKeys(1)} and the numpad:`;
-    col.appendChild(label);
-
+    const rule = document.createElement('div');
+    rule.className = 'menu__rule';
+    list.appendChild(rule);
     for (let n = 2; n <= MAX_LOCAL_PLAYERS; n++) {
-      col.appendChild(
-        button(`Local — ${n} Players`, () => this.startGame(1, n), {
+      list.appendChild(
+        button(`Same screen · ${n} players`, () => this.startGame(1, n), {
           variant: 'outlined',
           wide: true,
         }),
       );
     }
+    list.appendChild(button('Back', () => this.go('menu'), { variant: 'text', wide: true }));
 
-    col.appendChild(button('Back', () => this.go('menu'), { variant: 'text', wide: true }));
-    return col;
+    const label = document.createElement('p');
+    label.className = 'hint';
+    // Whatever is bound right now, named the way this keyboard names it. A
+    // French player is told ZQSD because that is what is under their fingers.
+    label.textContent =
+      `Online: send the link, they click it, they are in. Same screen: player one on ` +
+      `${this.moveKeys(0)} + ${this.keyFor(0, Btn.Light)}/${this.keyFor(0, Btn.Heavy)}, player two on ` +
+      `${this.moveKeys(1)} + the numpad, players three and four on gamepads.`;
+    view.appendChild(label);
+    return view;
   }
 
   private buildSettings(): HTMLElement {
-    const s = this.game.save.settings;
-    const body = document.createElement('div');
-    body.className = 'stack';
-
-    body.appendChild(
-      slider('Master volume', 0, 1, s.masterVolume, (v) => this.patch({ masterVolume: v })),
-    );
-    body.appendChild(slider('Effects', 0, 1, s.sfxVolume, (v) => this.patch({ sfxVolume: v })));
-    body.appendChild(slider('Music', 0, 1, s.musicVolume, (v) => this.patch({ musicVolume: v })));
-    body.appendChild(
-      slider('Screen shake', 0, 2, s.screenShake, (v) => this.patch({ screenShake: v }), {
-        step: 0.1,
-        format: (v) => `${Math.round(v * 100)}%`,
-        help: 'There is a great deal of screen shake. Turn it down if you like.',
-      }),
-    );
-
-    body.appendChild(
-      toggle('Reduced motion', s.reducedMotion, (v) => this.patch({ reducedMotion: v }), {
-        help: 'Calms the flashes, the shake and the particles. The fights still hurt.',
-      }),
-    );
-    body.appendChild(
-      toggle('Show hitboxes', s.showHitboxes, (v) => this.patch({ showHitboxes: v }), {
-        help: 'For people who want to argue about frame data.',
-      }),
-    );
-
-    const diffLabel = document.createElement('div');
-    diffLabel.className = 'field__label';
-    diffLabel.textContent = 'Difficulty';
-
-    const row = document.createElement('div');
-    row.className = 'row';
-    const modes: { id: Settings['difficulty']; label: string; help: string }[] = [
-      { id: 'easy', label: 'Easy', help: 'The guards are having an off day.' },
-      { id: 'normal', label: 'Normal', help: 'A fair fight, which is more than he deserves.' },
-      { id: 'hard', label: 'Hard', help: 'They have read your file.' },
-      { id: 'musk', label: 'Musk', help: 'Unpaid overtime, and they all block.' },
-    ];
-    for (const m of modes) {
-      const b = button(
-        m.label,
-        () => {
-          this.patch({ difficulty: m.id });
-          this.show('settings');
-        },
-        {
-          variant: s.difficulty === m.id ? 'filled' : 'outlined',
-          title: m.help,
-          ariaLabel: `Difficulty: ${m.label}. ${m.help}`,
-        },
-      );
-      b.setAttribute('aria-pressed', String(s.difficulty === m.id));
-      row.appendChild(b);
-    }
-
-    const diffField = document.createElement('div');
-    diffField.className = 'field';
-    diffField.append(diffLabel, row);
-    body.appendChild(diffField);
+    const body = settingsBody({
+      settings: this.game.save.settings,
+      // Systems hold a live reference to the same Settings object; applySettings
+      // only has to push the DOM-side ones out and flush the save.
+      commit: () => this.game.applySettings(),
+      audio: this.game.audio,
+    });
 
     const view = document.createElement('div');
     view.className = 'stack';
+    view.style.width = 'min(680px, 100%)';
+    view.style.marginInline = 'auto';
     view.appendChild(panel('Settings', body));
-    view.appendChild(
-      button('Back', () => this.go('menu'), { variant: 'tonal', wide: true, autofocus: true }),
-    );
+    const foot = document.createElement('div');
+    foot.className = 'row row--end';
+    foot.appendChild(button('Back', () => this.go('menu'), { variant: 'filled', autofocus: true }));
+    view.appendChild(foot);
     return view;
   }
 
@@ -748,10 +886,8 @@ export class HomeScene implements Scene {
     const intro = document.createElement('p');
     intro.className = 'hint';
     intro.textContent =
-      'Keys are stored by where they sit on the board, not by the letter stamped on them, so the ' +
-      'movement diamond comes out as ZQSD on an AZERTY keyboard and WASD on a QWERTY one without ' +
-      'anybody configuring anything. The names below are read off your own keyboard. Rebind ' +
-      'whatever you like — it takes effect immediately, mid-fight included.';
+      'Keys go by where they sit, not by what is printed on them — ZQSD on AZERTY, WASD on ' +
+      'QWERTY, nothing to set up. Pick a box and press a key to rebind it; it applies at once.';
 
     const editor = keyBindingEditor({
       bindings: this.game.save.settings.bindings,
@@ -770,27 +906,25 @@ export class HomeScene implements Scene {
     notes.textContent = this.controlsNoteText();
     this.controlsNote = notes;
 
-    // The pad table below lists the right trigger, because Super is a move like
-    // any other. Pick up / Use is the one action whose pad control the table
-    // cannot show you a letter for until something is plugged in, and it is
-    // also the newest, so it gets said in words as well.
     const padNote = document.createElement('p');
     padNote.className = 'hint';
     padNote.textContent =
-      'Pick up, swap and get on things with the LEFT TRIGGER — your pad calls it LT, ZL or L2 ' +
-      'depending on who made it, and the table below names it the way yours does. The right ' +
-      'trigger is your super.';
+      'Pick up, swap and ride on the left trigger; super on the right one. The table names ' +
+      'them the way your pad does.';
 
     const view = document.createElement('div');
     view.className = 'stack';
-    view.appendChild(panel('Controls', intro, editor, notes));
+    view.appendChild(panel('Keyboard', intro, editor, notes));
     // The same rule, printed for the other kind of controller: the pad panel
     // reads whatever is plugged in and names its buttons the way that pad names
     // them, and repaints itself when one is plugged in or pulled out.
     view.appendChild(panel('Gamepad', padNote, gamepadPanel()));
     // No autofocus here, unlike the other pages: the point of this one is the
     // editor, so focus lands at the top of it rather than on the way out.
-    view.appendChild(button('Back', () => this.go('menu'), { variant: 'tonal', wide: true }));
+    const foot = document.createElement('div');
+    foot.className = 'row row--end';
+    foot.appendChild(button('Back', () => this.go('menu'), { variant: 'filled' }));
+    view.appendChild(foot);
     return view;
   }
 
@@ -809,7 +943,7 @@ export class HomeScene implements Scene {
     wait.append(dot, txt);
 
     const cancel = button('Cancel', () => this.cancelJoin(), {
-      variant: 'text',
+      variant: 'outlined',
       wide: true,
       autofocus: true,
     });
@@ -894,14 +1028,6 @@ export class HomeScene implements Scene {
   }
 
   // ── Menu behaviour ─────────────────────────────────────────────────────────
-
-  private patch(part: Partial<Settings>): void {
-    Object.assign(this.game.save.settings, part);
-    // Systems hold a live reference to the same Settings object; applySettings
-    // only has to push the DOM-side ones out and flush the save.
-    this.game.applySettings();
-    this.game.audio.play('ui_move', { gain: 0.5 });
-  }
 
   private go(view: MenuView): void {
     this.notice = '';
@@ -990,3 +1116,10 @@ export class HomeScene implements Scene {
   };
 }
 
+
+/** A phone or a tablet: no keyboard to name keys on, no hover to lean on. */
+function coarsePointer(): boolean {
+  return typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    ? window.matchMedia('(pointer: coarse)').matches
+    : false;
+}

@@ -40,16 +40,25 @@ import {
   Z_PERSPECTIVE,
   Z_SCALE,
 } from '@/core/constants';
-import { ellipse, poly, roundRect } from '@/render/Shapes';
+import { poly } from '@/render/Shapes';
 import { CLIPS, sampleClip } from '@/render/rig/Anim';
 import { resolvePose } from '@/render/rig/Skeleton';
 import { drawCharacter } from '@/render/rig/CharacterRig';
 import { codeForBit, defaultBindingsFor } from '@/engine/input/Bindings';
 import { keyLabel } from '@/engine/input/Layout';
 import { connectedGamepads, padProfile } from '@/engine/input/GamepadSource';
+import { touchActive } from '@/engine/input/TouchControls';
 import { loadSave } from '@/engine/Save';
 import { DWARFS } from '@/content/dwarfs';
 import { BOSSES } from '@/content/bosses';
+import {
+  PALETTE,
+  PLAYER_COLORS,
+  displayFont,
+  inkText,
+  keycap,
+  slab,
+} from '@/ui/theme';
 
 type C2D = CanvasRenderingContext2D;
 
@@ -73,47 +82,61 @@ export interface HudOptions {
    * holds `Settings.bindings` should pass it: it is exact and it costs nothing.
    */
   bindings?: Record<number, Record<string, number>>;
+  /**
+   * Seat (0-based player number) per fighter id, as the select screen dealt
+   * them. A pad can land on input slot 2 while being player ONE, so the slot is
+   * not the player number; without this the marker over player one's head said
+   * "3" and wore player three's colour.
+   */
+  seats?: Record<number, number>;
+  /**
+   * Hold the interact prompts. The map's title card is a full-width band over
+   * the middle of the shot, and a DROP KNIFE pill poking out from under it is
+   * the HUD talking over the one moment it should not.
+   */
+  quiet?: boolean;
 }
 
 // ── Palette ──────────────────────────────────────────────────────────────────
+//
+// Everything comes out of the shared theme. The HUD's own vocabulary on top of
+// it: health is LAMP (what you have), the chip that drains behind it is BLOOD
+// (what you just lost), meter is STEEL until a bar is full and then it is lamp
+// too, because a full bar is a thing to press.
 
-const INK = '#120e18';
-const FRAME_BG = 'rgba(10,8,14,0.72)';
-const TRACK = '#2a2233';
-const HEALTH_HI = '#ff5a4f';
-const HEALTH_LO = '#c11f2e';
-const CHIP = '#ffd23f';
-const METER_EMPTY = '#1d2733';
-const METER_FILL = '#5fc9ff';
-const METER_FULL = '#ffd23f';
-const BOSS_HI = '#ff2d55';
-const BOSS_LO = '#8c0028';
-const TEXT = '#f2eef7';
-const TEXT_DIM = '#9aa2b8';
-const LIFE = '#ff8fae';
-/** The one hue the HUD did not already own. Player four needed a green. */
-const MINT = '#63ff9d';
+const INK = PALETTE.ink;
+const PLATE = 'rgba(14,11,9,0.84)';
+const PLATE_EDGE = 'rgba(244,236,223,0.10)';
+const TRACK = '#2b2420';
+const HEALTH_HI = '#ffd36b';
+const HEALTH_LO = PALETTE.lamp;
+const HEALTH_LOW = PALETTE.bloodHot;
+const CHIP = PALETTE.blood;
+const CHIP_LO = PALETTE.bloodDeep;
+const METER_EMPTY = '#1a1d22';
+const METER_FILL = PALETTE.steel;
+const METER_FILL_LO = PALETTE.steelDeep;
+const METER_FULL = PALETTE.lampHot;
+const BOSS_HI = PALETTE.bloodHot;
+const BOSS_LO = PALETTE.bloodDeep;
+const TEXT = PALETTE.bone;
+const TEXT_DIM = PALETTE.boneDim;
+const LIFE = PALETTE.bone;
+const DEAD = '#6b5f57';
 
-/**
- * Identity colour per player slot, built out of the colours this HUD already
- * uses so there is exactly one player palette in the game: amber (the chip bar),
- * cyan (the meter), pink (the life pips) and mint.
- *
- * Four hues that stay apart from each other, from the red of the health bar, and
- * from the black leather everyone on screen is wearing. They also survive the
- * common colour-vision deficiencies as light/dark pairs — and the marker draws
- * the player number as well, so colour never carries the identity alone.
- */
-const PLAYER_COLORS: readonly string[] = [CHIP, METER_FILL, LIFE, MINT];
 /** Pre-built so the draw path never builds a string. */
 const PLAYER_LABELS: readonly string[] = ['1', '2', '3', '4'];
+const PLAYER_TAGS: readonly string[] = ['P1', 'P2', 'P3', 'P4'];
 
-const DISPLAY = 'Impact, "Arial Black", "Helvetica Neue", system-ui, sans-serif';
-
-const PAD = 6;
-const PANEL_W_MAX = 214;
+const PAD = 8;
+const PANEL_W_MAX = 204;
+const PANEL_H = 44;
 const PANEL_GAP = 6;
-const PORTRAIT_R = 13;
+const PORTRAIT_R = 15;
+/** The forward lean of every HUD plate and bar: the italic of the display face. */
+const LEAN = 5;
+/** Health below this fraction turns red and starts to pulse. */
+const LOW_HEALTH = 0.25;
 
 /** Frames the chip bar hangs at the old value before it starts falling. */
 const CHIP_HOLD = 16;
@@ -217,6 +240,11 @@ export function resetHud(): void {
 
 // ── Text ─────────────────────────────────────────────────────────────────────
 
+/**
+ * Display text as the HUD draws it. Thin ink outline plus a short drop shadow:
+ * the old quarter-of-the-size outline closed the counters of every letter at
+ * 8px and turned "MECHANICAL KEYBOARD" into a smudge.
+ */
 function text(
   ctx: C2D,
   s: string,
@@ -225,19 +253,14 @@ function text(
   size: number,
   fill: string,
   align: CanvasTextAlign = 'left',
-  weight = '900',
+  weight = 800,
+  italic = false,
 ): void {
-  ctx.font = `${weight} ${size}px ${DISPLAY}`;
-  ctx.textAlign = align;
-  ctx.textBaseline = 'alphabetic';
-  ctx.lineJoin = 'round';
-  ctx.miterLimit = 2;
-  ctx.lineWidth = Math.max(1.6, size * 0.26);
-  ctx.strokeStyle = INK;
-  ctx.strokeText(s, x, y);
-  ctx.fillStyle = fill;
-  ctx.fillText(s, x, y);
+  inkText(ctx, s, x, y, size, fill, { align, weight, italic });
 }
+
+/** Seat per fighter id for the current draw; see HudOptions.seats. */
+let seatMap: Record<number, number> | null = null;
 
 function digitsOf(n: number, width: number): string {
   const v = Math.max(0, Math.round(n));
@@ -263,17 +286,31 @@ function portrait(
   hurt: number,
   ring: string,
 ): void {
+  // The disc sits on a ring of the player's colour, which is the same object as
+  // the marker over their head and the ring at their feet, seen a third time.
+  ctx.beginPath();
+  ctx.arc(cx, cy, r + 2.4, 0, Math.PI * 2);
+  ctx.fillStyle = INK;
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(cx, cy, r + 1.2, 0, Math.PI * 2);
+  ctx.fillStyle = dead ? DEAD : ring;
+  ctx.fill();
+
   ctx.save();
   ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.arc(cx, cy, r - 0.4, 0, Math.PI * 2);
   ctx.clip();
 
-  ctx.fillStyle = dead ? '#241820' : '#1b1626';
+  const bg = ctx.createLinearGradient(0, cy - r, 0, cy + r);
+  bg.addColorStop(0, dead ? '#2a201d' : '#3a3029');
+  bg.addColorStop(1, dead ? '#151110' : '#1a1512');
+  ctx.fillStyle = bg;
   ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
 
   const clip = dead ? (CLIPS.knockdown ?? CLIPS.idle) : (CLIPS.idle ?? CLIPS.walk);
   if (clip) {
-    const u = 0.62;
+    const u = 0.7;
     // The dwarf rig puts the skull about 39 rig-units above the feet; anchoring
     // the ground point that far below the disc centres the face in the frame.
     const headUp = 39 * u;
@@ -281,31 +318,22 @@ function portrait(
     drawCharacter(ctx, style, pose, skeleton, cx, cy + headUp, 1, {
       scale: u,
       flash: hurt,
+      tint: dead ? '#4a403a' : undefined,
     });
   }
 
   ctx.restore();
 
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = INK;
-  ctx.stroke();
-  ctx.beginPath();
-  // The inner ring is in the player's colour: the panel and the marker over that
-  // player's head are then the same object, seen twice.
-  ctx.arc(cx, cy, r - 1.4, 0, Math.PI * 2);
-  ctx.lineWidth = 1.4;
-  ctx.strokeStyle = dead ? '#5d4a55' : ring;
-  ctx.stroke();
-
-  if (dead) {
-    text(ctx, 'K.O.', cx, cy + 3, 9, '#ff5a4f', 'center');
-  }
+  if (dead) text(ctx, 'K.O.', cx, cy + 3.5, 10, PALETTE.bloodHot, 'center', 900, true);
 }
 
 // ── Bars ─────────────────────────────────────────────────────────────────────
 
+/**
+ * A leaning bar segment filled to `frac`, from the left or (mirrored) from the
+ * right. `hi` is the lit top half, `lo` the shaded bottom: a two-tone fill reads
+ * as a physical tube at 7px where a gradient reads as mud.
+ */
 function bar(
   ctx: C2D,
   x: number,
@@ -314,17 +342,25 @@ function bar(
   h: number,
   frac: number,
   fromRight: boolean,
-  fill: string,
-  shade: string,
+  hi: string,
+  lo: string,
+  lean = LEAN * (h / 10),
 ): void {
   const f = clamp(frac, 0, 1);
   if (f <= 0) return;
-  const ww = Math.max(0.6, w * f);
+  const ww = Math.max(0.8, w * f);
   const bx = fromRight ? x + w - ww : x;
-  ctx.fillStyle = shade;
-  ctx.fillRect(bx, y, ww, h);
-  ctx.fillStyle = fill;
-  ctx.fillRect(bx, y, ww, h * 0.55);
+  slab(ctx, bx, y, ww, h, lean, lo);
+  // The lit half: the same slab, cut to its upper half.
+  const k = 0.5;
+  ctx.beginPath();
+  ctx.moveTo(bx + lean, y);
+  ctx.lineTo(bx + ww + lean, y);
+  ctx.lineTo(bx + ww + lean * (1 - k), y + h * k);
+  ctx.lineTo(bx + lean * (1 - k), y + h * k);
+  ctx.closePath();
+  ctx.fillStyle = hi;
+  ctx.fill();
 }
 
 // ── Player panel ─────────────────────────────────────────────────────────────
@@ -437,10 +473,14 @@ function drawPanel(
   frame: number,
   lives: number,
   name: string,
+  tag: string,
+  superKey: string | null,
 ): void {
   const { x, y, w, mirror } = slot;
-  const h = 36;
-  const tag = PLAYER_COLORS[playerIndex(f)];
+  const h = PANEL_H;
+  const seat = playerIndex(f);
+  const color = PLAYER_COLORS[seat];
+  const alive = f.alive;
 
   /** Distance `o` from the portrait side of the panel. */
   const at = (o: number, width = 0): number => (mirror ? x + w - o - width : x + o);
@@ -448,106 +488,171 @@ function drawPanel(
   ctx.save();
   ctx.globalAlpha = 1;
 
-  roundRect(ctx, x, y, w, h, 4, FRAME_BG, INK, 1.6);
+  // The plate: one leaning slab, the portrait overlapping its near end.
+  const plateX = at(PORTRAIT_R + 6, w - (PORTRAIT_R + 6));
+  const plateW = w - (PORTRAIT_R + 6);
+  slab(ctx, plateX, y + 3, plateW, h - 6, mirror ? -LEAN : LEAN, PLATE, INK, 1.4);
+  // A hairline of the player's colour along the top edge.
+  ctx.fillStyle = alive ? color : DEAD;
+  ctx.globalAlpha = 0.9;
+  slab(ctx, plateX + (mirror ? 0 : 2), y + 3, plateW - 2, 1.6, mirror ? -0.4 : 0.4, alive ? color : DEAD);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = PLATE_EDGE;
+  ctx.fillRect(plateX + 6, y + h - 4.4, plateW - 12, 0.8);
 
-  const pcx = at(PORTRAIT_R + 4);
+  const pcx = at(PORTRAIT_R + 3);
   const pcy = y + h * 0.5;
-  portrait(ctx, f.style, f.skeleton, pcx, pcy, PORTRAIT_R, frame, !f.alive, s.hurt * 0.7, tag);
+  portrait(ctx, f.style, f.skeleton, pcx, pcy, PORTRAIT_R, frame, !alive, s.hurt * 0.7, color);
 
-  const barX = at(PORTRAIT_R * 2 + 8, w - (PORTRAIT_R * 2 + 12));
-  const barW = w - (PORTRAIT_R * 2 + 12);
+  const innerL = PORTRAIT_R * 2 + 12;
+  const barW = w - innerL - 12;
+  const barX = at(innerL, barW);
   const align: CanvasTextAlign = mirror ? 'right' : 'left';
   const nameX = mirror ? barX + barW : barX;
+  const farX = mirror ? barX : barX + barW;
+  const farAlign: CanvasTextAlign = mirror ? 'left' : 'right';
 
-  text(ctx, name, nameX, y + 10, 8, f.alive ? tag : '#8b7d8e', align);
+  // Name, with the player tag in their colour at the far end.
+  text(ctx, name, nameX + (mirror ? -1 : 1), y + 14, 11, alive ? TEXT : DEAD, align, 800);
+  const tagW = measure(ctx, tag, 8, 800);
+  text(ctx, tag, farX, y + 13.5, 8, alive ? color : DEAD, farAlign, 800);
 
-  // Lives, as little pips beside the name.
-  const pipR = 2.2;
-  for (let i = 0; i < Math.min(6, lives); i++) {
-    const px = mirror ? barX + 4 + i * 7 : barX + barW - 4 - i * 7;
-    ellipse(ctx, px, y + 7, pipR, pipR, 0, LIFE, INK, 1);
+  // Lives, as little studs between the name and the tag.
+  const pipR = 1.9;
+  const shown = Math.min(5, lives);
+  for (let i = 0; i < shown; i++) {
+    const off = tagW + 6 + i * 5.5;
+    const px = mirror ? farX + off : farX - off;
+    ctx.beginPath();
+    ctx.arc(px, y + 10.6, pipR + 0.9, 0, Math.PI * 2);
+    ctx.fillStyle = INK;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(px, y + 10.6, pipR, 0, Math.PI * 2);
+    ctx.fillStyle = LIFE;
+    ctx.fill();
   }
-  if (lives > 6) text(ctx, `x${lives}`, mirror ? barX : barX + barW, y + 10, 7, LIFE, mirror ? 'left' : 'right');
+  if (lives > 5) {
+    const off = tagW + 6 + shown * 5.5;
+    text(ctx, `+${lives - 5}`, mirror ? farX + off : farX - off, y + 13, 7, TEXT_DIM, farAlign, 800);
+  }
 
-  // Health: chip behind, live bar in front.
-  const hy = y + 13;
-  const hh = 7;
-  roundRect(ctx, barX, hy, barW, hh, 1.5, TRACK, INK, 1.4);
-  bar(ctx, barX + 1, hy + 1, barW - 2, hh - 2, s.chip, mirror, CHIP, '#a97f18');
-  bar(ctx, barX + 1, hy + 1, barW - 2, hh - 2, s.health, mirror, HEALTH_HI, HEALTH_LO);
+  // Health: chip behind, live bar in front, leaning with the plate.
+  const hy = y + 18;
+  const hh = 8;
+  const hl = mirror ? -LEAN * 0.8 : LEAN * 0.8;
+  slab(ctx, barX - 1, hy - 1, barW + 2, hh + 2, hl, INK);
+  slab(ctx, barX, hy, barW, hh, hl, TRACK);
+  bar(ctx, barX, hy, barW, hh, s.chip, mirror, CHIP, CHIP_LO, hl);
+  const low = s.health <= LOW_HEALTH && alive;
+  const throb = low ? 0.5 + 0.5 * Math.sin(frame * 0.24) : 0;
+  bar(
+    ctx,
+    barX,
+    hy,
+    barW,
+    hh,
+    s.health,
+    mirror,
+    low ? mixHex(HEALTH_LOW, '#ffd0c6', throb * 0.5) : HEALTH_HI,
+    low ? PALETTE.blood : HEALTH_LO,
+    hl,
+  );
 
-  // A hairline at 25% so "one more hit" is a readable position, not a guess.
-  const dx = mirror ? barX + barW - (barW - 2) * 0.25 - 1 : barX + 1 + (barW - 2) * 0.25;
-  ctx.fillStyle = 'rgba(0,0,0,0.55)';
-  ctx.fillRect(dx, hy + 1, 1, hh - 2);
+  // Quarter ticks so "one more hit" is a readable position, not a guess.
+  ctx.fillStyle = 'rgba(12,10,9,0.55)';
+  for (let q = 1; q < 4; q++) {
+    const tx = barX + barW * (mirror ? 1 - q / 4 : q / 4);
+    ctx.beginPath();
+    ctx.moveTo(tx + hl, hy);
+    ctx.lineTo(tx + hl + 1, hy);
+    ctx.lineTo(tx + 1, hy + hh);
+    ctx.lineTo(tx, hy + hh);
+    ctx.closePath();
+    ctx.fill();
+  }
 
-  // Meter: MAX_METER_BARS segments, the newest full one pulsing.
-  const my = y + 22;
+  // Meter: MAX_METER_BARS leaning cells, steel while filling, lamp when full.
+  const my = y + 29;
   const mh = 4;
-  const segGap = 2;
-  const segW = (barW - segGap * (MAX_METER_BARS - 1)) / MAX_METER_BARS;
+  const segGap = 2.5;
+  const segW = (barW * 0.62 - segGap * (MAX_METER_BARS - 1)) / MAX_METER_BARS;
+  const ml = mirror ? -2 : 2;
   for (let i = 0; i < MAX_METER_BARS; i++) {
-    const sx = mirror
-      ? barX + barW - segW - i * (segW + segGap)
-      : barX + i * (segW + segGap);
+    const sx = mirror ? barX + barW - segW - i * (segW + segGap) : barX + i * (segW + segGap);
     const fillFrac = clamp(f.meter - i, 0, 1);
-    roundRect(ctx, sx, my, segW, mh, 1, METER_EMPTY, INK, 1.2);
+    slab(ctx, sx - 0.8, my - 0.8, segW + 1.6, mh + 1.6, ml, INK);
+    slab(ctx, sx, my, segW, mh, ml, METER_EMPTY);
     if (fillFrac > 0) {
       const full = fillFrac >= 1;
-      const pulse = full ? 0.72 + 0.28 * Math.sin(frame * 0.19 + i) : 1;
-      ctx.save();
-      ctx.globalAlpha = pulse;
-      bar(ctx, sx + 0.8, my + 0.8, segW - 1.6, mh - 1.6, fillFrac, mirror, full ? METER_FULL : METER_FILL, full ? '#c58f00' : '#1d6f9c');
-      ctx.restore();
+      bar(ctx, sx, my, segW, mh, fillFrac, mirror, full ? METER_FULL : METER_FILL, full ? PALETTE.lamp : METER_FILL_LO, ml);
     }
   }
-  if (f.meter >= 1) {
-    const glow = 0.25 + 0.25 * Math.sin(frame * 0.19);
+  if (f.meter >= 1 && alive) {
+    // A full bar is a button to press, so the HUD names the button.
+    const pulse = 0.6 + 0.4 * Math.sin(frame * 0.19);
     ctx.save();
-    ctx.globalAlpha = glow + s.meterPulse * 0.5;
+    ctx.globalAlpha = 0.25 * pulse + s.meterPulse * 0.5;
     ctx.globalCompositeOperation = 'lighter';
-    roundRect(ctx, barX - 1, my - 1, barW + 2, mh + 2, 2, 'rgba(255,210,63,0.35)', 'none', 0);
+    const gx = mirror ? barX + barW - barW * 0.62 : barX;
+    slab(ctx, gx - 2, my - 2, barW * 0.62 + 4, mh + 4, ml, 'rgba(255,181,36,0.55)');
     ctx.restore();
-    text(ctx, 'SUPER', mirror ? barX : barX + barW, my + 12, 7, METER_FULL, mirror ? 'left' : 'right');
+    const lx = mirror ? barX + barW - barW * 0.62 - 4 : barX + barW * 0.62 + 4;
+    ctx.save();
+    ctx.globalAlpha = 0.75 + 0.25 * pulse;
+    if (superKey) {
+      const kw = measureCap(ctx, superKey, 5.5);
+      const kx = mirror ? lx - kw : lx;
+      keycap(ctx, superKey, kx, my + 2, 5.5, METER_FULL);
+      text(ctx, 'SUPER', mirror ? kx - 3 : kx + kw + 3, my + 5, 7, METER_FULL, align, 800);
+    } else {
+      text(ctx, 'SUPER', lx, my + 5, 7, METER_FULL, align, 800);
+    }
+    ctx.restore();
   }
 
-  // Weapon and what is left of it.
+  // Weapon and what is left of it, on the bottom line.
   const wd = f.weaponDef;
-  if (wd) {
+  if (wd && alive) {
     const wear = weaponWear(f);
-    const wy = my + 7;
+    const wy = y + 40.5;
     const label = wd.name.toUpperCase();
-    text(ctx, label, nameX, wy + 6, 7, wd.art.accent, align);
-    const gw = Math.min(46, barW * 0.42);
+    const gw = Math.min(40, barW * 0.32);
     const gx = mirror ? barX : barX + barW - gw;
+    const room = barW - gw - 6;
+    text(ctx, fitText(ctx, label, 7, room), nameX, wy, 7, wd.art.accent, align, 800);
     if (wd.ammo !== undefined) {
-      text(ctx, `${wear.ammo}`, mirror ? gx + gw : gx, wy + 6, 7, wear.ammo > 0 ? TEXT : '#ff5a4f', mirror ? 'right' : 'left');
+      text(ctx, `${wear.ammo}`, mirror ? gx : gx + gw, wy, 8, wear.ammo > 0 ? TEXT : PALETTE.bloodHot, farAlign, 800);
     } else if (wear.max > 0) {
       const frac = clamp(wear.left / wear.max, 0, 1);
-      roundRect(ctx, gx, wy + 1, gw, 3.2, 1, TRACK, INK, 1);
-      bar(ctx, gx + 0.6, wy + 1.6, gw - 1.2, 2, frac, mirror, frac < 0.3 ? '#ff5a4f' : wd.art.color, '#3a3446');
+      slab(ctx, gx - 0.6, wy - 4.6, gw + 1.2, 3.8, ml * 0.5, INK);
+      slab(ctx, gx, wy - 4, gw, 2.6, ml * 0.5, TRACK);
+      bar(ctx, gx, wy - 4, gw, 2.6, frac, mirror, frac < 0.3 ? PALETTE.bloodHot : TEXT, frac < 0.3 ? PALETTE.blood : TEXT_DIM, ml * 0.5);
     }
   }
 
-  // Combo counter, popping outward from the panel.
+  // Combo counter, punched out under the panel.
   if (s.comboShown >= 2 && (f.comboCount > 0 || s.comboLife > 0)) {
     const fade = f.comboCount > 0 ? 1 : clamp(s.comboLife / COMBO_LINGER, 0, 1);
     const pop = easeOutBack(1 - s.pop);
-    const size = (10 + Math.min(18, s.comboShown) * 0.42) * lerp(1.55, 1, pop);
-    const cx = mirror ? x + w - 4 : x + 4;
-    const cy = y + h + 14;
+    const size = (15 + Math.min(20, s.comboShown) * 0.45) * lerp(1.5, 1, pop);
+    const cx = mirror ? x + w - 6 : x + 6;
+    const cy = y + h + 8 + size * 0.78;
     ctx.save();
     ctx.globalAlpha = fade;
-    text(ctx, `${s.comboShown}`, cx, cy, size, '#ffe14a', mirror ? 'right' : 'left');
-    const numW = nameWidth(ctx, `${s.comboShown}`, size);
+    const numW = measure(ctx, `${s.comboShown}`, size, 900, true);
+    text(ctx, `${s.comboShown}`, cx, cy, size, PALETTE.lampHot, mirror ? 'right' : 'left', 900, true);
+    const big = s.comboShown >= 10;
     text(
       ctx,
-      s.comboShown >= 10 ? 'HIT COMBO!' : 'HIT',
-      mirror ? cx - numW - 2 : cx + numW + 2,
-      cy,
-      8,
-      '#7fe0ff',
+      big ? 'HIT COMBO!' : 'HITS',
+      mirror ? cx - numW - 3 : cx + numW + 3,
+      cy - 1,
+      big ? 10 : 9,
+      big ? PALETTE.bloodHot : TEXT,
       mirror ? 'right' : 'left',
+      900,
+      true,
     );
     ctx.restore();
   }
@@ -555,9 +660,35 @@ function drawPanel(
   ctx.restore();
 }
 
-function nameWidth(ctx: C2D, s: string, size: number): number {
-  ctx.font = `900 ${size}px ${DISPLAY}`;
+function measure(ctx: C2D, s: string, size: number, weight = 800, italic = false): number {
+  ctx.font = displayFont(size, weight, italic);
   return ctx.measureText(s).width;
+}
+
+/** Width a keycap of this label will take, without drawing it. */
+function measureCap(ctx: C2D, label: string, size: number): number {
+  ctx.font = displayFont(size, 800);
+  return Math.max(size + 4, ctx.measureText(label).width + 6);
+}
+
+/** Truncate to fit, with an ellipsis. Weapon names are long; panels are not. */
+function fitText(ctx: C2D, s: string, size: number, maxW: number): string {
+  ctx.font = displayFont(size, 800);
+  if (ctx.measureText(s).width <= maxW) return s;
+  let t = s;
+  while (t.length > 1 && ctx.measureText(`${t}…`).width > maxW) t = t.slice(0, -1);
+  return `${t.trimEnd()}…`;
+}
+
+/** Mix two #rrggbb colours. Only the low-health throb uses it, once per frame. */
+function mixHex(a: string, b: string, t: number): string {
+  const pa = parseInt(a.slice(1), 16);
+  const pb = parseInt(b.slice(1), 16);
+  const k = clamp(t, 0, 1);
+  const r = Math.round(((pa >> 16) & 255) * (1 - k) + ((pb >> 16) & 255) * k);
+  const g = Math.round(((pa >> 8) & 255) * (1 - k) + ((pb >> 8) & 255) * k);
+  const bl = Math.round((pa & 255) * (1 - k) + (pb & 255) * k);
+  return `rgb(${r},${g},${bl})`;
 }
 
 // ── Boss bar ─────────────────────────────────────────────────────────────────
@@ -574,62 +705,78 @@ function phaseIndex(def: BossDef, frac: number): number {
 
 function drawBossBar(ctx: C2D, boss: Fighter, s: HudState, frame: number): void {
   const def = bossDefFor(boss);
-  const w = 400;
+  const w = 420;
   const x = (VIEW_W - w) * 0.5;
-  const y = VIEW_H - 34;
-  const h = 11;
+  const y = VIEW_H - 26;
+  const h = 10;
 
   ctx.save();
-  roundRect(ctx, x - 5, y - 13, w + 10, h + 20, 4, FRAME_BG, INK, 1.6);
 
+  // The name sits on a blood-red slab breaking out of the bar's top-left: the
+  // boss is the one thing in the HUD allowed to use the danger colour as a fill.
   const name = (def ? def.name : boss.archetype).toUpperCase();
-  text(ctx, name, x, y - 4, 10, '#ffffff', 'left');
+  const nameW = measure(ctx, name, 12, 900, true);
+  slab(ctx, x - 6, y - 17, nameW + 22, 15, 5, PALETTE.blood, INK, 1.4);
+  text(ctx, name, x + 5, y - 5.5, 12, TEXT, 'left', 900, true);
 
-  roundRect(ctx, x, y, w, h, 2, TRACK, INK, 1.6);
-  bar(ctx, x + 1.5, y + 1.5, w - 3, h - 3, s.chip, false, CHIP, '#a97f18');
-  bar(ctx, x + 1.5, y + 1.5, w - 3, h - 3, s.health, false, BOSS_HI, BOSS_LO);
+  slab(ctx, x - 1.5, y - 1.5, w + 3, h + 3, 4, INK);
+  slab(ctx, x, y, w, h, 4, TRACK);
+  bar(ctx, x, y, w, h, s.chip, false, '#ffe2a0', PALETTE.lampDeep, 4);
+  bar(ctx, x, y, w, h, s.health, false, BOSS_HI, BOSS_LO, 4);
 
   if (def && def.phases.length > 1) {
     const cur = phaseIndex(def, s.health);
 
     // Threshold notches on the bar itself: you can see the next gear coming.
+    ctx.fillStyle = INK;
     for (let i = 1; i < def.phases.length; i++) {
       const t = clamp(def.phases[i].healthThreshold, 0, 1);
-      const nx = x + 1.5 + (w - 3) * t;
-      ctx.fillStyle = 'rgba(0,0,0,0.6)';
-      ctx.fillRect(nx - 0.5, y + 1.5, 1.4, h - 3);
+      const nx = x + w * t;
+      ctx.beginPath();
+      ctx.moveTo(nx + 4, y - 3);
+      ctx.lineTo(nx + 5.6, y - 3);
+      ctx.lineTo(nx + 1.6, y + h + 1);
+      ctx.lineTo(nx, y + h + 1);
+      ctx.closePath();
+      ctx.fill();
     }
 
-    // Phase pips: filled for phases survived, hollow for what is left. They sit
-    // hard right, and the label is anchored off their left edge so a boss with
-    // five phases never has its pips written over.
+    // Phase pips: filled for phases reached, hollow for what is left. Hard
+    // right, label anchored off their left edge so five phases never collide.
     const pips = def.phases.length;
-    const pipGap = 10;
-    const pipRight = x + w - 5;
+    const pipGap = 9;
+    const pipRight = x + w - 2;
     for (let i = 0; i < pips; i++) {
       const px = pipRight - (pips - 1 - i) * pipGap;
       const active = i <= cur;
-      const pulse = i === cur ? 1 + 0.22 * Math.sin(frame * 0.22) : 1;
-      ellipse(
-        ctx,
-        px,
-        y - 7,
-        3.3 * pulse,
-        3.3 * pulse,
-        0,
-        active ? (i === cur ? '#ffe14a' : BOSS_HI) : '#3a2b38',
-        INK,
-        1.3,
-      );
+      const pulse = i === cur ? 1 + 0.2 * Math.sin(frame * 0.22) : 1;
+      const r = 3 * pulse;
+      ctx.beginPath();
+      ctx.moveTo(px, y - 10 - r - 1);
+      ctx.lineTo(px + r + 1, y - 10);
+      ctx.lineTo(px, y - 10 + r + 1);
+      ctx.lineTo(px - r - 1, y - 10);
+      ctx.closePath();
+      ctx.fillStyle = INK;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(px, y - 10 - r);
+      ctx.lineTo(px + r, y - 10);
+      ctx.lineTo(px, y - 10 + r);
+      ctx.lineTo(px - r, y - 10);
+      ctx.closePath();
+      ctx.fillStyle = active ? (i === cur ? PALETTE.lampHot : BOSS_HI) : '#3a302a';
+      ctx.fill();
     }
     text(
       ctx,
       `PHASE ${cur + 1}/${pips}`,
       pipRight - (pips - 1) * pipGap - 8,
-      y - 4,
+      y - 6.5,
       8,
-      '#ff8fa6',
+      TEXT_DIM,
       'right',
+      800,
     );
   }
 
@@ -656,9 +803,9 @@ function drawBossBar(ctx: C2D, boss: Fighter, s: HudState, frame: number): void 
 
 /** Screen px between the top of the head and the point of the chevron. */
 const MARK_GAP = 5;
-const MARK_CHEV_W = 9;
-const MARK_CHEV_H = 6;
-const MARK_NUM_SIZE = 9;
+const MARK_CHEV_W = 10;
+const MARK_CHEV_H = 6.5;
+const MARK_NUM_SIZE = 10;
 /** Extra px the marker floats up through on the idle bob. */
 const MARK_BOB = 2.2;
 const MARK_BOB_RATE = 0.075;
@@ -669,11 +816,11 @@ const MARK_FADE = 45;
 const MARK_DIM = 0.3;
 /**
  * A jumping player near the front of the belt can push the marker off the top of
- * the screen and through the panels — the panels end at y = 42, and the digit
+ * the screen and through the panels — the panels end at y = 52, and the digit
  * stands MARK_CHEV_H + the cap height above the tip. It stops here instead,
  * sitting on the head for the half second that costs.
  */
-const MARK_MIN_TIP_Y = 61;
+const MARK_MIN_TIP_Y = 72;
 
 /**
  * The lift FightScene applies to the whole world layer inside the camera
@@ -725,10 +872,15 @@ function rigTop(skeleton: Bone[]): number {
   return top;
 }
 
-/** Player slot -> palette index, for any slot number a lobby can hand out. */
+/**
+ * Fighter -> player number (0-based), for any slot number a lobby can hand out.
+ * The seat the select screen dealt when the fight told us; the slot otherwise,
+ * which is the same thing online and for a plain local game.
+ */
 function playerIndex(f: Fighter): number {
   const n = PLAYER_COLORS.length;
-  return ((((f.id | 0) % n) + n) % n) | 0;
+  const seat = seatMap?.[f.id] ?? f.id;
+  return ((((seat | 0) % n) + n) % n) | 0;
 }
 
 /**
@@ -789,14 +941,24 @@ function headScreen(f: Fighter, cam: Camera): boolean {
   const zoom = cam.zoom > 0.05 ? cam.zoom : 1;
   // Rig scale, exactly as Fighter.render hands it to drawCharacter: the dwarf's
   // own scale times the belt's depth perspective. A dwarf standing at the back
-  // wall is smaller, and their marker comes down to meet them.
-  const u = (f.style.scale || 1) * clamp(1 - d.z * Z_PERSPECTIVE, 0.75, 1);
+  // wall is smaller, and their marker comes down to meet them. Far is z = 0, so
+  // the falloff is measured from Z_DEPTH — the same fold Fighter.render uses.
+  // (This read d.z directly once, which put the marker a hat's height into the
+  // cap of anybody standing at the front of the belt.)
+  const u = (f.style.scale || 1) * clamp(1 - (Z_DEPTH - d.z) * Z_PERSPECTIVE, 0.75, 1);
 
   // World -> camera space, with the head offset applied before the projection so
   // a rolled camera would carry the marker around with it.
   const cx = d.x - cam.x + cam.shakeX - VIEW_W * 0.5;
   const cy =
-    GROUND_Y + d.z * Z_SCALE - d.y - rigTop(f.skeleton) * u + WORLD_FRAME_Y + cam.shakeY - VIEW_H * 0.5;
+    GROUND_Y +
+    d.z * Z_SCALE -
+    d.y -
+    rigTop(f.skeleton) * u +
+    WORLD_FRAME_Y -
+    cam.y +
+    cam.shakeY -
+    VIEW_H * 0.5;
 
   let sx = cx * zoom;
   let sy = cy * zoom;
@@ -879,8 +1041,8 @@ function drawMarker(
 
 /** Screen px between the top of the player marker and the bottom of the pill. */
 const PROMPT_GAP = 4;
-const PROMPT_H = 12;
-const PROMPT_FONT = 7;
+const PROMPT_H = 13;
+const PROMPT_FONT = 7.5;
 /**
  * How high the pill may climb before it is into the score and map strip.
  *
@@ -888,7 +1050,7 @@ const PROMPT_FONT = 7;
  * hangs over is somewhere between y≈198 and y≈286 on the belt. It is here for
  * the mounted case and for anything that ever moves the camera.
  */
-const PROMPT_MIN_Y = 76;
+const PROMPT_MIN_Y = 86;
 
 /**
  * Cached device facts.
@@ -1007,19 +1169,44 @@ function interactButton(
   padOrder: number,
   opts?: HudOptions,
 ): string | null {
+  return buttonLabel(f, s, frame, padOrder, Btn.Interact, 'l2', opts);
+}
+
+/**
+ * The one control on the pad and the keyboard that a given action lives on,
+ * named by the player's own hardware. Interact is the left trigger, Super the
+ * right one; on a keyboard it is whatever key is bound right now.
+ */
+function buttonLabel(
+  f: Fighter,
+  s: HudState,
+  frame: number,
+  padOrder: number,
+  bit: number,
+  trigger: 'l2' | 'r2',
+  opts?: HudOptions,
+): string | null {
+  // Player one on a phone: the button on the glass says USE and SUPER.
+  if (touchActive() && !s.onPad && playerIndex(f) === 0) {
+    return bit === Btn.Interact ? 'USE' : bit === Btn.Super ? 'SUPER' : null;
+  }
   if (s.onPad) {
     // Pads are handed to slots in ascending order, so the nth pad-driven player
-    // is holding the nth pad. Its vendor is what decides whether the left
-    // trigger says LT, ZL or L2 — the POSITION is the same on all of them.
+    // is holding the nth pad. Its vendor is what decides whether the trigger
+    // says LT, ZL or L2 — the POSITION is the same on all of them.
     const pads = padIndices(frame);
     const index = pads.length > 0 ? pads[clamp(padOrder, 0, pads.length - 1)] : undefined;
     const p = index === undefined ? null : padProfile(index);
-    if (p && (p.l2 >= 0 || typeof p.l2Axis === 'number')) return p.labels.l2;
-    // The pad has been unplugged, or it reports no left trigger and therefore
-    // cannot reach Interact at all. Fall through to the keyboard: whoever is
+    if (p) {
+      const button = trigger === 'l2' ? p.l2 : p.r2;
+      const axis = trigger === 'l2' ? p.l2Axis : p.r2Axis;
+      if (button >= 0 || typeof axis === 'number') return p.labels[trigger];
+    }
+    // The pad has been unplugged, or it reports no such trigger and therefore
+    // cannot reach the action at all. Fall through to the keyboard: whoever is
     // still playing is playing on something, and it is not that.
   }
-  const code = codeForBit(bindingsFor(f.id, frame, opts?.bindings), Btn.Interact);
+  const code = codeForBit(bindingsFor(f.id, frame, opts?.bindings), bit);
   return code ? keyLabel(code) : null;
 }
 
@@ -1099,11 +1286,11 @@ function drawPrompt(
   scale: number,
   alpha: number,
 ): void {
-  const capW = Math.max(9, nameWidth(ctx, button, PROMPT_FONT) + 7);
-  const verbW = nameWidth(ctx, verb, PROMPT_FONT);
-  const w = 4 + capW + 5 + verbW + 5;
+  const capW = measureCap(ctx, button, PROMPT_FONT - 1);
+  const verbW = measure(ctx, verb, PROMPT_FONT, 800);
+  const w = 3 + capW + 5 + verbW + 7;
   const x = cx - w * 0.5;
-  const base = top + PROMPT_H - 3.6;
+  const base = top + PROMPT_H - 3.8;
 
   ctx.save();
   ctx.globalAlpha = alpha;
@@ -1115,13 +1302,12 @@ function drawPrompt(
     ctx.translate(-cx, -(top + PROMPT_H));
   }
 
-  roundRect(ctx, x, top, w, PROMPT_H, 3, FRAME_BG, INK, 1.4);
-  roundRect(ctx, x + 4, top + 2, capW, PROMPT_H - 4, 2, tint, INK, 1.2);
-  // Ink on the player's colour: the keycap reads as a physical key, and it is
-  // the same hue as their marker and their panel, so a four-player couch can
-  // tell whose prompt it is without reading it.
-  text(ctx, button, x + 4 + capW * 0.5, base, PROMPT_FONT, INK, 'center');
-  text(ctx, verb, x + 4 + capW + 5, base, PROMPT_FONT, TEXT, 'left');
+  slab(ctx, x, top, w, PROMPT_H, 3, PLATE, INK, 1.3);
+  // A keycap in the player's colour: it reads as a physical key, and it is the
+  // same hue as their marker and their panel, so a four-player couch can tell
+  // whose prompt it is without reading it.
+  keycap(ctx, button, x + 3.5, top + PROMPT_H * 0.5, PROMPT_FONT - 1, tint);
+  text(ctx, verb, x + 3 + capW + 5, base, PROMPT_FONT, TEXT, 'left', 800);
   ctx.restore();
 }
 
@@ -1175,12 +1361,23 @@ export function drawHud(
   const cam = cameraOf(level);
   const still = holdStill();
 
+  seatMap = opts?.seats ?? null;
   const slots = layout(players.length);
+  // Panels go left to right in PLAYER order, which is seat order — not the
+  // order of the input slots the fighters happen to be standing on.
+  const order = players.slice().sort((a, b) => playerIndex(a) - playerIndex(b));
   // Pads are handed to slots in ascending order, so counting the pad-driven
-  // players as we pass them gives each one the pad it is actually holding.
-  let padOrder = 0;
-  for (let i = 0; i < players.length; i++) {
-    const f = players[i];
+  // players by slot gives each one the pad it is actually holding.
+  const padOrderOf = new Map<number, number>();
+  {
+    let n = 0;
+    const bySlot = players.slice().sort((a, b) => a.id - b.id);
+    for (const f of bySlot) {
+      if (stateFor(f.id, 1).onPad) padOrderOf.set(f.id, n++);
+    }
+  }
+  for (let i = 0; i < order.length; i++) {
+    const f = order[i];
     const slot = slots[i];
     if (!slot) break;
     const s = stateFor(f.id, f.maxHealth > 0 ? f.health / f.maxHealth : 0);
@@ -1189,14 +1386,20 @@ export function drawHud(
     // things there are single digits of; see Level.interactTargetFor.
     const target = f.team === 'player' && f.alive ? level.interactTargetFor(f) : null;
     stepState(s, f, frame, target);
-    const name = opts?.names?.[f.id] ?? dwarfName(f);
-    drawPanel(ctx, f, slot, s, frame, level.livesFor(f.id), name);
-    const mine = s.onPad ? padOrder++ : 0;
+    const mine = s.onPad ? (padOrderOf.get(f.id) ?? 0) : 0;
+    // The dwarf's name is the title; the player's own name, when they have one
+    // worth printing (online), rides in the tag beside their number.
+    const seat = playerIndex(f);
+    const given = opts?.names?.[f.id];
+    const tag =
+      given && !/^PLAYER \d+$/i.test(given) ? `${PLAYER_TAGS[seat]} · ${given}` : PLAYER_TAGS[seat];
+    const superKey = f.meter >= 1 ? buttonLabel(f, s, frame, mine, Btn.Super, 'r2', opts) : null;
+    drawPanel(ctx, f, slot, s, frame, level.livesFor(f.id), dwarfName(f), tag, superKey);
     if (cam) {
       drawMarker(ctx, f, s, cam, frame, still);
       // After the marker, so the pill is never drawn under a chevron it is
       // meant to sit above.
-      if (promptWanted(s, target)) {
+      if (!opts?.quiet && promptWanted(s, target)) {
         drawInteractPrompt(ctx, f, s, cam, target, mine, still, opts);
       }
     }
@@ -1206,21 +1409,14 @@ export function drawHud(
   const score = (opts?.scoreBase ?? 0) + level.score;
   const cx = VIEW_W * 0.5;
   const wide = players.length <= 2;
-  const sy = wide ? 16 : 52;
-  text(ctx, digitsOf(score, 8), cx, sy, wide ? 15 : 13, '#ffe14a', 'center');
+  const sy = wide ? 19 : 68;
+  drawScore(ctx, score, cx, sy, wide ? 17 : 14);
 
   if (opts?.mapName) {
     const idx = opts.mapIndex ?? 1;
     const total = opts.mapTotal ?? TOTAL_MAPS;
-    text(
-      ctx,
-      `${digitsOf(idx, 2)}/${digitsOf(total, 2)}  ${opts.mapName.toUpperCase()}`,
-      cx,
-      sy + 10,
-      7,
-      TEXT_DIM,
-      'center',
-    );
+    const line = `MAP ${digitsOf(idx, 2)}/${total}  ·  ${opts.mapName.toUpperCase()}`;
+    text(ctx, fitText(ctx, line, 7.5, wide ? 196 : 300), cx, sy + 11, 7.5, TEXT_DIM, 'center', 600);
   }
 
   // Wave pips, but only while there is no boss stealing the bottom of the screen.
@@ -1228,21 +1424,16 @@ export function drawHud(
   if (!boss && level.waveTotal > 0) {
     const n = level.waveTotal;
     const total = Math.min(n, 12);
-    const pw = 7;
+    const pw = 8;
     const startX = cx - ((total - 1) * pw) * 0.5;
+    const py = opts?.mapName ? sy + 20 : sy + 9;
     for (let i = 0; i < total; i++) {
       const done = i < level.waveProgress;
-      ellipse(
-        ctx,
-        startX + i * pw,
-        (opts?.mapName ? sy + 18 : sy + 8),
-        2.4,
-        2.4,
-        0,
-        done ? '#ffe14a' : '#463a52',
-        INK,
-        1.2,
-      );
+      const current = i === level.waveProgress;
+      const px = startX + i * pw;
+      const r = current ? 3 + 0.5 * Math.sin(frame * 0.15) : 2.6;
+      diamond(ctx, px, py, r + 1.2, INK);
+      diamond(ctx, px, py, r, done ? PALETTE.lamp : current ? PALETTE.boneDim : '#3a312b');
     }
   }
 
@@ -1253,6 +1444,36 @@ export function drawHud(
   }
 
   ctx.restore();
+}
+
+function diamond(ctx: C2D, x: number, y: number, r: number, fill: string): void {
+  ctx.beginPath();
+  ctx.moveTo(x, y - r);
+  ctx.lineTo(x + r, y);
+  ctx.lineTo(x, y + r);
+  ctx.lineTo(x - r, y);
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+}
+
+/**
+ * The score, arcade style: a fixed run of digits so it never jumps sideways,
+ * but with the leading zeros sunk into the plate so the number that matters is
+ * the thing you read.
+ */
+function drawScore(ctx: C2D, score: number, cx: number, y: number, size: number): void {
+  const digits = digitsOf(score, 7);
+  let lead = 0;
+  while (lead < digits.length - 1 && digits[lead] === '0') lead++;
+  ctx.font = displayFont(size, 900, true);
+  const w = ctx.measureText(digits).width;
+  const x = cx - w * 0.5;
+  const head = digits.slice(0, lead);
+  const tail = digits.slice(lead);
+  const headW = head ? ctx.measureText(head).width : 0;
+  if (head) text(ctx, head, x, y, size, '#4a3f37', 'left', 900, true);
+  text(ctx, tail, x + headW, y, size, TEXT, 'left', 900, true);
 }
 
 function findBoss(level: Level): Fighter | null {

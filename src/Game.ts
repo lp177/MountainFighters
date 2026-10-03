@@ -43,6 +43,7 @@ import { defaultBindingsFor } from '@/engine/input/Bindings';
 import { GamepadSource, connectedGamepads } from '@/engine/input/GamepadSource';
 import { InputManager } from '@/engine/input/InputManager';
 import { KeyboardSource, refreshOwnedKeys } from '@/engine/input/KeyboardSource';
+import { installTouchControls, syncTouchMode } from '@/engine/input/TouchControls';
 import { Fx } from '@/juice/Fx';
 import { ParticleSystem } from '@/juice/Particles';
 import { Lockstep } from '@/net/Lockstep';
@@ -148,7 +149,7 @@ type Op =
   | { kind: 'clear' };
 
 /** Matches --bg in the stylesheet, so the letterbox and the canvas agree. */
-const CLEAR_COLOR = '#06070a';
+const CLEAR_COLOR = '#0c0a09';
 /** A scene chain longer than this is a bug, not a design. */
 const MAX_TRANSITIONS = 32;
 
@@ -240,6 +241,7 @@ export class Game {
     refreshOwnedKeys(this.save.settings.bindings);
     this.attachKeyboards(2);
     this.installListeners();
+    installTouchControls();
   }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -534,6 +536,7 @@ export class Game {
       r.end();
 
       this.audio.update();
+      syncTouchMode(this.sceneName, this.ui.current !== null);
     } catch (e) {
       this.fail(e);
     } finally {

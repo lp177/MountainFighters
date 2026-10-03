@@ -34,28 +34,28 @@
  *      pair of eyes, a different beard and a different cap silhouette, because
  *      seven dwarfs that differ only by hat colour are one dwarf seven times.
  *   5. The lighting is done as compositing passes on an offscreen character
- *      layer: a hot-pink key wash and a cold fill via `source-atop`, then two
- *      offset silhouettes underneath for the pink key rim and the cold moon
- *      rim. That is what stops the figures reading as flat vector clip-art.
+ *      layer: a warm lamp-orange key wash and a cold fill via `source-atop`,
+ *      then two offset silhouettes underneath for the warm key rim and the cold
+ *      moon rim — the same warm/cold split as the title screen. That is what stops the figures reading as flat vector clip-art.
  *      The six behind get the same treatment plus atmosphere, a depth-of-field
  *      blur and a fade into the drift at the boots, and they are painted
  *      furthest-first so each is occluded by the ones in front and all six by
  *      the hero — overlap is what sells depth, not being drawn smaller.
  *   6. canvas.toDataURL gives the exact 2400x1260 pixels (no page screenshot,
  *      so no scrollbar or devicePixelRatio surprises), and ImageMagick
- *      downsamples to exactly 1200x630 into docs/ and public/.
+ *      downsamples to exactly 1200x630 into docs/ and public/. Without
+ *      ImageMagick the page does the 2:1 downsample itself.
  *
  * Requirements on this machine:
- *   - Google Chrome at /usr/bin/google-chrome (CHROME_PATH to override).
- *     Playwright's own browsers are NOT installed, so executablePath is always
- *     passed explicitly.
- *   - Playwright is not a dependency of this repo; it lives in
- *     ../Tribble/node_modules and is imported by absolute path, because an ESM
- *     bare specifier would resolve from this script's directory and fail
- *     whatever the cwd is. Override with PLAYWRIGHT_ENTRY=/path/to/index.mjs.
+ *   - Google Chrome (CHROME_PATH to override; the usual install path for the
+ *     platform is the default).
+ *   - Playwright, optionally: if PLAYWRIGHT_ENTRY (default ../Tribble/...)
+ *     exists it is used; otherwise the script drives Chrome itself over the
+ *     DevTools protocol, which needs nothing but Node 22+.
  *   - esbuild from this repo's own node_modules.
- *   - ImageMagick `convert` for the downsample (override with MAGICK=...).
- *   - Fonts: Lato Black, installed system-wide. No network, no CDN.
+ *   - ImageMagick `convert`, optionally, for a Lanczos downsample (MAGICK=...).
+ *   - Fonts: the game's own Barlow and Barlow Condensed, read from
+ *     node_modules/@fontsource. No network, no CDN, nothing system-wide.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -66,12 +66,13 @@ import {
   mkdirSync,
   mkdtempSync,
   readFile,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, extname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -79,9 +80,16 @@ const SRC = join(ROOT, 'src');
 const DOCS = join(ROOT, 'docs');
 const PUBLIC = join(ROOT, 'public');
 
-const CHROME = process.env.CHROME_PATH ?? '/usr/bin/google-chrome';
+const CHROME =
+  process.env.CHROME_PATH ??
+  (process.platform === 'win32'
+    ? 'C:/Program Files/Google/Chrome/Application/chrome.exe'
+    : process.platform === 'darwin'
+      ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+      : '/usr/bin/google-chrome');
 const MAGICK = process.env.MAGICK ?? '/usr/bin/convert';
-const ESBUILD = process.env.ESBUILD ?? join(ROOT, 'node_modules', '.bin', 'esbuild');
+const ESBUILD = process.env.ESBUILD ?? join(ROOT, 'node_modules', 'esbuild', 'lib', 'main.js');
+const FONT_DIR = join(ROOT, 'node_modules', '@fontsource');
 const PLAYWRIGHT_ENTRY =
   process.env.PLAYWRIGHT_ENTRY ??
   resolve(ROOT, '..', 'Tribble', 'node_modules', 'playwright', 'index.mjs');
@@ -171,7 +179,7 @@ const CFG = {
   boss: { x: 524, h: 408 },
 
   /** Wordmark block, bottom left. */
-  title: { x: 132, top: 902, big: 168, small: 60 },
+  title: { x: 132, top: 852, big: 222, small: 62 },
 
   tagline: 'SEVEN DWARFS  ·  ONE BILLIONAIRE  ·  ONE VERY BAD IDEA',
 };
@@ -194,13 +202,16 @@ function paint(cfg) {
   const H = cfg.H;
   const TAU = Math.PI * 2;
 
+  // The game's palette (src/ui/theme.ts). The "pink" names are kept for the
+  // warm KEY light so the lighting code below still reads as it was written;
+  // the light itself is now the lamp-orange of the title screen.
   const P = {
-    ink: '#141019',
-    pink: '#ff2e6e',
-    pinkHot: '#ff5c8d',
-    pinkDeep: '#b8004a',
-    pinkPale: '#ffe6ee',
-    gold: '#ffd23f',
+    ink: '#120d0b',
+    pink: '#ff9a2a',
+    pinkHot: '#ffb24a',
+    pinkDeep: '#8a1212',
+    pinkPale: '#ffe7a6',
+    gold: '#ffb524',
     cold: '#8aa0c8',
     coldPale: '#cfe0ff',
     teal: '#37e6c8',
@@ -683,9 +694,9 @@ function paint(cfg) {
   ctx.fillRect(0, 0, W, H);
 
   const pg = ctx.createRadialGradient(1500, 1180, 40, 1500, 1180, 1050);
-  pg.addColorStop(0, 'rgba(255,46,110,0.26)');
-  pg.addColorStop(0.5, 'rgba(255,46,110,0.07)');
-  pg.addColorStop(1, 'rgba(255,46,110,0)');
+  pg.addColorStop(0, 'rgba(255,150,40,0.26)');
+  pg.addColorStop(0.5, 'rgba(255,150,40,0.07)');
+  pg.addColorStop(1, 'rgba(255,150,40,0)');
   ctx.fillStyle = pg;
   ctx.fillRect(0, 0, W, H);
 
@@ -696,7 +707,7 @@ function paint(cfg) {
     const s = hash01(i * 3 + 3);
     const fade = 1 - y / (H * 0.72);
     ctx.globalAlpha = (0.16 + s * 0.62) * clamp(fade, 0, 1);
-    ctx.fillStyle = s > 0.9 ? P.gold : s > 0.72 ? '#ffd7e6' : '#dfe6ff';
+    ctx.fillStyle = s > 0.9 ? P.gold : s > 0.72 ? '#ffe7c4' : '#dfe6ff';
     const r = s > 0.9 ? 2.6 : s > 0.6 ? 1.9 : 1.3;
     ctx.beginPath();
     ctx.arc(x, y, r, 0, TAU);
@@ -990,9 +1001,9 @@ function paint(cfg) {
     ctx.globalCompositeOperation = 'lighter';
     ctx.lineWidth = 3.4;
     const rl = ctx.createLinearGradient(700, 0, 2400, 0);
-    rl.addColorStop(0, 'rgba(255,46,110,0.05)');
-    rl.addColorStop(0.45, 'rgba(255,92,141,0.34)');
-    rl.addColorStop(1, 'rgba(255,46,110,0.14)');
+    rl.addColorStop(0, 'rgba(255,150,40,0.05)');
+    rl.addColorStop(0.45, 'rgba(255,150,50,0.34)');
+    rl.addColorStop(1, 'rgba(255,150,40,0.14)');
     ctx.strokeStyle = rl;
     ctx.beginPath();
     for (let x = -8; x <= W + 8; x += 5) {
@@ -1050,9 +1061,9 @@ function paint(cfg) {
     ctx.globalCompositeOperation = 'lighter';
     ctx.lineWidth = 4.2;
     const rl = ctx.createLinearGradient(600, 0, 2400, 0);
-    rl.addColorStop(0, 'rgba(255,46,110,0.06)');
-    rl.addColorStop(0.42, 'rgba(255,110,155,0.42)');
-    rl.addColorStop(1, 'rgba(255,46,110,0.16)');
+    rl.addColorStop(0, 'rgba(255,150,40,0.06)');
+    rl.addColorStop(0.42, 'rgba(255,165,70,0.42)');
+    rl.addColorStop(1, 'rgba(255,150,40,0.16)');
     ctx.strokeStyle = rl;
     ctx.beginPath();
     for (let x = -8; x <= W + 8; x += 5) {
@@ -1076,13 +1087,13 @@ function paint(cfg) {
       const r = 1.4 + d * d * 7.4;
       const warm = x > 1180 && y > 560;
       ctx.globalAlpha = (0.1 + hash01(i * 7 + 4) * 0.38) * (0.3 + d * 0.7);
-      ctx.fillStyle = warm ? '#ffd9e6' : '#dae6ff';
+      ctx.fillStyle = warm ? '#ffe2bd' : '#dae6ff';
       ctx.beginPath();
       ctx.arc(x, y, r, 0, TAU);
       ctx.fill();
       if (d > 0.93) {
         ctx.globalAlpha *= 0.5;
-        ctx.strokeStyle = warm ? '#ffd9e6' : '#dae6ff';
+        ctx.strokeStyle = warm ? '#ffe2bd' : '#dae6ff';
         ctx.lineWidth = r * 0.85;
         ctx.lineCap = 'round';
         ctx.beginPath();
@@ -1154,53 +1165,56 @@ function paint(cfg) {
     ctx.textAlign = 'left';
 
     // MOUNTAIN — the quiet half, wide tracking, sitting on a rule.
-    ctx.font = `${T.small}px "Lato Black", Lato, sans-serif`;
+    ctx.font = `800 ${T.small}px "Barlow Condensed", sans-serif`;
     const smallW = (() => {
       const chars = [...'MOUNTAIN'];
       let w = -26;
       for (const ch of chars) w += ctx.measureText(ch).width + 26;
       return w;
     })();
-    tracked('MOUNTAIN', T.x, T.top, 26, '#eef1f8', 'rgba(20,16,25,0.9)', 9);
+    tracked('MOUNTAIN', T.x, T.top, 26, '#f4ecdf', 'rgba(18,13,11,0.9)', 9);
 
-    // A thin pink rule running off to the right of MOUNTAIN.
+    // A thin lamp-gold rule running off to the right of MOUNTAIN.
     const ruleY = T.top - T.small * 0.34;
     const rg = ctx.createLinearGradient(T.x + smallW + 34, 0, T.x + smallW + 430, 0);
-    rg.addColorStop(0, 'rgba(255,46,110,0.85)');
-    rg.addColorStop(1, 'rgba(255,46,110,0)');
+    rg.addColorStop(0, 'rgba(255,150,40,0.85)');
+    rg.addColorStop(1, 'rgba(255,150,40,0)');
     ctx.fillStyle = rg;
     ctx.fillRect(T.x + smallW + 34, ruleY - 3, 396, 6);
 
     // FIGHTERS — the loud half.
-    ctx.font = `${T.big}px "Lato Black", Lato, sans-serif`;
+    ctx.font = `italic 900 ${T.big}px "Barlow Condensed", sans-serif`;
     const baseY = T.top + T.big * 0.92;
     const tr = 4;
 
     ctx.save();
-    ctx.shadowColor = 'rgba(255,46,110,0.55)';
+    ctx.shadowColor = 'rgba(255,150,40,0.55)';
     ctx.shadowBlur = 62;
-    tracked('FIGHTERS', T.x, baseY, tr, 'rgba(255,46,110,0.9)', null, 0);
+    tracked('FIGHTERS', T.x, baseY, tr, 'rgba(255,150,40,0.9)', null, 0);
     ctx.restore();
 
-    // Drop plate: a deep magenta copy offset down-right gives the type mass.
-    tracked('FIGHTERS', T.x + 9, baseY + 11, tr, P.pinkDeep, null, 0);
+    // Extrusion: blood-red steps down-right, ink at the back, as on the title.
+    for (let i = 8; i >= 1; i--) {
+      tracked('FIGHTERS', T.x + i * 1.6, baseY + i * 2, tr, i > 4 ? P.ink : P.pinkDeep, null, 0);
+    }
 
-    const grad = ctx.createLinearGradient(0, baseY - T.big * 0.78, 0, baseY + 6);
-    grad.addColorStop(0, '#fff2f6');
-    grad.addColorStop(0.36, P.pinkHot);
-    grad.addColorStop(1, '#e01055');
+    const grad = ctx.createLinearGradient(0, baseY - T.big * 0.74, 0, baseY + 6);
+    grad.addColorStop(0, '#ffe7a6');
+    grad.addColorStop(0.45, '#ffcb57');
+    grad.addColorStop(0.55, '#ffb524');
+    grad.addColorStop(1, '#e8780f');
     const bigW = tracked('FIGHTERS', T.x, baseY, tr, grad, P.ink, 11);
 
     // The studded bar off the game's own logo — same studs as the jackets.
     // Bar first, studs on top of it. Drawn the other way round the strip hides
     // all but the tips of the studs and they read as fringing on the rule.
     const barY = baseY + 42;
-    MF.Shapes.roundRect(ctx, T.x, barY - 4, bigW, 8, 4, P.pinkDeep, 'none', 0);
+    MF.Shapes.roundRect(ctx, T.x, barY - 4, bigW, 8, 4, '#e5322d', 'none', 0);
     MF.Shapes.spikeStrip(ctx, T.x + 16, barY + 3, T.x + bigW - 16, barY + 3, 11, 16, P.gold);
 
     // Tagline.
-    ctx.font = `600 30px Lato, "Noto Sans", sans-serif`;
-    tracked(cfg.tagline, T.x + 4, barY + 74, 4.4, '#c4ccdd', 'rgba(3,4,9,0.85)', 5);
+    ctx.font = `600 32px "Barlow Condensed", sans-serif`;
+    tracked(cfg.tagline, T.x + 4, barY + 74, 5, '#c2b4a1', 'rgba(12,9,7,0.85)', 5);
 
     ctx.restore();
   }
@@ -1517,17 +1531,17 @@ function paint(cfg) {
     c.save();
     c.globalCompositeOperation = 'source-atop';
     const key = c.createLinearGradient(X - 430, Y - 980, X + 470, Y - 260);
-    key.addColorStop(0, 'rgba(255,74,128,0.32)');
-    key.addColorStop(0.34, 'rgba(255,96,144,0.09)');
+    key.addColorStop(0, 'rgba(255,130,40,0.32)');
+    key.addColorStop(0.34, 'rgba(255,150,60,0.09)');
     key.addColorStop(0.62, 'rgba(58,80,146,0.14)');
     key.addColorStop(1, 'rgba(126,164,232,0.34)');
     c.fillStyle = key;
     c.fillRect(0, 0, W, H);
     // and a floor-up warm bounce
     const bounce = c.createLinearGradient(0, Y - 120, 0, Y - 700);
-    bounce.addColorStop(0, 'rgba(255,86,134,0.46)');
-    bounce.addColorStop(0.5, 'rgba(255,86,134,0.2)');
-    bounce.addColorStop(1, 'rgba(255,86,134,0)');
+    bounce.addColorStop(0, 'rgba(255,140,50,0.46)');
+    bounce.addColorStop(0.5, 'rgba(255,140,50,0.2)');
+    bounce.addColorStop(1, 'rgba(255,140,50,0)');
     c.fillStyle = bounce;
     c.fillRect(0, Y - 640, W, 650);
     c.restore();
@@ -1548,16 +1562,16 @@ function paint(cfg) {
     // one long specular down the front of the jacket, which is what says
     // leather rather than cloth
     const spec = c.createLinearGradient(X - 180, 0, X - 20, 0);
-    spec.addColorStop(0, 'rgba(255,96,140,0)');
-    spec.addColorStop(0.5, 'rgba(255,110,152,0.2)');
-    spec.addColorStop(1, 'rgba(255,96,140,0)');
+    spec.addColorStop(0, 'rgba(255,160,70,0)');
+    spec.addColorStop(0.5, 'rgba(255,176,90,0.2)');
+    spec.addColorStop(1, 'rgba(255,160,70,0)');
     c.fillStyle = spec;
     c.fillRect(X - 190, Y - 470, 180, 430);
     c.restore();
 
     // ── Separation. Offset silhouettes under the figure: pink on the key side,
     // silver on the moon side. This is the whole trick.
-    const pinkSil = silhouette(L.c, '#ff5c8d');
+    const pinkSil = silhouette(L.c, '#ffb24a');
     const coldSil = silhouette(L.c, '#cfe0ff');
 
     ctx.save();
@@ -1693,7 +1707,7 @@ function paint(cfg) {
     c.beginPath();
     c.moveTo(q(-0.1), q(-5.3));
     c.bezierCurveTo(q(0.7), q(-3.2), q(1.4), q(-1.8), q(1.5), q(-0.9));
-    c.strokeStyle = 'rgba(255,126,166,0.95)';
+    c.strokeStyle = 'rgba(255,170,90,0.95)';
     c.stroke();
 
     // the eye: a band of steel wrapped around the haft
@@ -1884,7 +1898,7 @@ function paint(cfg) {
       cx + warm.x * R, cy + warm.y * R,
       cx + cold.x * R, cy + cold.y * R,
     );
-    kg.addColorStop(0, `rgba(255,92,138,${lerp(0.13, 0.3, t).toFixed(3)})`);
+    kg.addColorStop(0, `rgba(255,150,50,${lerp(0.13, 0.3, t).toFixed(3)})`);
     kg.addColorStop(0.48, 'rgba(96,74,150,0.1)');
     kg.addColorStop(1, `rgba(126,164,232,${lerp(0.16, 0.3, t).toFixed(3)})`);
     c.fillStyle = kg;
@@ -1932,7 +1946,7 @@ function paint(cfg) {
     // hero's pool, and depth-of-field blur on the ones furthest back.
     const push = 3 + 5 * t;
     const coldSil = silhouette(L.c, '#cfe0ff');
-    const pinkSil = silhouette(L.c, '#ff7ba5');
+    const pinkSil = silhouette(L.c, '#ffc070');
     ctx.save();
     ctx.filter = `blur(${lerp(1.8, 0.4, t).toFixed(2)}px)`;
     ctx.globalAlpha = lerp(0.28, 0.5, t);
@@ -2093,10 +2107,10 @@ function paint(cfg) {
       c.save();
       c.textAlign = 'center';
       c.fillStyle = i === 0 ? '#ffd23f' : '#e6ecf7';
-      c.font = '600 34px Lato, sans-serif';
+      c.font = '600 34px Barlow, sans-serif';
       c.fillText(d.name, HW * i + HW * 0.5, HH - 58);
       c.fillStyle = '#8f9ab0';
-      c.font = '500 26px Lato, sans-serif';
+      c.font = '500 26px Barlow, sans-serif';
       c.fillText(i === 0 ? `${d.bornAs} — the hero` : d.bornAs, HW * i + HW * 0.5, HH - 22);
       c.strokeStyle = 'rgba(255,255,255,0.09)';
       c.lineWidth = 2;
@@ -2139,7 +2153,7 @@ function paint(cfg) {
           ['mouth + teeth', 0.54, 1.02, '#ff5c8d'],
           ['beard', 1.04, 2.2, '#c08cff'],
         ];
-    c.font = '600 26px Lato, sans-serif';
+    c.font = '600 26px Barlow, sans-serif';
     c.textBaseline = 'middle';
     for (const [label, y0, y1, col] of bands) {
       c.fillStyle = col + '1f';
@@ -2448,7 +2462,7 @@ function paint(cfg) {
       c.fill();
       c.beginPath();
       c.arc(icx + h * 0.6, icy + h * 0.42, h * 0.19, 0, TAU);
-      c.fillStyle = 'rgba(255,124,168,0.95)';
+      c.fillStyle = 'rgba(255,175,95,0.95)';
       c.fill();
       // the lid's own shadow, dropped onto the eyeball
       const ls = c.createLinearGradient(0, -h * 1.5, 0, h * 0.2);
@@ -2591,7 +2605,7 @@ function paint(cfg) {
     // and the neon kissing the very tip
     c.beginPath();
     c.ellipse(X(1.01), Y(0.40), X(0.045), Y(0.085), -0.1, 0, TAU);
-    c.fillStyle = 'rgba(255,112,158,0.85)';
+    c.fillStyle = 'rgba(255,165,80,0.85)';
     c.fill();
     // one flared nostril
     c.beginPath();
@@ -2686,8 +2700,8 @@ function paint(cfg) {
     c.fillStyle = bcool;
     c.fillRect(X(-1.1), Y(0.2), X(1.0), Y(2.2));
     const bwarm = c.createLinearGradient(X(0.94), 0, X(0.3), 0);
-    bwarm.addColorStop(0, 'rgba(255,166,190,0.45)');
-    bwarm.addColorStop(1, 'rgba(255,166,190,0)');
+    bwarm.addColorStop(0, 'rgba(255,196,140,0.45)');
+    bwarm.addColorStop(1, 'rgba(255,196,140,0)');
     c.fillStyle = bwarm;
     c.fillRect(X(0.3), Y(0.2), X(0.68), Y(2.2));
 
@@ -2836,7 +2850,7 @@ function paint(cfg) {
     c.bezierCurveTo(X(-0.92), Y(0.74), X(-0.98), Y(1.14), X(-0.9), Y(1.5));
     c.stroke();
 
-    c.strokeStyle = 'rgba(255,138,178,0.8)';
+    c.strokeStyle = 'rgba(255,180,110,0.8)';
     c.lineWidth = ow * 1.0;
     c.beginPath();
     // These MUST track noseFront() exactly. They were left on the old, larger
@@ -3433,8 +3447,8 @@ function paint(cfg) {
         c.fillStyle = bc;
         c.fillRect(X(-1.6), Y(0), X(1.5), Y(bot + 0.6));
         const bwm = c.createLinearGradient(X(1.15 * w), 0, X(0.2), 0);
-        bwm.addColorStop(0, 'rgba(255,166,190,0.34)');
-        bwm.addColorStop(1, 'rgba(255,166,190,0)');
+        bwm.addColorStop(0, 'rgba(255,196,140,0.34)');
+        bwm.addColorStop(1, 'rgba(255,196,140,0)');
         c.fillStyle = bwm;
         c.fillRect(X(0.2), Y(0), X(1.4), Y(bot + 0.6));
         // clump edges: a dark valley with a lit ridge beside it, which is what
@@ -3938,6 +3952,7 @@ const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.mjs': 'text/javascript',
   '.js': 'text/javascript',
+  '.woff2': 'font/woff2',
 };
 
 function startServer(root) {
@@ -3964,10 +3979,99 @@ function startServer(root) {
 }
 
 if (!existsSync(ESBUILD)) throw new Error(`no esbuild at ${ESBUILD} — run npm install`);
-if (!existsSync(PLAYWRIGHT_ENTRY)) {
-  throw new Error(`playwright not found at ${PLAYWRIGHT_ENTRY} — set PLAYWRIGHT_ENTRY`);
+if (!existsSync(CHROME)) throw new Error(`no Chrome at ${CHROME} — set CHROME_PATH`);
+
+/** The faces the poster uses, copied next to the page and declared by hand. */
+const FACES = [
+  ['Barlow Condensed', 'barlow-condensed/files/barlow-condensed-latin-600-normal.woff2', '600', 'normal'],
+  ['Barlow Condensed', 'barlow-condensed/files/barlow-condensed-latin-800-normal.woff2', '800', 'normal'],
+  ['Barlow Condensed', 'barlow-condensed/files/barlow-condensed-latin-900-italic.woff2', '900', 'italic'],
+  ['Barlow', 'barlow/files/barlow-latin-500-normal.woff2', '500', 'normal'],
+  ['Barlow', 'barlow/files/barlow-latin-600-normal.woff2', '600', 'normal'],
+];
+
+/**
+ * The few things this script asks of a browser, over the DevTools protocol.
+ * Used when Playwright is not around — which is the case on any machine but
+ * the one this tool was first written on.
+ */
+async function cdpBrowser() {
+  const { spawn } = await import('node:child_process');
+  const port = 9400 + Math.floor(Math.random() * 400);
+  const profile = mkdtempSync(join(tmpdir(), 'mf-cover-chrome-'));
+  const proc = spawn(CHROME, [
+    '--headless=new',
+    `--remote-debugging-port=${port}`,
+    `--user-data-dir=${profile}`,
+    '--force-color-profile=srgb',
+    '--font-render-hinting=none',
+    '--no-first-run',
+    'about:blank',
+  ], { stdio: 'ignore' });
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  let ws = null;
+  for (let i = 0; i < 100 && !ws; i++) {
+    try {
+      const list = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
+      const page = list.find((t) => t.type === 'page');
+      if (page) ws = new WebSocket(page.webSocketDebuggerUrl);
+    } catch {
+      await sleep(100);
+    }
+  }
+  if (!ws) throw new Error('could not reach Chrome over CDP');
+  await new Promise((r) => ws.addEventListener('open', r, { once: true }));
+  let id = 0;
+  const pending = new Map();
+  ws.addEventListener('message', (e) => {
+    const m = JSON.parse(e.data);
+    if (m.method === 'Runtime.exceptionThrown') {
+      console.error('page error:', m.params.exceptionDetails?.exception?.description ?? m.params.exceptionDetails?.text);
+    }
+    if (m.id && pending.has(m.id)) {
+      pending.get(m.id)(m);
+      pending.delete(m.id);
+    }
+  });
+  const send = (method, params = {}) =>
+    new Promise((r) => {
+      const i = ++id;
+      pending.set(i, r);
+      ws.send(JSON.stringify({ id: i, method, params }));
+    });
+  const evaluate = async (expression) => {
+    const r = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+    if (r.result?.exceptionDetails) {
+      throw new Error(r.result.exceptionDetails.exception?.description ?? r.result.exceptionDetails.text);
+    }
+    return r.result?.result?.value;
+  };
+  await send('Runtime.enable');
+  return {
+    async open(url) {
+      await send('Page.enable');
+      await send('Page.navigate', { url });
+      for (let i = 0; i < 200; i++) {
+        if (await evaluate('window.__ready === true')) return;
+        await sleep(100);
+      }
+      throw new Error('page never became ready');
+    },
+    evaluate,
+    async close() {
+      try { ws.close(); } catch { /* gone */ }
+      proc.kill();
+      await sleep(300);
+      rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    },
+  };
 }
-const { chromium } = await import(PLAYWRIGHT_ENTRY);
+
+/** Width and height straight out of a PNG's IHDR. */
+function pngSize(file) {
+  const b = readFileSync(file);
+  return { w: b.readUInt32BE(16), h: b.readUInt32BE(20) };
+}
 
 const tmp = mkdtempSync(join(tmpdir(), 'mf-cover-'));
 
@@ -3983,52 +4087,78 @@ try {
       '',
     ].join('\n'),
   );
-  execFileSync(ESBUILD, [
-    join(tmp, 'entry.ts'),
-    '--bundle',
-    '--format=esm',
-    `--alias:@=${SRC}`,
-    `--outfile=${join(tmp, 'mf.mjs')}`,
-  ], { stdio: 'pipe' });
+  // The JS API rather than the binary: the binary's path and extension differ
+  // by platform, the API is the same everywhere.
+  const esbuild = await import(pathToFileURL(ESBUILD).href);
+  await (esbuild.build ?? esbuild.default.build)({
+    entryPoints: [join(tmp, 'entry.ts')],
+    bundle: true,
+    format: 'esm',
+    alias: { '@': SRC },
+    outfile: join(tmp, 'mf.mjs'),
+    logLevel: 'warning',
+  });
+
+  const faceCss = FACES.map(([family, rel, weight, style], i) => {
+    const name = `f${i}.woff2`;
+    copyFileSync(join(FONT_DIR, rel), join(tmp, name));
+    return `@font-face{font-family:"${family}";src:url(${name}) format("woff2");font-weight:${weight};font-style:${style}}`;
+  }).join('');
 
   // 2. The page. ES modules need HTTP, hence the server below.
   writeFileSync(
     join(tmp, 'index.html'),
     `<!doctype html><meta charset="utf-8"><title>cover</title>
-<style>html,body{margin:0;background:#000;overflow:hidden}canvas{display:block}</style>
+<style>${faceCss}html,body{margin:0;background:#000;overflow:hidden}canvas{display:block}</style>
 <canvas id="cv" width="${BIG.w}" height="${BIG.h}"></canvas>
 <script type="module">
 import * as MF from './mf.mjs';
 window.MF = MF;
 const probe = document.createElement('canvas').getContext('2d');
-probe.font = '200px "Lato Black"';
-await document.fonts.load('200px "Lato Black"');
-await document.fonts.load('600 40px Lato');
+probe.font = 'italic 900 200px "Barlow Condensed"';
+await document.fonts.load('italic 900 200px "Barlow Condensed"');
+await document.fonts.load('800 60px "Barlow Condensed"');
+await document.fonts.load('600 32px "Barlow Condensed"');
+await document.fonts.load('600 32px Barlow');
 await document.fonts.ready;
 window.__ready = true;
 </script>`,
   );
 
   const { server, port } = await startServer(tmp);
-  const browser = await chromium.launch({
-    executablePath: CHROME,
-    args: ['--no-sandbox', '--force-color-profile=srgb', '--font-render-hinting=none'],
-  });
-
-  try {
+  const args = {
+    ...CFG,
+    headOnly: HEAD_ONLY !== undefined,
+    guides: !!process.env.GUIDES,
+    crewHead: process.env.CREW ?? null,
+  };
+  let browser = null;
+  let session = null;
+  if (existsSync(PLAYWRIGHT_ENTRY)) {
+    const { chromium } = await import(pathToFileURL(PLAYWRIGHT_ENTRY).href);
+    browser = await chromium.launch({
+      executablePath: CHROME,
+      args: ['--no-sandbox', '--force-color-profile=srgb', '--font-render-hinting=none'],
+    });
     const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
     page.on('pageerror', (e) => console.error('page error:', e.message));
-    await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'load' });
-    await page.waitForFunction(() => window.__ready === true, null, { timeout: 20000 });
+    session = {
+      open: async (url) => {
+        await page.goto(url, { waitUntil: 'load' });
+        await page.waitForFunction(() => window.__ready === true, null, { timeout: 20000 });
+      },
+      evaluate: (expr) => page.evaluate(expr),
+      close: () => browser.close(),
+    };
+  } else {
+    session = await cdpBrowser();
+  }
 
-    await page.evaluate(paint, {
-      ...CFG,
-      headOnly: HEAD_ONLY !== undefined,
-      guides: !!process.env.GUIDES,
-      crewHead: process.env.CREW ?? null,
-    });
+  try {
+    await session.open(`http://127.0.0.1:${port}/`);
+    await session.evaluate(`(${paint.toString()})(${JSON.stringify(args)})`);
 
-    const dataUrl = await page.evaluate(() => document.getElementById('cv').toDataURL('image/png'));
+    const dataUrl = await session.evaluate("document.getElementById('cv').toDataURL('image/png')");
     const big = join(tmp, 'big.png');
     writeFileSync(big, Buffer.from(dataUrl.slice(dataUrl.indexOf(',') + 1), 'base64'));
 
@@ -4041,24 +4171,39 @@ window.__ready = true;
     } else {
       const card = join(DOCS, 'social-card.png');
       mkdirSync(DOCS, { recursive: true });
-      execFileSync(MAGICK, [
-        big,
-        '-filter', 'Lanczos',
-        '-resize', `${CARD.w}x${CARD.h}!`,
-        '-strip',
-        '-quality', '95',
-        card,
-      ]);
+      if (existsSync(MAGICK)) {
+        execFileSync(MAGICK, [
+          big,
+          '-filter', 'Lanczos',
+          '-resize', `${CARD.w}x${CARD.h}!`,
+          '-strip',
+          '-quality', '95',
+          card,
+        ]);
+      } else {
+        // Exactly 2:1, so the browser's high-quality smoothing is a clean box
+        // filter over each 2x2 block — no Lanczos, but no ringing either.
+        const small = await session.evaluate(`(() => {
+          const src = document.getElementById('cv');
+          const c = document.createElement('canvas');
+          c.width = ${CARD.w}; c.height = ${CARD.h};
+          const x = c.getContext('2d');
+          x.imageSmoothingEnabled = true;
+          x.imageSmoothingQuality = 'high';
+          x.drawImage(src, 0, 0, ${CARD.w}, ${CARD.h});
+          return c.toDataURL('image/png');
+        })()`);
+        writeFileSync(card, Buffer.from(small.slice(small.indexOf(',') + 1), 'base64'));
+      }
 
       mkdirSync(PUBLIC, { recursive: true });
       copyFileSync(card, join(PUBLIC, 'social-card.png'));
 
-      const info = execFileSync('/usr/bin/identify', ['-format', '%wx%h %[colorspace] %B', card])
-        .toString()
-        .trim();
-      if (!info.startsWith(`${CARD.w}x${CARD.h} `)) {
-        throw new Error(`expected ${CARD.w}x${CARD.h}, got ${info}`);
+      const size = pngSize(card);
+      if (size.w !== CARD.w || size.h !== CARD.h) {
+        throw new Error(`expected ${CARD.w}x${CARD.h}, got ${size.w}x${size.h}`);
       }
+      const info = `${size.w}x${size.h}`;
       console.log(`social-card.png  ${info}`);
       for (const d of [DOCS, PUBLIC]) console.log(`  wrote ${join(d, 'social-card.png')}`);
 
@@ -4068,7 +4213,7 @@ window.__ready = true;
       }
     }
   } finally {
-    await browser.close();
+    await session.close();
     server.close();
   }
 } finally {

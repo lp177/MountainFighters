@@ -371,6 +371,68 @@ clip('fall', 30, true, [
   )),
 ]);
 
+/**
+ * The two aerials. Both open on the tuck the jump is already holding, so they
+ * can be thrown on the first frame off the floor without the body snapping to
+ * attention on its way up.
+ */
+clip('air_knee', 22, false, [
+  kf(0, merge(
+    body(0, 0.8), hips(0.05, 0), spine(0.05, 0.02, 0, -0.02),
+    arms(0.95, 0.55, 1.05, 0.5), hands(0, 0),
+    legs(0.35, 0.7, 0.2, 0.95, 0.2, 0.3), head2(-0.12, -0.08),
+  ), 'snap'),
+  // drive: chest open, elbows hauled back past the ribs, and the near knee up
+  // and out in front of everything else — it has to be the leading edge of the
+  // silhouette, or what arrives reads as a tackle
+  kf(3, merge(
+    body(1.8, 1.0), tilt(-0.2), hips(-0.1, 1.4), spine(-0.12, -0.08, 0.06, 0.12),
+    arms(-0.75, 1.45, -1.05, 1.6), hands(-0.15, -0.15),
+    legs(-0.5, 0.35, 1.72, 2.2, -0.4, 0.7), head2(-0.38, -0.32),
+  ), 'easeOut'),
+  kf(13, merge(
+    body(1.6, 0.9), tilt(-0.17), hips(-0.08, 1.2), spine(-0.1, -0.07, 0.05, 0.1),
+    arms(-0.7, 1.4, -1.0, 1.55), hands(-0.15, -0.15),
+    legs(-0.45, 0.4, 1.62, 2.1, -0.35, 0.65), head2(-0.24, -0.2),
+  ), 'linear'),
+  // let go and get the feet back underneath for the landing
+  kf(22, merge(
+    body(0, 0.4), hips(0, 0), spine(0, 0, 0.02, 0.03),
+    arms(1.1, 0.5, 1.2, 0.4), hands(0, 0),
+    legs(0.1, 0.5, 0.3, 0.7, 0, 0.2), head2(-0.3, -0.26),
+  ), 'easeOut'),
+]);
+
+clip('air_kick', 26, false, [
+  kf(0, merge(
+    body(0, 0.8), hips(0.05, 0), spine(0.05, 0.02, 0, -0.02),
+    arms(0.95, 0.55, 1.05, 0.5), hands(0, 0),
+    legs(0.35, 0.7, 0.2, 0.95, 0.2, 0.3), head2(-0.12, -0.08),
+  ), 'snap'),
+  // chamber: knee to the chest, the far leg folding up out of the way
+  kf(4, merge(
+    body(-0.4, 0.6), tilt(-0.12), hips(-0.1, -0.6), spine(-0.08, -0.04, 0.03, 0.06),
+    arms(1.0, 1.0, -0.5, 1.25), hands(0, 0),
+    legs(0.7, 1.6, 1.25, 1.95, 0.2, 0.5), head2(-0.2, -0.18),
+  ), 'easeIn'),
+  // extend: the whole body lies back behind one straight leg, heel first
+  kf(7, merge(
+    body(1.6, 0), tilt(-0.42), hips(-0.2, 0.9), spine(-0.16, -0.1, 0.1, 0.2),
+    arms(1.35, 0.7, -1.25, 0.9), hands(0, 0),
+    legs(0.95, 2.1, 1.15, 0.04, 0.3, -0.5), head2(-0.5, -0.44),
+  ), 'easeOut'),
+  kf(18, merge(
+    body(1.4, 0), tilt(-0.38), hips(-0.18, 0.8), spine(-0.15, -0.09, 0.1, 0.18),
+    arms(1.3, 0.75, -1.2, 0.95), hands(0, 0),
+    legs(0.9, 2.0, 1.1, 0.08, 0.3, -0.45), head2(-0.4, -0.36),
+  ), 'linear'),
+  kf(26, merge(
+    body(0, 0.4), hips(0, 0), spine(0, 0, 0.02, 0.03),
+    arms(1.1, 0.5, 1.2, 0.4), hands(0, 0),
+    legs(0.1, 0.5, 0.3, 0.7, 0, 0.2), head2(-0.3, -0.26),
+  ), 'easeOut'),
+]);
+
 clip('land', 14, false, [
   kf(0, merge(
     body(0, 0.6), hips(0.02, 0), spine(0.02, 0, 0, 0),

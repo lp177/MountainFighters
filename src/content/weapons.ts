@@ -52,7 +52,7 @@ export const WEAPONS: Record<WeaponKind, WeaponDef> = {
    */
   dagger: {
     kind: 'dagger',
-    sfx: { reveal: 'hit_metal', swing: 'whiff', swingPitch: 1.5, impact: 'hit_flesh' },
+    sfx: { reveal: 'hit_metal', swing: 'slice', swingPitch: 1.1, impact: 'slice' },
     name: 'Pit Knife',
     durability: 40,
     damageScale: 1.15,

@@ -819,9 +819,13 @@ function contactShadow(ctx: C2D, x: number, y: number, rx: number, a: number): v
 function drawRim(r: Rig): void {
   const ctx = r.ctx;
   const c = rimCol;
-  const pad = RIM_PAD * r.u;
+  // The edge is a line of light, not part of the anatomy, so past fight scale it
+  // stops growing with the body. At the select screen's 3x a fully scaled offset
+  // was a 5px slab of blue behind the dwarf that read as a misprint.
+  const k = r.u <= 1.2 ? r.u : 1.2 + (r.u - 1.2) * 0.35;
+  const pad = RIM_PAD * k;
   ctx.save();
-  ctx.translate(RIM_BACK * r.u, RIM_UP * r.u);
+  ctx.translate(RIM_BACK * k, RIM_UP * k);
   rimLeg(r, false, c, pad);
   rimArm(r, false, c, pad);
   rimBody(r, c, pad);

@@ -34,21 +34,34 @@ import type { Game } from '@/Game';
 import type { HomeParams } from '@/scenes/HomeScene';
 import type { FightParams, FightPlayerPick } from '@/scenes/FightScene';
 
-import { GROUND_Y, MAX_LOCAL_PLAYERS, VIEW_H, VIEW_W, Z_SCALE } from '@/core/constants';
+import { GROUND_Y, MAX_LOCAL_PLAYERS, TOTAL_MAPS, VIEW_H, VIEW_W, Z_SCALE } from '@/core/constants';
 import { TAU, clamp, easeInOut, easeOut, easeOutBack } from '@/core/math';
 import { randomSeed } from '@/engine/Rng';
 import { KeyboardSource, installKeyboard } from '@/engine/input/KeyboardSource';
 import { connectedGamepads, pollGamepads } from '@/engine/input/GamepadSource';
-import { DEFAULT_BINDINGS } from '@/engine/input/Bindings';
+import { DEFAULT_BINDINGS, codeForBit } from '@/engine/input/Bindings';
+import { keyLabel } from '@/engine/input/Layout';
+import { touchActive } from '@/engine/input/TouchControls';
 import { DWARFS, getDwarf } from '@/content/dwarfs';
 import { WEAPONS } from '@/content/weapons';
 import { CLIPS, blendPose, sampleClip } from '@/render/rig/Anim';
 import { DWARF_SKELETON } from '@/render/rig/Skeleton';
 import { drawCharacter } from '@/render/rig/CharacterRig';
-import { burst, poly, roundRect, star } from '@/render/Shapes';
+import { burst, poly, star } from '@/render/Shapes';
 import { Camera } from '@/render/Camera';
 import { ParticleSystem } from '@/juice/Particles';
 import { CutsceneScene } from '@/scenes/CutsceneScene';
+import {
+  PALETTE,
+  band,
+  displayFont,
+  hintRow,
+  inkText,
+  playerColor,
+  slab,
+  textFont,
+  trackedText,
+} from '@/ui/theme';
 
 type C2D = CanvasRenderingContext2D;
 
@@ -83,36 +96,33 @@ export interface PlayerPick extends FightPlayerPick {
 // Layout — authored against the 640x360 virtual screen
 // ─────────────────────────────────────────────────────────────────────────────
 
-const STAGE = { x: 10, y: 26, w: 226, h: 226 };
-const INFO = { x: 242, y: 26, w: 388, h: 226 };
-const FLOOR_Y = 236;
-const RIG_SCALE = 3.0;
+/** The preview: no box. He stands in a pool of light on the backdrop itself. */
+const STAGE = { x: 8, y: 34, w: 236, h: 220 };
+const INFO = { x: 250, y: 34, w: 382, h: 220 };
+const FLOOR_Y = 232;
+const RIG_SCALE = 2.85;
 
-const ROSTER_X = 10;
-const ROSTER_Y = 262;
-const CARD_W = 85;
-const CARD_H = 80;
-const CARD_GAP = 4;
+const ROSTER_X = 8;
+const ROSTER_Y = 264;
+const CARD_GAP = 6;
+const CARD_W = (VIEW_W - ROSTER_X * 2 - CARD_GAP * 6) / 7;
+const CARD_H = 70;
+/** Forward lean of every card: the italic of the display face, again. */
+const CARD_LEAN = 6;
 /** Frames a card's nudge animation runs for. */
 const BUMP_FRAMES = 12;
 
-const COL_L = INFO.x + 12;
-const COL_R = 434;
+const COL_L = INFO.x + 16;
+const COL_R = INFO.x + 210;
 
-const ACCENT = '#ff2e6e';
-const ACCENT_DEEP = '#b8004a';
-const GOLD = '#ffd23f';
-const DIM = '#a2aabb';
-const FAINT = '#6d768a';
-const PAPER = '#eceff6';
-const SURFACE = '#0d1018';
-const OUTLINE = '#2c3242';
+const GOLD = PALETTE.lamp;
+const DIM = PALETTE.boneDim;
+const FAINT = PALETTE.boneFaint;
+const PAPER = PALETTE.bone;
+const INK = PALETTE.ink;
 
-const DISPLAY = '"Arial Black", "Helvetica Neue", Impact, system-ui, sans-serif';
-const SANS = 'ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif';
-
-const CURSOR_COLORS = ['#ff2e6e', '#ffd23f', '#6ee4ff', '#7cff8f'];
-const REMOTE_COLOR = '#b98cff';
+/** Online, a player who is not on this machine. Not a seat colour, on purpose. */
+const REMOTE_COLOR = '#b9a7d9';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The transformation timeline
@@ -186,6 +196,12 @@ interface StatRow {
   max: number;
 }
 
+/**
+ * The dwarf's profile. Relative ratings across the roster, not frame data —
+ * the old heading said FRAME DATA, which in a fighting game means startup,
+ * active and recovery frames, and a player who knows the term was promised
+ * something this panel does not show.
+ */
 const STATS: StatRow[] = [
   { label: 'STAMINA', read: (d) => d.stats.health, min: 76, max: 148 },
   { label: 'POWER', read: (d) => d.stats.power, min: 0.72, max: 1.52 },
@@ -197,10 +213,6 @@ const STATS: StatRow[] = [
 // ─────────────────────────────────────────────────────────────────────────────
 // Canvas text helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-function setFont(ctx: C2D, size: number, weight: number, display: boolean, italic = false): void {
-  ctx.font = `${italic ? 'italic ' : ''}${weight} ${size}px ${display ? DISPLAY : SANS}`;
-}
 
 function label(
   ctx: C2D,
@@ -215,41 +227,33 @@ function label(
   ctx.fillText(s, x, y);
 }
 
-function tracked(ctx: C2D, s: string, x: number, y: number, gap: number, color: string): number {
-  ctx.textAlign = 'left';
-  ctx.fillStyle = color;
-  let cx = x;
-  for (const ch of [...s]) {
-    ctx.fillText(ch, cx, y);
-    cx += ctx.measureText(ch).width + gap;
-  }
-  return cx - x - gap;
-}
-
 function wrap(ctx: C2D, s: string, maxW: number, maxLines: number): string[] {
-  const words = s.split(/\s+/);
+  const words = s.split(/\s+/).filter(Boolean);
   const lines: string[] = [];
   let line = '';
+  let used = 0;
   for (const w of words) {
     const next = line ? `${line} ${w}` : w;
     if (ctx.measureText(next).width <= maxW || !line) {
       line = next;
+      used++;
       continue;
     }
     lines.push(line);
-    line = w;
     if (lines.length === maxLines) break;
+    line = w;
+    used++;
   }
   if (lines.length < maxLines && line) lines.push(line);
-  if (lines.length === maxLines) {
-    // Trim the tail to an ellipsis rather than letting it run off the panel.
-    let last = lines[maxLines - 1];
-    if (ctx.measureText(last).width > maxW) {
-      while (last.length > 1 && ctx.measureText(`${last}…`).width > maxW) last = last.slice(0, -1);
-      lines[maxLines - 1] = `${last}…`;
-    }
+  // Text that did not fit says so. A sentence that simply stops mid-thought
+  // ("What comes out is a") reads as a bug, not as a cut.
+  const truncated = used < words.length || lines.length > maxLines;
+  if (truncated && lines.length > 0) {
+    let last = lines[Math.min(lines.length, maxLines) - 1].replace(/[\s,;:.—-]+$/, '');
+    while (last.length > 1 && ctx.measureText(`${last}…`).width > maxW) last = last.slice(0, -1).trimEnd();
+    lines[Math.min(lines.length, maxLines) - 1] = `${last}…`;
   }
-  return lines;
+  return lines.slice(0, maxLines);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -338,6 +342,7 @@ export class SelectScene implements Scene {
     this.refreshPreview(this.cursors[0]?.index ?? 0, true);
 
     this.game.audio.music('select');
+    this.game.canvas.addEventListener('pointerdown', this.onPointer);
 
     if (this.online && net) {
       net.onMessage(this.onNet);
@@ -346,6 +351,7 @@ export class SelectScene implements Scene {
   }
 
   exit(): void {
+    this.game.canvas.removeEventListener('pointerdown', this.onPointer);
     const net = this.game.net;
     if (net) {
       net.offMessage(this.onNet);
@@ -376,7 +382,7 @@ export class SelectScene implements Scene {
     const ctx = r.ctx;
 
     r.begin();
-    r.clear('#06070a');
+    r.clear(PALETTE.coal);
     this.drawBackdrop(ctx, this.frame + alpha);
     this.drawHeader(ctx);
     this.drawStage(ctx, alpha);
@@ -387,10 +393,24 @@ export class SelectScene implements Scene {
     r.end();
   }
 
+  /**
+   * The menu keys every other screen answers to. This one only knew Escape —
+   * the home screen said "Enter to choose", and Enter here did nothing at all.
+   * Escape and Backspace now step back one level: a locked pick is unlocked
+   * before anybody is thrown out to the title.
+   */
   onKey(e: KeyboardEvent): void {
-    if (e.key === 'Escape') {
+    if (e.repeat || e.altKey || e.ctrlKey || e.metaKey) return;
+    const c = this.cursors[0];
+    if (e.key === 'Escape' || e.key === 'Backspace') {
       e.preventDefault();
-      this.goBack();
+      if (c && c.locked && !this.launched) this.unlock(c);
+      else this.goBack();
+      return;
+    }
+    if (e.key === 'Enter' && c && !this.launched) {
+      e.preventDefault();
+      this.lock(c);
     }
   }
 
@@ -508,7 +528,7 @@ export class SelectScene implements Scene {
       seat,
       index: Math.min(seat, DWARFS.length - 1),
       locked: null,
-      color: CURSOR_COLORS[shade % CURSOR_COLORS.length],
+      color: playerColor(shade),
       dir: 0,
       timer: 0,
       bump: 0,
@@ -730,7 +750,7 @@ export class SelectScene implements Scene {
       // The pose. Camera punch, floor ring, and whatever he calls a war cry.
       this.game.audio.play('super_charge', { gain: 0.85 });
       this.game.audio.voice(d.voice, 'taunt');
-      this.kick(0.09, 6, 0.34, ACCENT);
+      this.kick(0.09, 6, 0.34, d.style.jacketAccent);
       if (!reduced) {
         this.emit({
           count: 3,
@@ -900,6 +920,7 @@ export class SelectScene implements Scene {
         name: p.name,
         local: p.local,
         onPad: this.game.input.source(p.slot)?.kind === 'gamepad',
+        seat: p.seat,
       })),
       mapIndex,
       seed,
@@ -942,6 +963,8 @@ export class SelectScene implements Scene {
         local: true,
         color: c.color,
         name: mine?.name ?? `Player ${c.seat + 1}`,
+        // Online the room's slot IS the player number; offline the seat is.
+        seat: this.online ? c.slot : c.seat,
       });
     }
 
@@ -953,8 +976,9 @@ export class SelectScene implements Scene {
           slot: p.slot,
           dwarfId: p.dwarfId,
           local: false,
-          color: CURSOR_COLORS[p.slot % CURSOR_COLORS.length],
+          color: playerColor(p.slot),
           name: p.name,
+          seat: p.slot,
         });
       }
     }
@@ -994,75 +1018,101 @@ export class SelectScene implements Scene {
 
   private drawBackdrop(ctx: C2D, t: number): void {
     const g = ctx.createLinearGradient(0, 0, 0, VIEW_H);
-    g.addColorStop(0, '#0a0b14');
-    g.addColorStop(0.55, '#12101f');
-    g.addColorStop(1, '#07070c');
+    g.addColorStop(0, '#120e0c');
+    g.addColorStop(0.6, '#0e0b0a');
+    g.addColorStop(1, '#090706');
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, VIEW_W, VIEW_H);
 
-    // Hazard chevrons crawling behind everything, because this is a warehouse
+    // Hazard chevrons crawling behind everything, because this is a locker room
     // and somebody is about to get hit with a chair.
     ctx.save();
-    ctx.globalAlpha = 0.05;
-    ctx.fillStyle = ACCENT;
-    const off = (t * 0.35) % 56;
+    ctx.globalAlpha = 0.035;
+    const off = this.game.save.settings.reducedMotion ? 0 : (t * 0.3) % 56;
     for (let x = -80; x < VIEW_W + 80; x += 56) {
-      poly(
-        ctx,
-        [x + off, VIEW_H, x + off + 26, 0, x + off + 44, 0, x + off + 18, VIEW_H],
-        ACCENT,
-        'none',
-        0,
-      );
+      poly(ctx, [x + off, VIEW_H, x + off + 26, 0, x + off + 44, 0, x + off + 18, VIEW_H], GOLD, 'none', 0);
     }
+    ctx.restore();
+
+    // The preview's light: a warm cone from above onto the spot he stands on,
+    // tinted by his own jacket so every dwarf brings his colour on stage.
+    const d = this.previewDwarf;
+    const cx = STAGE.x + STAGE.w * 0.5;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const cone = ctx.createLinearGradient(0, 0, 0, FLOOR_Y);
+    cone.addColorStop(0, 'rgba(255,190,90,0)');
+    cone.addColorStop(1, 'rgba(255,190,90,0.10)');
+    ctx.fillStyle = cone;
+    ctx.beginPath();
+    ctx.moveTo(cx - 34, 0);
+    ctx.lineTo(cx + 34, 0);
+    ctx.lineTo(cx + 104, FLOOR_Y + 4);
+    ctx.lineTo(cx - 104, FLOOR_Y + 4);
+    ctx.closePath();
+    ctx.fill();
+    const glow = ctx.createRadialGradient(cx, FLOOR_Y - 70, 10, cx, FLOOR_Y - 70, 150);
+    glow.addColorStop(0, `${d.style.jacketAccent}2e`);
+    glow.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(STAGE.x - 20, STAGE.y - 20, STAGE.w + 40, STAGE.h + 40);
     ctx.restore();
   }
 
   private drawHeader(ctx: C2D): void {
-    setFont(ctx, 13, 900, true);
-    tracked(ctx, 'CHOOSE YOUR FIGHTER', 12, 17, 2.2, PAPER);
+    inkText(ctx, 'CHOOSE YOUR FIGHTER', 14, 24, 17, PAPER, { weight: 900, italic: true, shadow: 1.6 });
 
-    setFont(ctx, 8, 700, false);
     const net = this.game.net;
     const right = this.online && net
       ? `ONLINE · ${net.players.length} IN THE ROOM`
       : this.cursors.length > 1
-        ? `LOCAL · ${this.cursors.length} PLAYERS`
-        : 'SINGLE PLAYER';
-    label(ctx, right, VIEW_W - 12, 16, this.online ? GOLD : FAINT, 'right');
+        ? `SAME SCREEN · ${this.cursors.length} PLAYERS`
+        : 'STORY · MAP ' + String(this.mapIndex).padStart(2, '0');
+    ctx.font = displayFont(9, 800);
+    const w = ctx.measureText(right).width + 18;
+    slab(ctx, VIEW_W - 14 - w, 11, w, 14, 4, this.online ? GOLD : PALETTE.coal3, INK, 1.2);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = this.online ? PALETTE.onLamp : DIM;
+    ctx.fillText(right, VIEW_W - 14 - w * 0.5 + 2, 21.5);
 
-    ctx.fillStyle = OUTLINE;
-    ctx.fillRect(12, 21, VIEW_W - 24, 1);
+    // A lamp-gold hairline under the title, broken by a slab of the same.
+    ctx.fillStyle = PALETTE.line;
+    ctx.fillRect(14, 30, VIEW_W - 28, 1);
+    slab(ctx, 14, 29, 64, 3, 2, GOLD);
   }
 
   private drawStage(ctx: C2D, alpha: number): void {
     const d = this.previewDwarf;
     const st = this.previewStyle;
-
-    roundRect(ctx, STAGE.x, STAGE.y, STAGE.w, STAGE.h, 6, SURFACE, OUTLINE, 1);
+    const cx = STAGE.x + STAGE.w * 0.5;
 
     ctx.save();
     ctx.beginPath();
-    ctx.rect(STAGE.x + 1, STAGE.y + 1, STAGE.w - 2, STAGE.h - 2);
+    ctx.rect(STAGE.x - 8, STAGE.y, STAGE.w + 16, STAGE.h);
     ctx.clip();
 
-    // The dwarf's own name, enormous and ghostly, behind him.
-    setFont(ctx, 44, 900, true);
-    ctx.globalAlpha = 0.07;
-    label(ctx, d.name, STAGE.x + STAGE.w * 0.5, 150, PAPER, 'center');
-    ctx.globalAlpha = 1;
+    // His name, enormous, outlined and leaning, behind him. Fitted to the stage
+    // width so PATIENT ZERO is not cut in half like SAWBONES used to be.
+    const nameSize = Math.min(64, fitSize(ctx, d.name, STAGE.w - 6, 900, true));
+    ctx.font = displayFont(nameSize, 900, true);
+    ctx.textAlign = 'center';
+    ctx.lineWidth = 1.4;
+    ctx.strokeStyle = 'rgba(244,236,223,0.13)';
+    ctx.strokeText(d.name, cx, STAGE.y + 104);
+    ctx.fillStyle = 'rgba(244,236,223,0.035)';
+    ctx.fillText(d.name, cx, STAGE.y + 104);
 
-    // Backlight, and the pool of light he is standing in.
-    const cx = STAGE.x + STAGE.w * 0.5;
-    const glow = ctx.createRadialGradient(cx, 150, 8, cx, 150, 130);
-    glow.addColorStop(0, `${d.style.jacketAccent}33`);
-    glow.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = glow;
-    ctx.fillRect(STAGE.x, STAGE.y, STAGE.w, STAGE.h);
-
-    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    // The spot on the floor.
+    const pool = ctx.createRadialGradient(cx, FLOOR_Y + 2, 4, cx, FLOOR_Y + 2, 86);
+    pool.addColorStop(0, 'rgba(255,200,120,0.22)');
+    pool.addColorStop(1, 'rgba(255,200,120,0)');
+    ctx.fillStyle = pool;
     ctx.beginPath();
-    ctx.ellipse(cx, FLOOR_Y + 2, 62, 11, 0, 0, TAU);
+    ctx.ellipse(cx, FLOOR_Y + 2, 86, 16, 0, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.beginPath();
+    ctx.ellipse(cx, FLOOR_Y + 2, 50, 8, 0, 0, TAU);
     ctx.fill();
 
     if (st) {
@@ -1087,7 +1137,7 @@ export class SelectScene implements Scene {
     if (this.flashAlpha > 0.004) {
       ctx.globalAlpha = clamp(this.flashAlpha, 0, 1);
       ctx.fillStyle = this.flashColor;
-      ctx.fillRect(STAGE.x, STAGE.y, STAGE.w, STAGE.h);
+      ctx.fillRect(STAGE.x - 8, STAGE.y, STAGE.w + 16, STAGE.h);
       ctx.globalAlpha = 1;
     }
 
@@ -1097,116 +1147,122 @@ export class SelectScene implements Scene {
   }
 
   private drawOutfitMeter(ctx: C2D, outfit: number): void {
-    const x = STAGE.x + 12;
-    const w = STAGE.w - 24;
-    const y = STAGE.y + STAGE.h - 14;
+    const x = STAGE.x + 22;
+    const w = STAGE.w - 44;
+    const y = STAGE.y + STAGE.h - 6;
 
-    setFont(ctx, 7, 700, false);
+    ctx.font = displayFont(7.5, 800);
     label(ctx, 'TUNIC', x, y - 4, FAINT);
     label(ctx, 'LEATHER', x + w, y - 4, outfit > 0.9 ? GOLD : FAINT, 'right');
 
-    roundRect(ctx, x, y, w, 4, 2, '#161a24', OUTLINE, 0.8);
+    slab(ctx, x - 0.8, y - 0.8, w + 1.6, 5.6, 2, INK);
+    slab(ctx, x, y, w, 4, 2, PALETTE.coal3);
     const fill = clamp(outfit, 0, 1) * w;
     if (fill > 1) {
       const g = ctx.createLinearGradient(x, 0, x + w, 0);
-      g.addColorStop(0, '#5f7a3c');
-      g.addColorStop(0.55, ACCENT);
+      g.addColorStop(0, '#6c7a43');
+      g.addColorStop(0.55, PALETTE.blood);
       g.addColorStop(1, GOLD);
-      ctx.fillStyle = g;
-      ctx.fillRect(x, y, fill, 4);
+      slab(ctx, x, y, fill, 4, 2, g);
     }
   }
 
   private drawInfo(ctx: C2D): void {
     const d = this.previewDwarf;
-    roundRect(ctx, INFO.x, INFO.y, INFO.w, INFO.h, 6, SURFACE, OUTLINE, 1);
+    slab(ctx, INFO.x, INFO.y, INFO.w, INFO.h, 0, 'rgba(20,17,16,0.88)', PALETTE.line, 1);
+    // Registration mark in the corner, like the DOM panels.
+    ctx.fillStyle = GOLD;
+    ctx.beginPath();
+    ctx.moveTo(INFO.x + INFO.w - 10, INFO.y);
+    ctx.lineTo(INFO.x + INFO.w, INFO.y);
+    ctx.lineTo(INFO.x + INFO.w, INFO.y + 10);
+    ctx.closePath();
+    ctx.fill();
 
-    // Name
-    setFont(ctx, 22, 900, true);
-    label(ctx, d.name, COL_L, 50, ACCENT);
-    const nameW = ctx.measureText(d.name).width;
-    ctx.fillStyle = ACCENT_DEEP;
-    ctx.fillRect(COL_L, 54, nameW, 2);
+    // Name, in whichever colour the cursor looking at him wears.
+    const hover = this.cursors.find((c) => c.index === this.previewIndex);
+    const tint = hover ? hover.color : GOLD;
+    const nameSize = Math.min(30, fitSize(ctx, d.name, INFO.w - 34, 900, true));
+    inkText(ctx, d.name, COL_L, INFO.y + 32, nameSize, tint, { weight: 900, italic: true, shadow: 2 });
 
     // The name he was christened with, struck out. He does not use it now.
-    setFont(ctx, 9, 700, false);
-    label(ctx, 'BORN AS', COL_L, 66, FAINT);
-    const tagX = COL_L + ctx.measureText('BORN AS ').width;
-    label(ctx, d.bornAs, tagX, 66, DIM);
-    const bornW = ctx.measureText(d.bornAs).width;
-    ctx.strokeStyle = ACCENT;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(tagX - 1, 63.5);
-    ctx.lineTo(tagX + bornW + 1, 63.5);
-    ctx.stroke();
+    ctx.font = displayFont(9, 800);
+    label(ctx, 'BORN AS', COL_L, INFO.y + 47, FAINT);
+    const tagX = COL_L + ctx.measureText('BORN AS ').width + 2;
+    label(ctx, d.bornAs.toUpperCase(), tagX, INFO.y + 47, DIM);
+    const bornW = ctx.measureText(d.bornAs.toUpperCase()).width;
+    ctx.fillStyle = PALETTE.blood;
+    ctx.fillRect(tagX - 1.5, INFO.y + 43.5, bornW + 3, 1.6);
 
     // Tagline
-    setFont(ctx, 10, 700, false, true);
-    label(ctx, `“${d.tagline}”`, COL_L, 82, GOLD);
+    ctx.font = textFont(10, 700, true);
+    label(ctx, `“${d.tagline}”`, COL_L, INFO.y + 64, PALETTE.lampHot);
 
     // Bio
-    setFont(ctx, 9, 400, false);
-    ctx.fillStyle = DIM;
-    const bio = wrap(ctx, d.bio, INFO.w - 24, 3);
-    for (let i = 0; i < bio.length; i++) label(ctx, bio[i], COL_L, 98 + i * 11, DIM);
+    ctx.font = textFont(8.8, 500);
+    const bio = wrap(ctx, d.bio, INFO.w - 32, 3);
+    for (let i = 0; i < bio.length; i++) label(ctx, bio[i], COL_L, INFO.y + 80 + i * 11.5, DIM);
 
-    ctx.fillStyle = OUTLINE;
-    ctx.fillRect(COL_L, 132, INFO.w - 24, 1);
+    ctx.fillStyle = PALETTE.line;
+    ctx.fillRect(COL_L, INFO.y + 116, INFO.w - 32, 1);
 
     this.drawStats(ctx, d);
     this.drawSuper(ctx, d);
   }
 
   private drawStats(ctx: C2D, d: DwarfDef): void {
-    setFont(ctx, 8, 900, true);
-    tracked(ctx, 'FRAME DATA', COL_L, 146, 1.6, FAINT);
+    const top = INFO.y + 132;
+    ctx.font = displayFont(8, 800);
+    trackedText(ctx, 'PROFILE', COL_L, top, 2, GOLD);
 
-    const barX = COL_L + 54;
-    const barW = 108;
+    const barX = COL_L + 50;
+    const segs = 10;
+    const segW = 12;
+    const segGap = 2;
     for (let i = 0; i < STATS.length; i++) {
       const s = STATS[i];
-      const y = 158 + i * 14;
-      setFont(ctx, 8, 700, false);
-      label(ctx, s.label, COL_L, y + 5, DIM);
+      const y = top + 9 + i * 14;
+      ctx.font = displayFont(9, 800);
+      label(ctx, s.label, COL_L, y + 6.5, PAPER);
 
       const v = clamp((s.read(d) - s.min) / (s.max - s.min), 0, 1);
-      const pips = 12;
-      const on = Math.max(1, Math.round(v * pips));
-      for (let p = 0; p < pips; p++) {
-        const px = barX + p * (barW / pips);
+      const on = Math.max(1, Math.round(v * segs));
+      for (let p = 0; p < segs; p++) {
+        const px = barX + p * (segW + segGap);
         const lit = p < on;
-        ctx.fillStyle = lit ? (p >= pips - 3 ? GOLD : ACCENT) : '#1d2230';
-        ctx.fillRect(px, y, barW / pips - 1.6, 6);
+        slab(ctx, px, y, segW, 7, 2.5, lit ? (p >= segs - 2 ? PALETTE.lampHot : GOLD) : PALETTE.coal3);
       }
     }
   }
 
   private drawSuper(ctx: C2D, d: DwarfDef): void {
-    setFont(ctx, 8, 900, true);
-    tracked(ctx, 'SUPER', COL_R, 146, 1.6, FAINT);
+    const top = INFO.y + 132;
+    ctx.font = displayFont(8, 800);
+    trackedText(ctx, 'SUPER', COL_R, top, 2, GOLD);
 
     // A little charged glyph so the block reads as the special thing it is.
-    burst(ctx, COL_R + 168, 143, 7, 7, ACCENT_DEEP, this.frame * 0.02);
-    star(ctx, COL_R + 168, 143, 4, 5, GOLD, 'none');
+    burst(ctx, COL_R + 156, top - 3, 6.5, 7, PALETTE.bloodDeep, this.frame * 0.02);
+    star(ctx, COL_R + 156, top - 3, 3.8, 5, PALETTE.lampHot, 'none');
 
-    setFont(ctx, 12, 900, true);
-    label(ctx, d.super.name, COL_R, 162, GOLD);
+    const nm = d.super.name.toUpperCase();
+    const sz = Math.min(13, fitSize(ctx, nm, INFO.w - (COL_R - INFO.x) - 14, 900, true));
+    inkText(ctx, nm, COL_R, top + 17, sz, PAPER, { weight: 900, italic: true, shadow: 1.4 });
 
-    setFont(ctx, 8.5, 400, false);
-    const lines = wrap(ctx, d.super.description, 184, 4);
-    for (let i = 0; i < lines.length; i++) label(ctx, lines[i], COL_R, 176 + i * 10, DIM);
+    ctx.font = textFont(8.2, 500);
+    const lines = wrap(ctx, d.super.description, INFO.w - (COL_R - INFO.x) - 14, 4);
+    for (let i = 0; i < lines.length; i++) label(ctx, lines[i], COL_R, top + 30 + i * 10, DIM);
 
     // Signature weapon chip
     const weapon = WEAPONS[d.signatureWeapon];
-    setFont(ctx, 7, 900, true);
-    tracked(ctx, 'SIGNATURE WEAPON', COL_R, 220, 1.4, FAINT);
-
-    setFont(ctx, 8, 700, false);
+    const cy = INFO.y + INFO.h - 15;
+    ctx.font = displayFont(7.5, 800);
+    trackedText(ctx, 'CARRIES', COL_R, cy + 3, 1.4, FAINT);
+    const lx = COL_R + ctx.measureText('CARRIES').width + 14;
+    ctx.font = displayFont(9, 800);
     const wname = weapon.name.toUpperCase();
     const w = ctx.measureText(wname).width + 16;
-    roundRect(ctx, COL_R, 226, w, 15, 7.5, '#171c28', OUTLINE, 1);
-    label(ctx, wname, COL_R + 8, 237, weapon.damageScale >= 1.8 ? ACCENT : DIM);
+    slab(ctx, lx, cy - 7, w, 14, 3, PALETTE.coal3, PALETTE.lineStrong, 1);
+    label(ctx, wname, lx + 9, cy + 3.4, weapon.damageScale >= 1.8 ? PALETTE.bloodHot : PAPER);
   }
 
   private drawRoster(ctx: C2D): void {
@@ -1231,7 +1287,8 @@ export class SelectScene implements Scene {
       const bump = hovering.reduce((m, c) => Math.max(m, c.bump), 0);
       // Up on the press, back down on the release — a half sine, no discontinuity.
       const lift = bump > 0 ? Math.sin((bump / BUMP_FRAMES) * Math.PI) * 3.5 : 0;
-      const y = ROSTER_Y - lift;
+      const y = ROSTER_Y - lift - (hovering.length > 0 ? 3 : 0);
+      const focus = i === this.previewIndex;
 
       const edge =
         lockedBy.length > 0
@@ -1240,129 +1297,206 @@ export class SelectScene implements Scene {
             ? hovering[0].color
             : remote.has(d.id)
               ? REMOTE_COLOR
-              : OUTLINE;
+              : PALETTE.line;
 
-      roundRect(ctx, x, y, CARD_W, CARD_H, 5, i === this.previewIndex ? '#141a26' : '#0b0e15', edge, hovering.length + lockedBy.length > 0 ? 1.6 : 1);
+      // Card: a leaning slab, his jacket colour bleeding up from the bottom.
+      const bg = ctx.createLinearGradient(0, y, 0, y + CARD_H);
+      bg.addColorStop(0, focus ? '#2a221d' : '#1a1513');
+      bg.addColorStop(1, focus ? `${d.style.jacketAccent}55` : '#120f0d');
+      slab(ctx, x, y, CARD_W, CARD_H, CARD_LEAN, bg, INK, 2.4);
+      const active = hovering.length + lockedBy.length > 0;
+      if (active) slab(ctx, x, y, CARD_W, CARD_H, CARD_LEAN, 'rgba(0,0,0,0)', edge, 2);
 
       ctx.save();
       ctx.beginPath();
-      ctx.rect(x + 1, y + 1, CARD_W - 2, CARD_H - 2);
+      ctx.moveTo(x + CARD_LEAN + 1, y + 1);
+      ctx.lineTo(x + CARD_W + CARD_LEAN - 1, y + 1);
+      ctx.lineTo(x + CARD_W - 1, y + CARD_H - 1);
+      ctx.lineTo(x + 1, y + CARD_H - 1);
+      ctx.closePath();
       ctx.clip();
 
       // Locked cards show the finished article; the rest are still in the tunic.
+      // Cropped to head and shoulders: at card size a whole dwarf is a smudge,
+      // and the hat and the face are what tell the seven apart.
       const style: RigStyle = { ...d.style, outfit: lockedBy.length > 0 ? 1 : 0.08 };
       const pose = sampleClip(clipOf(lockedBy.length > 0 ? 'victory' : 'idle'), this.frame + i * 13);
-      drawCharacter(ctx, style, pose, DWARF_SKELETON, x + CARD_W * 0.5, y + 62, 1, {
-        scale: 0.95,
-        alpha: i === this.previewIndex ? 1 : 0.78,
-        tint: i === this.previewIndex ? undefined : '#9aa0b4',
+      drawCharacter(ctx, style, pose, DWARF_SKELETON, x + CARD_W * 0.5 + 3, y + CARD_H + 28, 1, {
+        scale: 1.55,
+        tint: focus || active ? undefined : '#8c8590',
       });
       ctx.restore();
 
-      // Name band
-      ctx.fillStyle = 'rgba(6,7,10,0.86)';
-      ctx.fillRect(x + 1, y + CARD_H - 15, CARD_W - 2, 14);
-      setFont(ctx, 8, 900, true);
+      // Name band along the foot of the card.
+      slab(ctx, x + 1, y + CARD_H - 15, CARD_W - 2, 14, 2.6, 'rgba(12,10,9,0.9)');
+      ctx.font = displayFont(CARD_W < 80 ? 8.5 : 9.5, 800);
       label(
         ctx,
         d.name,
-        x + CARD_W * 0.5,
-        y + CARD_H - 5,
-        lockedBy.length > 0 ? GOLD : i === this.previewIndex ? PAPER : DIM,
+        x + CARD_W * 0.5 + 1,
+        y + CARD_H - 4.5,
+        lockedBy.length > 0 ? lockedBy[0].color : focus ? PAPER : DIM,
         'center',
       );
 
-      // Cursor chevrons above the card, one per player looking at it.
-      let cx = x + 6;
+      // Cursor tags above the card, one per player looking at it.
+      let tx = x + CARD_LEAN + 4;
       for (const c of hovering) {
-        const bounce = c.locked ? 0 : Math.sin(this.frame * 0.16 + c.seat) * 1.4;
-        if (c.locked === d.id) {
-          roundRect(ctx, cx, y - 8 + bounce, 12, 6, 2, c.color, '#141019', 1);
-          setFont(ctx, 5, 900, true);
-          label(ctx, `P${c.seat + 1}`, cx + 6, y - 3.4 + bounce, '#141019', 'center');
-        } else {
-          poly(
-            ctx,
-            [cx, y - 3 + bounce, cx + 10, y - 3 + bounce, cx + 5, y + 3 + bounce],
-            c.color,
-            '#141019',
-            1,
-          );
-        }
-        cx += 14;
+        const bounce = c.locked ? 0 : Math.sin(this.frame * 0.16 + c.seat) * 1.2;
+        const tag = c.locked === d.id ? `P${c.seat + 1} ✓` : `P${c.seat + 1}`;
+        ctx.font = displayFont(7.5, 800);
+        const tw = ctx.measureText(tag).width + 9;
+        slab(ctx, tx, y - 11 + bounce, tw, 10, 2.5, c.color, INK, 1.2);
+        ctx.textAlign = 'center';
+        ctx.fillStyle = INK;
+        ctx.fillText(tag, tx + tw * 0.5 + 1, y - 3.2 + bounce);
+        tx += tw + 3;
       }
 
       // Remote picks live on the right of the same strip.
       const rem = remote.get(d.id);
       if (rem) {
-        let rx = x + CARD_W - 8;
+        let rx = x + CARD_W + CARD_LEAN - 8;
         for (const p of rem) {
           ctx.fillStyle = REMOTE_COLOR;
           ctx.beginPath();
-          ctx.arc(rx, y - 4, 4, 0, TAU);
+          ctx.arc(rx, y - 6, 4.5, 0, TAU);
           ctx.fill();
-          setFont(ctx, 5, 900, true);
-          label(ctx, String(p.slot + 1), rx, y - 2, '#141019', 'center');
-          rx -= 10;
+          ctx.font = displayFont(6.5, 800);
+          label(ctx, String(p.slot + 1), rx, y - 3.6, INK, 'center');
+          rx -= 11;
         }
       }
     }
   }
 
   private drawFooter(ctx: C2D): void {
-    setFont(ctx, 7.5, 700, false);
+    const y = VIEW_H - 9;
     if (this.status) {
-      label(ctx, this.status, 12, 354, GOLD);
+      ctx.font = displayFont(9, 800);
+      label(ctx, this.status.toUpperCase(), 14, y + 3, GOLD);
     } else {
-      label(
-        ctx,
-        '◄ ►  CHOOSE     LIGHT / JUMP  LOCK IN     HEAVY  BACK     DOWN  WATCH IT AGAIN',
-        12,
-        354,
-        FAINT,
-      );
+      // The real keys, named the way this keyboard names them — or the pad's
+      // own letters, if a pad is what this player last pressed.
+      const pad = this.cursors[0] ? this.game.input.source(this.cursors[0].slot)?.kind === 'gamepad' : false;
+      const k = (bit: number, fallback: string): string => this.keyName(bit, fallback);
+      const items = touchActive()
+        ? [
+            { keys: ['TAP'], verb: 'CHOOSE' },
+            { keys: ['TAP AGAIN'], verb: 'LOCK IN' },
+            { keys: ['‹'], verb: 'BACK' },
+          ]
+        : pad
+        ? [
+            { keys: ['◀', '▶'], verb: 'CHOOSE' },
+            { keys: ['A'], verb: 'LOCK IN' },
+            { keys: ['B'], verb: 'BACK' },
+            { keys: ['▼'], verb: 'WATCH AGAIN' },
+          ]
+        : [
+            { keys: [k(Btn.Left, '◀'), k(Btn.Right, '▶')], verb: 'CHOOSE' },
+            { keys: ['Enter', k(Btn.Light, 'F')], verb: 'LOCK IN' },
+            { keys: ['Esc'], verb: 'BACK' },
+            { keys: [k(Btn.Down, '▼')], verb: 'WATCH AGAIN' },
+          ];
+      hintRow(ctx, items, 14, y, 6.5);
     }
 
     const picked = this.cursors.filter((c) => c.locked).length;
-    label(
-      ctx,
-      `${picked} / ${this.cursors.length} READY`,
-      VIEW_W - 12,
-      354,
-      picked === this.cursors.length ? GOLD : FAINT,
-      'right',
-    );
+    const all = picked === this.cursors.length;
+    ctx.font = displayFont(9, 800);
+    label(ctx, `${picked} / ${this.cursors.length} READY`, VIEW_W - 14, y + 3, all ? GOLD : FAINT, 'right');
+  }
+
+  /** What the first local player's key for an action actually says. */
+  private keyName(bit: number, fallback: string): string {
+    const c = this.cursors[0];
+    const slot = c ? (c.slot <= 1 ? c.slot : 0) : 0;
+    const map = this.game.save.settings.bindings[slot] ?? DEFAULT_BINDINGS[slot] ?? DEFAULT_BINDINGS[0];
+    const code = codeForBit(map, bit);
+    return code ? keyLabel(code) : fallback;
   }
 
   private drawLaunch(ctx: C2D): void {
     const t = 1 - this.launch / LAUNCH_FRAMES;
     ctx.save();
-    ctx.globalAlpha = 0.82 * easeOut(clamp(t * 4, 0, 1));
-    ctx.fillStyle = '#040508';
-    ctx.fillRect(0, ROSTER_Y - 14, VIEW_W, VIEW_H - ROSTER_Y + 14);
-    ctx.globalAlpha = 1;
+    const open = easeOut(clamp(t * 4, 0, 1));
+    band(ctx, VIEW_W, ROSTER_Y + CARD_H * 0.5, CARD_H + 18, open, 'rgba(12,10,9,0.92)');
 
     const pop = easeOutBack(clamp(t * 3, 0, 1));
-    setFont(ctx, 26 * pop + 2, 900, true);
-    ctx.textAlign = 'center';
-    ctx.lineWidth = 5;
-    ctx.lineJoin = 'round';
-    ctx.strokeStyle = '#141019';
-    ctx.strokeText('HI HO', VIEW_W * 0.5, ROSTER_Y + 34);
-    ctx.fillStyle = GOLD;
-    ctx.fillText('HI HO', VIEW_W * 0.5, ROSTER_Y + 34);
+    ctx.globalAlpha = clamp(open * 1.4, 0, 1);
+    inkText(ctx, 'HI HO', VIEW_W * 0.5, ROSTER_Y + 40, 12 + 22 * pop, GOLD, {
+      align: 'center',
+      weight: 900,
+      italic: true,
+      shadow: 2.4,
+    });
 
-    setFont(ctx, 9, 700, false);
-    label(
+    ctx.font = displayFont(9, 800);
+    const left = TOTAL_MAPS - this.mapIndex + 1;
+    trackedText(
       ctx,
-      `MAP ${this.mapIndex} — SEVENTY BETWEEN YOU AND HIM`,
+      `MAP ${String(this.mapIndex).padStart(2, '0')}  ·  ${left} BETWEEN YOU AND HIM`,
       VIEW_W * 0.5,
-      ROSTER_Y + 52,
+      ROSTER_Y + 58,
+      1.6,
       DIM,
       'center',
     );
     ctx.restore();
   }
+
+  // ── Pointer ────────────────────────────────────────────────────────────────
+
+  /**
+   * Mouse and touch. The screen was controller-only, which was right for four
+   * players on a couch and wrong for the person who opened a link and reached
+   * for the mouse: click a card to look at him, click him again to take him.
+   * Drives the first local cursor only — a pointer has no seat of its own.
+   */
+  private readonly onPointer = (e: PointerEvent): void => {
+    if (this.launched || e.button !== 0) return;
+    const c = this.cursors[0];
+    if (!c) return;
+    const rect = this.game.canvas.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) return;
+    const vx = ((e.clientX - rect.left) / rect.width) * VIEW_W;
+    const vy = ((e.clientY - rect.top) / rect.height) * VIEW_H;
+
+    for (let i = 0; i < DWARFS.length; i++) {
+      const x = ROSTER_X + i * (CARD_W + CARD_GAP);
+      if (vy < ROSTER_Y - 12 || vy > ROSTER_Y + CARD_H) continue;
+      // The card leans, so its left edge moves with height.
+      const lean = CARD_LEAN * (1 - (vy - ROSTER_Y) / CARD_H);
+      if (vx < x + lean || vx > x + CARD_W + lean) continue;
+      e.preventDefault();
+      if (c.locked) {
+        if (c.locked !== DWARFS[i].id) this.unlock(c);
+        else return;
+      }
+      if (c.index === i) this.lock(c);
+      else {
+        c.index = i;
+        c.bump = BUMP_FRAMES;
+        this.game.audio.play('ui_move');
+        this.refreshPreview(i, false);
+      }
+      return;
+    }
+
+    // A tap on the dwarf himself takes him, too.
+    if (vx >= STAGE.x && vx <= STAGE.x + STAGE.w && vy >= STAGE.y && vy <= STAGE.y + STAGE.h) {
+      e.preventDefault();
+      if (!c.locked) this.lock(c);
+    }
+  };
+}
+
+/** The largest display size at which `s` fits in `maxW`. */
+function fitSize(ctx: C2D, s: string, maxW: number, weight: number, italic: boolean): number {
+  ctx.font = displayFont(100, weight, italic);
+  const w = ctx.measureText(s).width;
+  return w > 0 ? (100 * maxW) / w : 100;
 }
 
 /** Convenience for the fight scene: resolve a pick back to its definition. */
